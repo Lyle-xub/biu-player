@@ -25,6 +25,8 @@ contextBridge.exposeInMainWorld('bili', {
   // 本地数据仓（likes / 自建歌单 / 历史）：主进程 JSON 文件，带原子写入与 .bak
   storeGet: (key) => ipcRenderer.invoke('store:get', key),
   storeSet: (key, val) => ipcRenderer.send('store:set', key, val),
+  // 仅退出前使用同步确认，确保最后一个播放快照已落盘再销毁渲染进程。
+  playbackSave: (snapshot) => ipcRenderer.sendSync('playback:save', snapshot),
   // 窗口控制
   winMin: () => ipcRenderer.send('win:min'),
   winMax: () => ipcRenderer.send('win:max'),

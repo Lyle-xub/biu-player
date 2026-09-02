@@ -343,6 +343,89 @@ const state = {
   recommendFreshIdx: 0,
 };
 
+/* ---------- 重启续播 ---------- */
+const PLAYBACK_SESSION_KEY = 'biu-playback-session';
+let playbackSessionReady = false;
+let playbackClosing = false;
+let pendingPlaybackStart = null;
+let playbackSavedAt = 0;
+
+function savePlaybackSession(flush = false) {
+  if (!playbackSessionReady || playbackClosing) return;
+  const media = activeMedia();
+  const sound = state.current?.isLive ? liveVideo : videoModeOn() ? videoSoundMedia() : audio;
+  const pending = pendingPlaybackStart?.track === state.current ? pendingPlaybackStart : null;
+  const snapshot = BiuPlaybackSession.normalize({
+    version: 1, queue: state.queue, current: state.current, qi: state.qi, queueName: state.queueName,
+    position: pending ? pending.position : media.currentTime,
+    playing: pending ? pending.playing : !media.paused && !media.ended,
+    volume: audio.volume, muted: sound.muted, playMode,
+    videoMode: pending ? pending.videoMode : videoModeOn(), view: document.body.dataset.view,
+  });
+  store.set(PLAYBACK_SESSION_KEY, snapshot);
+  if (api.hasBridge) {
+    if (flush && window.bili.playbackSave) window.bili.playbackSave(snapshot);
+    else window.bili.storeSet?.(PLAYBACK_SESSION_KEY, snapshot);
+  }
+  playbackSavedAt = Date.now();
+}
+
+function initPlaybackSession() {
+  for (const media of [audio, video, liveVideo]) {
+    media.addEventListener('timeupdate', () => {
+      if (media === activeMedia() && Date.now() - playbackSavedAt >= 5000) savePlaybackSession();
+    });
+    for (const name of ['play', 'pause', 'seeked', 'volumechange']) {
+      media.addEventListener(name, () => savePlaybackSession());
+    }
+  }
+  window.addEventListener('beforeunload', () => {
+    savePlaybackSession(true);
+    playbackClosing = true;
+  });
+}
+
+async function restorePlaybackSession(value) {
+  const saved = BiuPlaybackSession.normalize(value);
+  if (state.current) { playbackSessionReady = true; return; }
+  if (!saved) { playbackSessionReady = true; return; }
+  state.queue = saved.queue;
+  state.qi = saved.qi;
+  state.queueName = saved.queueName;
+  playMode = saved.playMode;
+  renderMode();
+  setVolume(saved.volume);
+  audio.muted = saved.muted;
+  liveVideo.muted = saved.muted;
+  playbackSessionReady = true;
+  if (saved.current) {
+    const track = saved.qi >= 0 ? state.queue[saved.qi] : saved.current;
+    // 启动只恢复曲目、队列和时间位置，保持暂停；避免应用打开时突然出声。
+    await playTrack(track, { autoplay: false, startTime: saved.position, videoMode: saved.videoMode });
+    if (state.current !== track) return; // 用户已选了另一首，不覆盖新的状态。
+    if (document.body.dataset.view === 'playing' && saved.view !== 'playing') go(saved.view);
+  }
+  renderQueue();
+  syncToggleIcon();
+}
+
+function waitForPlaybackMetadata(media) {
+  if (media.readyState >= 1) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const finish = (error) => {
+      clearTimeout(timer);
+      media.removeEventListener('loadedmetadata', loaded);
+      media.removeEventListener('error', failed);
+      if (error) reject(error); else resolve();
+    };
+    const loaded = () => finish();
+    const failed = () => finish(new Error('无法载入上次播放的媒体'));
+    const timer = setTimeout(() => finish(new Error('恢复播放进度超时，请点击播放重试')), 12000);
+    media.addEventListener('loadedmetadata', loaded, { once: true });
+    media.addEventListener('error', failed, { once: true });
+  });
+}
+
 /* ---------- B 站登录：扫码 + 官方验证码页 ---------- */
 let authState = { isLogin: false };
 let authRequest = null;
@@ -907,6 +990,7 @@ function cyclePlayMode() {
   const order = ['loop', 'one', 'shuffle'];
   playMode = order[(order.indexOf(playMode) + 1) % order.length];
   store.set('biu-playmode', playMode);
+  savePlaybackSession();
   renderMode();
   toast(MODES[playMode]);
 }
@@ -1745,6 +1829,7 @@ function renderQueue() {
     '<div class="list-hint">队列为空，去歌单里挑几首吧</div>';
   $('qlist').querySelectorAll('.qrow').forEach((el) =>
     el.addEventListener('click', () => playIndex(+el.dataset.qi)));
+  savePlaybackSession();
 }
 
 /* ---------- 播放 ---------- */
@@ -1755,9 +1840,12 @@ async function playIndex(i) {
   renderQueue();
 }
 
-async function playTrack(t) {
+async function playTrack(t, options = {}) {
   recordHistory(t);
-  const keepVideoMode = videoModeOn();
+  const keepVideoMode = options.videoMode ?? videoModeOn();
+  const autoplay = options.autoplay !== false;
+  const startTime = Number.isFinite(options.startTime) ? options.startTime : null;
+  pendingPlaybackStart = { track: t, position: startTime ?? (t.from || 0), playing: autoplay, videoMode: keepVideoMode };
   ++videoLoadToken;
   videoPreparePromise = null;
   videoPrepareKey = '';
@@ -1789,7 +1877,8 @@ async function playTrack(t) {
   go('playing');
   resetFavState();
 
-  if (t.isLive) return playLive(t);
+  savePlaybackSession();
+  if (t.isLive) return playLive(t, { autoplay });
 
   if (!api.hasBridge || !t.bvid) {
     setLyricHint('预览模式暂无歌词');
@@ -1822,24 +1911,37 @@ async function playTrack(t) {
     }
     // 分切歌单的曲目：先定位到本段起点再播放（metadata 未就绪时浏览器会挂起此次 seek，
     // 即使 play() 因网络 stalled 也不会从整曲开头播起）
-    if (t.isSegment && isFinite(t.from)) {
+    if (startTime !== null) {
+      await waitForPlaybackMetadata(audio);
+      if (state.current !== t) return;
+      audio.currentTime = BiuPlaybackSession.resumePosition(t, startTime, audio.duration);
+    } else if (t.isSegment && isFinite(t.from)) {
       try { audio.currentTime = Math.max(0, t.from); } catch (e) {}
     }
-    await audio.play();
+    if (state.current !== t) return;
+    pendingPlaybackStart = null;
+    if (autoplay) await audio.play();
+    else audio.pause();
+    if (state.current !== t) return;
+    syncProgress();
     // 3. 封面取色 + 热评 + 歌词（不阻塞播放）
     applyArtColors(t.pic);
     loadComments(t);
     loadLyrics(t);
-    if (keepVideoMode) setVideoMode(true, true);
+    if (keepVideoMode) await setVideoMode(true, true);
     else scheduleVideoWarmup(t);
+    savePlaybackSession();
   } catch (e) {
+    if (state.current !== t) return;
+    if (pendingPlaybackStart?.track === t) pendingPlaybackStart.playing = false;
+    savePlaybackSession();
     console.error(e);
     toast('播放失败：' + (e.message || e));
   }
 }
 
 // 电台直播：HLS 流（hls.js），房间队列可连续切台
-async function playLive(t) {
+async function playLive(t, { autoplay = true } = {}) {
   if (!api.hasBridge || !t.roomid) {
     setLyricHint('电台直播');
     toast('预览模式：浏览器中无法播放直播');
@@ -1866,8 +1968,11 @@ async function playLive(t) {
       hls.loadSource(url);
       hls.attachMedia(liveVideo);
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (state.current !== t) return;
+        pendingPlaybackStart = null;
         $('liveStatus').classList.add('ready');
-        liveVideo.play().catch(() => {});
+        if (autoplay) liveVideo.play().catch(() => {});
+        savePlaybackSession();
       });
       hls.on(Hls.Events.ERROR, (_e, d) => {
         if (d && d.fatal && state.current === t) {
@@ -1879,7 +1984,8 @@ async function playLive(t) {
       });
     } else if (liveVideo.canPlayType('application/vnd.apple.mpegurl')) {
       liveVideo.src = url;
-      await liveVideo.play();
+      pendingPlaybackStart = null;
+      if (autoplay) await liveVideo.play();
       $('liveStatus').classList.add('ready');
     } else {
       throw new Error('当前环境不支持 HLS 直播');
@@ -1889,6 +1995,9 @@ async function playLive(t) {
     $('hotCommentText').textContent = `${fmtNum(t.online || 0)} 人在听`;
     if (liveDmOn) startLiveDanmaku(t.roomid);
   } catch (e) {
+    if (state.current !== t) return;
+    if (pendingPlaybackStart?.track === t) pendingPlaybackStart.playing = false;
+    savePlaybackSession();
     console.error(e);
     $('liveDockMeta').textContent = `连接失败 · ${$('liveDockMeta').dataset.detail || t.up || '直播间'}`;
     toast('直播播放失败：' + (e.message || e));
@@ -2048,6 +2157,7 @@ function fillPlayingBase(t) {
   $('npSrc').textContent = t.isLive
     ? '直播 · ' + (t.area || '音乐电台')
     : '来源 · ' + (t.bvid || '本地预览');
+  $('npSrc').title = $('npSrc').textContent;
   if (t.pic) {
     $('npCover').innerHTML = `<img src="${esc(t.pic)}" alt="">`;
     $('mcArtHolder').innerHTML = `<img class="art" src="${esc(t.pic)}" alt="">
@@ -2071,6 +2181,7 @@ function fillPlayingBase(t) {
 /* 播放页详情信息（view 接口数据） */
 function fillPlayingDetail(d) {
   $('npSrc').textContent = `来源 · ${d.tname || (state.current && state.current.bvid) || 'Bilibili'}`;
+  $('npSrc').title = $('npSrc').textContent;
   if (d.pic && state.current && !state.current.pic) {
     state.current.pic = d.pic.replace(/^http:/, 'https:');
     $('npCover').innerHTML = `<img src="${esc(state.current.pic)}" alt="">`;
@@ -5118,7 +5229,9 @@ function init() {
 
 // 启动时先从主进程 JSON 仓恢复 likes / 自建歌单 / 历史；文件没有时回退 localStorage 并迁移过去
 (async () => {
+  let playbackSession = store.get(PLAYBACK_SESSION_KEY, null);
   if (api.hasBridge && window.bili.storeGet) {
+    try { playbackSession = await window.bili.storeGet(PLAYBACK_SESSION_KEY) ?? playbackSession; } catch (e) {}
     const adopt = {
       'biu-likes': (v) => { likes = v; },
       'biu-playlists': (v) => { customPlaylists = v; },
@@ -5136,4 +5249,6 @@ function init() {
     }
   }
   init();
+  initPlaybackSession();
+  await restorePlaybackSession(playbackSession);
 })();

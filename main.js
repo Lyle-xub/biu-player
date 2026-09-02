@@ -401,18 +401,28 @@ app.whenReady().then(() => {
     return biuStoreCache;
   };
   let biuStoreTimer = null;
+  const flushBiuStore = () => {
+    clearTimeout(biuStoreTimer);
+    biuStoreTimer = null;
+    if (!biuStoreCache) return true;
+    try {
+      const f = biuStoreFile();
+      const body = JSON.stringify(biuStoreCache);
+      fs.writeFileSync(f + '.tmp', body);
+      fs.renameSync(f + '.tmp', f);
+      fs.writeFileSync(f + '.bak', body);
+      return true;
+    } catch (e) { return false; }
+  };
   const scheduleBiuStoreWrite = () => {
     clearTimeout(biuStoreTimer);
-    biuStoreTimer = setTimeout(() => {
-      try {
-        const f = biuStoreFile();
-        const body = JSON.stringify(readBiuStore());
-        fs.writeFileSync(f + '.tmp', body);
-        fs.renameSync(f + '.tmp', f);
-        fs.writeFileSync(f + '.bak', body);
-      } catch (e) { /* 磁盘异常时静默，内存数据仍在 */ }
-    }, 300);
+    biuStoreTimer = setTimeout(flushBiuStore, 300);
   };
+  app.on('will-quit', flushBiuStore);
+  ipcMain.on('playback:save', (event, snapshot) => {
+    readBiuStore()['biu-playback-session'] = snapshot;
+    event.returnValue = flushBiuStore();
+  });
   ipcMain.handle('store:get', (_e, key) => {
     const v = readBiuStore()[String(key)];
     return v === undefined ? null : v;

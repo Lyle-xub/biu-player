@@ -1160,17 +1160,26 @@ body.live-on .page-down { display: none; } /* 直播页已有 liveBack，不重�
 .np-album { display: block; width: 88%; max-width: 88%; margin-top: 8px; font-size: clamp(13px, 1vw, 21px);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal;
   color: color-mix(in srgb, var(--art-1) 62%, rgba(255,255,255,.45)); letter-spacing: .035em; }
-.np-src { margin-top: var(--sp-4); display: inline-flex; align-items: center; gap: 7px;
+.np-src { margin-top: var(--sp-4); width: 100%; min-width: 0;
+  display: flex; flex-wrap: nowrap; align-items: center; gap: 10px;
   font-size: var(--fs-micro); color: var(--text-3); letter-spacing: .1em; }
+.np-src-meta { display: flex; align-items: center; gap: 7px;
+  flex: 1 1 0; min-width: 0; min-height: 32px; }
+.np-src-meta > svg { flex: none; width: 14px; height: 14px; }
+#npSrc { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.np-src-tools { display: flex; align-items: center; gap: 5px; flex: none; }
 .np-src svg { opacity: .7; }
 body:not(.video-on) .np-src { display: none; }
-/* 来源行旁的 MixSplitR 分切小按钮 */
-.np-src-split { margin-left: 6px; display: inline-flex; align-items: center; gap: 4px;
-  padding: 2px 9px; border-radius: 999px; border: 1px solid rgba(255,255,255,.14);
-  background: rgba(255,255,255,.05); color: var(--text-2); font-size: 10px;
-  letter-spacing: .08em; cursor: pointer; transition: all .25s ease; }
+/* 操作始终同排且不可压缩；窄栏只省略来源文字，不将按钮汉字拆行。 */
+.np-src-split { flex: none; min-width: 48px; height: 24px;
+  display: inline-flex; justify-content: center; align-items: center; gap: 4px;
+  padding: 0 6px; border-radius: 999px; border: 1px solid rgba(255,255,255,.14);
+  background: rgba(255,255,255,.05); color: var(--text-2); font-size: 9px; font-family: inherit;
+  white-space: nowrap; letter-spacing: .04em; cursor: pointer;
+  transition: color .2s ease, border-color .2s ease, background .2s ease; }
 .np-src-split:hover { color: #fff; border-color: rgba(251,114,153,.5); background: rgba(251,114,153,.12); }
-.np-src-split svg { opacity: .85; }
+.np-src-split svg { flex: none; width: 11px; height: 11px; opacity: .85; }
+.np-src-split:focus-visible { outline: 2px solid rgba(255,255,255,.65); outline-offset: 2px; }
 
 /* 播放页收藏：我喜欢 / 收藏夹 */
 .np-actions { position: relative; margin-top: 14px; display: flex; align-items: center; gap: 10px; }

@@ -240,8 +240,11 @@
       <h1 class="np-title" id="npTitle">未在播放</h1>
       <div class="np-album" id="npAlbum"></div>
       <div class="np-src">
+        <div class="np-src-meta">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M17.8 3H6.2A3.2 3.2 0 0 0 3 6.2v11.6A3.2 3.2 0 0 0 6.2 21h11.6a3.2 3.2 0 0 0 3.2-3.2V6.2A3.2 3.2 0 0 0 17.8 3zm-9 13.5v-9l7 4.5z"/></svg>
         <span id="npSrc">来源 · —</span>
+        </div>
+        <div class="np-src-tools" role="group" aria-label="原视频操作">
         <button type="button" class="np-src-split" id="btnSplit" title="MixSplitR 分切：把长视频按歌曲分割成歌单">
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.6"/><circle cx="6" cy="18" r="2.6"/><path d="M8.2 7.6 20 19M8.2 16.4 20 5"/></svg>
           <span>分切</span>
@@ -254,6 +257,7 @@
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V6l10-2v11"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="15" r="2.5"/></svg>
           <span>歌词</span>
         </button>
+        </div>
       </div>
       <div class="np-actions" id="npActions">
         <button type="button" class="np-fav-btn" id="btnLike" aria-pressed="false" title="我喜欢">
@@ -377,7 +381,7 @@
 
   <!-- 电台使用独立直播画面，不复用歌曲播放页。 -->
   <div class="live-stage" id="liveStage">
-    <video id="liveVideo" playsinline autoplay preload="auto" crossorigin="anonymous"></video>
+    <video id="liveVideo" playsinline preload="auto" crossorigin="anonymous"></video>
     <div class="danmaku-layer live-dm" id="liveDmLayer" aria-hidden="true"></div>
     <div class="live-loading" id="liveStatus"><span class="video-spinner"></span><b>正在连接直播…</b></div>
     <div class="live-chrome">
@@ -642,6 +646,7 @@
 
 <script src="vendor/hls.min.js"></script>
 <script src="api.js"></script>
+<script src="playback-session.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
