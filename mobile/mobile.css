@@ -1,0 +1,131 @@
+/* Biu Player · 移动端适配层（由 mobile/server.js 注入，浏览器访问才加载）
+ * 断点 860px：桌面端最小窗口 1120px，永不命中，桌面样式零影响。
+ * 原则：只覆盖布局与交互形态，不改设计语言和配色变量。
+ */
+@media (max-width: 860px) {
+
+  /* ---- 桌面专属元素 ---- */
+  .win-controls, .window-drag-region { display: none !important; }
+
+  /* ---- 顶栏紧凑化：品牌左置，返回钮 + 图标化搜索贴右缘 ---- */
+  .topbar { padding: 12px 16px; grid-template-columns: auto 1fr; column-gap: 12px; }
+  .topbar .brand { margin-left: 0; }
+  .top-right { top: 12px; right: 14px; }
+  .top-right .search { width: 40px; height: 40px; padding: 0; gap: 0;
+    justify-content: center; font-size: 0; }
+  .top-right .search svg { width: 17px; height: 17px; }
+
+  /* ---- 主导航 → 底部标签栏（图标 + 文字，贴底全宽，避让 iOS Home 指示条） ---- */
+  .topbar .seg#mainNav {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+    grid-template-columns: repeat(4, 1fr); gap: 0;
+    padding: 6px 10px calc(7px + env(safe-area-inset-bottom));
+    border-radius: 0; border: 0; border-top: 1px solid rgba(255,255,255,.09);
+    background: rgba(9,11,7,.82);
+    backdrop-filter: blur(28px) saturate(1.2); -webkit-backdrop-filter: blur(28px) saturate(1.2);
+    box-shadow: 0 -10px 32px rgba(0,0,0,.34);
+  }
+  #mainNav::before { display: none; } /* 桌面滑动指示器不用于标签栏形态 */
+  #mainNav button { display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 3px; min-width: 0; padding: 3px 0 1px;
+    font-size: 10px; letter-spacing: .1em; color: var(--text-2); }
+  #mainNav button svg { display: block; width: 21px; height: 21px; }
+  #mainNav button.on { background: transparent; box-shadow: none; color: var(--accent); font-weight: 600; }
+  #mainNav .nav-search-tab { display: flex; }
+  /* 播放页不藏导航：顶栏其余元素照旧隐藏，仅保留底部标签栏可点 */
+  body[data-view="playing"] .topbar { display: block; pointer-events: none; }
+  body[data-view="playing"] .topbar .seg#mainNav { display: grid !important; pointer-events: auto; }
+
+  /* ---- 视图容器：给顶栏与底部「播放条 + 标签栏」让位 ---- */
+  .view { padding: 68px 14px calc(152px + env(safe-area-inset-bottom)); }
+  .view-playing { padding: 0; }
+
+  /* ---- 首页轮播卡片：整体缩小 ---- */
+  .shelf { height: 330px; perspective: 720px; }
+  .shelf .card { width: clamp(200px, 60vw, 270px); }
+  .shelf-meta h2 { font-size: 20px; }
+
+  /* ---- 卡片网格 → 双栏瀑布流（标题行数不同自然形成错落高度） ---- */
+  .grid { display: block; columns: 2; column-gap: 12px; }
+  .grid .gcard { break-inside: avoid; margin-bottom: 16px; }
+  .grid .empty-guide { column-span: all; } /* 未登录引导卡片横跨两栏 */
+  .gcard .cover { border-radius: 14px; box-shadow: 0 8px 22px rgba(0,0,0,.3); }
+  .gcard h4 { min-height: 0; margin: 8px 2px 3px; font-size: 13px; }
+  .gcard p { margin-bottom: 2px; }
+  .gcard .count { right: 8px; bottom: 8px; width: auto; max-width: calc(100% - 16px);
+    min-height: 30px; padding: 4px 9px 4px 5px; gap: 5px; }
+  .gcard .count-play { width: 22px; height: 22px; }
+  .gcard .count-play svg { width: 10px; height: 10px; }
+  .gcard .count-label { font-size: 9px; letter-spacing: .02em; }
+
+  /* ---- 卡片网格（UP 主视频等）：两列起步 ---- */
+  .vgrid { grid-template-columns: repeat(auto-fill, minmax(158px, 1fr)); gap: 18px 12px; }
+
+  /* ---- 列表：去掉 UP 主列（标题里已有小字 UP 名） ---- */
+  .thead, .trow { grid-template-columns: 32px 1fr 62px 40px; gap: 10px;
+    padding-left: 8px; padding-right: 8px; }
+  .thead .up, .trow .up { display: none; }
+
+  /* ---- 底部迷你播放条：封面 + 标题 + 喜欢/播放/队列，坐到标签栏上方 ---- */
+  .progress-pill { left: 10px; right: 10px; width: auto; height: 58px;
+    bottom: calc(64px + env(safe-area-inset-bottom));
+    border-radius: 18px; transform: none; }
+  .progress-pill:hover, .progress-pill:focus-within { transform: none; }
+  .progress-pill::before { transform: scale3d(1, 1, 1); background: rgba(9,11,7,.72);
+    box-shadow: 0 14px 38px rgba(0,0,0,.3); }
+  .progress-controls { opacity: 1; transform: none; }
+  .pp-cover { display: block; pointer-events: auto; cursor: pointer; z-index: 1;
+    position: absolute; left: 9px; top: 50%; transform: translateY(-50%);
+    width: 40px; height: 40px; border-radius: 11px; object-fit: cover;
+    box-shadow: 0 4px 12px rgba(0,0,0,.3); }
+  .pp-cover[hidden] { display: none; } /* hidden 属性优先级低于 author display，需显式兜底 */
+  .progress-controls .pp-title { left: 58px; right: 148px; top: 50%; transform: translateY(-50%);
+    text-align: left; font-size: 13px; }
+  .progress-controls button.pp-play { left: auto; right: 50px; width: 38px; height: 38px; }
+  .progress-controls .pp-like { display: grid; left: auto; right: 90px; width: 34px; height: 34px; opacity: .66; }
+  .progress-controls .pp-like.on { opacity: 1; color: var(--accent); }
+  .progress-controls .pp-like.on svg { fill: currentColor; }
+  .progress-controls #ppQueue { right: 8px; }
+  .progress-controls #ppPrev, .progress-controls #ppNext, .progress-controls #ppMode { display: none; }
+  /* 进度缩成条底一条细线 */
+  .progress-main { left: 12px; right: 12px; top: auto; bottom: 0; transform: none; gap: 0; }
+  .progress-main .num { display: none; }
+  .progress-main .track { height: 2px; padding: 6px 0; }
+  .progress-main .track::before { top: 6px; bottom: 6px; background: rgba(255,255,255,.1); }
+  .progress-main .track i { top: 6px; bottom: 6px; }
+  /* 直播态：信息覆盖标题区，保留封面与播放钮 */
+  body.live-on .progress-controls { display: block !important; }
+  body.live-on .progress-controls .pp-title, body.live-on .progress-controls .pp-like { visibility: hidden; }
+  body.live-on .live-progress-info { left: 58px; right: 96px; width: auto; height: auto; padding: 0;
+    bottom: auto; top: 50%; transform: translateY(-50%); }
+  /* 右下角圆形迷你播放器 / 左下角队列钮与迷你播放条功能重复，移动端隐藏 */
+  .mini-player, .queue-btn { display: none !important; }
+
+  /* ---- 抽屉（播放队列）→ 全屏 ---- */
+  .drawer { top: 0; right: 0; bottom: 0; width: 100vw; border-radius: 0; }
+
+  /* ---- 设置弹窗 / 分切面板 / 歌词匹配面板：收窄适配 ---- */
+  .modal { width: calc(100vw - 28px); max-width: 520px; max-height: 86vh; }
+  .split-panel { width: calc(100vw - 20px); max-height: 88vh; }
+
+  /* ---- 播放页：三栏绝对定位 → 单栏纵向滚动 ---- */
+  .view-playing { overflow-y: auto; padding-bottom: calc(150px + env(safe-area-inset-bottom)); }
+  .np-left { position: static; width: auto; padding: 76px 20px 0; display: block; }
+  body.video-on .np-left { width: auto; overflow: visible; }
+  .np-cover { position: relative; right: auto; top: auto; transform: none;
+    width: min(72vw, 420px); margin: 20px auto 8px; animation: none; }
+  .np-video { position: relative; right: auto; top: auto; transform: none;
+    width: calc(100vw - 32px); margin: 12px auto 0; }
+  .lyrics { position: relative; top: 0; height: 44vh; margin-top: 14px; }
+  .np-comments { position: static; margin-top: 22px; padding-right: 0; max-width: none; }
+  .mode-seg { top: 14px; grid-template-columns: repeat(2, 96px); }
+  .mode-seg button { width: 96px; min-height: 38px; }
+  .home-btn { right: 14px; top: 12px; }
+  .page-down { right: 60px; top: 12px; }
+
+  /* ---- 搜索页：输入框撑满 ---- */
+  .search-hero .box { width: 100%; }
+
+  /* ---- 收藏弹层居中兜底，避免贴边 ---- */
+  .fav-pop { max-width: calc(100vw - 24px); }
+}

@@ -20,6 +20,10 @@ contextBridge.exposeInMainWorld('bili', {
   authQrStart: () => ipcRenderer.invoke('auth:qr-start'),
   authQrPoll: (key) => ipcRenderer.invoke('auth:qr-poll', key),
   authOpenLogin: () => ipcRenderer.send('auth:open-login'),
+  // 短信验证码登录（内置极验滑块）：取验证参数 / 发短信 / 提交验证码登录
+  authSmsCaptcha: () => ipcRenderer.invoke('auth:sms-captcha'),
+  authSmsSend: (payload) => ipcRenderer.invoke('auth:sms-send', payload),
+  authSmsLogin: (payload) => ipcRenderer.invoke('auth:sms-login', payload),
   authLogout: () => ipcRenderer.invoke('auth:logout'),
   onAuthChanged: (cb) => ipcRenderer.on('auth:changed', (_event, auth) => cb(auth)),
   // 本地数据仓（likes / 自建歌单 / 历史）：主进程 JSON 文件，带原子写入与 .bak

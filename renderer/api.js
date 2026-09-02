@@ -718,8 +718,12 @@ const api = {
   hasBridge,
 
   // Electron 自定义协议保留 Range 请求并补齐 Referer，规避媒体元素直接访问 CDN 的 CORS/403。
+  // 移动版（window.bili.mediaProxy 存在时）改走同源 /media 代理。
   media(url) {
-    return hasBridge && url ? `biu-media://stream/?url=${encodeURIComponent(url)}` : url;
+    if (!hasBridge || !url) return url;
+    return typeof window.bili.mediaProxy === 'function'
+      ? window.bili.mediaProxy(url)
+      : `biu-media://stream/?url=${encodeURIComponent(url)}`;
   },
 
   // 音乐区排行（首页推荐流不可用时的兜底列表）
@@ -859,6 +863,25 @@ const api = {
     const d = JSON.parse(r.body);
     if (d.code !== 0) throw new Error(d.code === -101 ? '请先登录 B 站账号' : (d.message || ('code ' + d.code)));
     return true;
+  },
+
+  // 上报观看记录到 B 站历史（需登录；csrf 由主进程自动补）。
+  // progress 为视频内播放进度（秒，分切段传段起点）；未登录/失败静默返回 false
+  async historyReport(t, progress = 0) {
+    if (!hasBridge || !t || t.isLive || !t.bvid) return false;
+    let aid = t.aid;
+    if (!aid) {
+      try { const v = await api.view(t.bvid); aid = v && v.aid; } catch (e) {}
+    }
+    if (!aid) return false;
+    try {
+      const r = await withApiTimeout(window.bili.post(
+        'https://api.bilibili.com/x/v2/history/report',
+        { aid, cid: t.cid || 0, progress: Math.max(0, Math.round(progress)) }),
+        8000, '观看记录上报超时');
+      if (r.status !== 200) return false;
+      return JSON.parse(r.body).code === 0;
+    } catch (e) { return false; }
   },
   // UP 主空间信息（名字 / 头像 / 签名 / 等级）
   async upInfo(mid) {

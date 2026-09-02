@@ -203,7 +203,8 @@ body[data-view="playing"] .backdrop { opacity: .22; }
   font-size: var(--fs-logo); font-weight: 700; letter-spacing: -.01em;
   cursor: pointer;
 }
-.brand-icon { width: 30px; height: 30px; flex: none; object-fit: contain; }
+.brand .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent);
+  box-shadow: 0 0 12px rgba(251,114,153,.8); flex: none; }
 .brand .gear { margin-left: var(--sp-4); width: 34px; height: 34px; border-radius: 50%;
   display: grid; place-items: center; color: var(--text-2); transition: .25s var(--ease); }
 .brand .gear:hover { background: var(--fill-hover); color: var(--text-1); }
@@ -236,6 +237,9 @@ body[data-view="playing"] .backdrop { opacity: .22; }
 body[data-view="fav"] #mainNav::before { transform: translate3d(100%,0,0); }
 body[data-view="radio"] #mainNav::before { transform: translate3d(200%,0,0); }
 body:not([data-view="library"]):not([data-view="fav"]):not([data-view="radio"]) #mainNav::before { opacity: 0; }
+/* 图标与搜索标签仅供移动端底部标签栏使用，桌面端隐藏（保持三栏滑动指示器不变） */
+#mainNav button svg { display: none; }
+#mainNav .nav-search-tab { display: none; }
 
 .search {
   justify-self: end; min-width: 0;
@@ -748,7 +752,9 @@ body[data-nav-dir="back"] .view.view-entering { animation-name: view-enter-back;
 .progress-controls button.pp-play:active { transform: translateY(-50%) scale(.92); }
 .progress-controls #ppMode { right: 58px; opacity: .62; }
 .progress-controls #ppQueue { right: 18px; opacity: .62; }
-.progress-controls #ppMode:hover, .progress-controls #ppQueue:hover { opacity: 1; }
+.progress-controls #ppMode:hover, .progress-pill #ppQueue:hover { opacity: 1; }
+/* 封面缩略图与喜欢钮仅供移动端迷你播放条，桌面端隐藏 */
+.pp-cover, .progress-controls .pp-like { display: none; }
 .progress-controls #ppMode[data-mode="one"] {
   opacity: 1; color: rgba(255,255,255,.98);
   filter: drop-shadow(0 0 5px color-mix(in srgb, var(--art-1) 65%, transparent));
@@ -1891,6 +1897,37 @@ body.panel-settings .modal-mask { display: grid; }
 .login-buttons { display: flex; justify-content: center; gap: 10px; margin-top: 20px; }
 .login-buttons .btn-primary, .login-buttons .btn-ghost { padding: 9px 16px; font-size: var(--fs-caption); }
 .login-card > small { display: block; margin-top: 18px; color: var(--text-3); line-height: 1.6; }
+
+/* 登录弹窗 Tab（扫码 / 验证码）：与全局 seg pill 同风格 */
+.login-tabs { display: flex; gap: 2px; margin: 16px auto 4px; padding: 3px; width: fit-content;
+  border-radius: var(--r-pill); background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.08); }
+.login-tabs button { border: 0; background: transparent; color: var(--text-2); font-family: inherit;
+  font-size: var(--fs-caption); letter-spacing: .08em; padding: 7px 18px; border-radius: var(--r-pill);
+  cursor: pointer; transition: .22s var(--ease); }
+.login-tabs button:hover { color: var(--text-1); }
+.login-tabs button.on { background: #fff; color: #171810; font-weight: 600; }
+.login-pane > p { color: var(--text-2); font-size: var(--fs-caption); }
+
+/* 短信验证码登录表单 */
+.sms-form { margin-top: 18px; display: flex; flex-direction: column; gap: 12px; }
+.sms-field { display: flex; align-items: center; gap: 8px; padding: 0 16px; height: 44px;
+  border-radius: var(--r-pill); background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.1);
+  transition: border-color .2s ease, background .2s ease; }
+.sms-field:focus-within { border-color: color-mix(in srgb, var(--accent) 55%, transparent); background: rgba(255,255,255,.09); }
+.sms-prefix { flex: none; color: var(--text-2); font-size: var(--fs-caption); letter-spacing: .04em; }
+.sms-field input { flex: 1; min-width: 0; border: 0; background: transparent; outline: none;
+  color: var(--text-1); font-family: inherit; font-size: var(--fs-body); letter-spacing: .04em; }
+.sms-field input::placeholder { color: var(--text-3); }
+.sms-code-row { display: flex; gap: 10px; }
+.sms-code-row .sms-field { flex: 1; }
+.sms-code-row .btn-ghost { flex: none; padding: 0 16px; height: 44px; font-size: var(--fs-micro); white-space: nowrap; }
+.sms-code-row .btn-ghost:disabled { opacity: .45; cursor: default; }
+.geetest-slot { min-height: 0; }
+.geetest-slot .geetest_holder { margin: 0 auto; }
+.sms-form > .btn-primary { height: 44px; margin-top: 2px; border-radius: var(--r-pill);
+  display: flex; align-items: center; justify-content: center; text-indent: .12em;
+  font-size: var(--fs-caption); letter-spacing: .12em; }
+.sms-form > .btn-primary:disabled { opacity: .55; cursor: default; }
 
 /* 收藏夹未登录引导卡片 */
 .empty-guide {

@@ -37,6 +37,7 @@ const settings = {
   vq: normalizedVideoQuality,                // B 站视频清晰度 qn，默认 1080P
   danmaku: store.get('biu-danmaku', 1),      // 视频模式弹幕
   blur: store.get('biu-blur', 0),            // 背景模糊 0-40px
+  syncHistory: store.get('biu-sync-history', 0), // 播放时把观看记录上报到 B 站历史
 };
 let deskLyricOn = !!store.get('biu-desklyric', 0) && (typeof window.bili !== 'undefined');
 
@@ -400,10 +401,10 @@ async function restorePlaybackSession(value) {
   playbackSessionReady = true;
   if (saved.current) {
     const track = saved.qi >= 0 ? state.queue[saved.qi] : saved.current;
-    // 启动只恢复曲目、队列和时间位置，保持暂停；避免应用打开时突然出声。
-    await playTrack(track, { autoplay: false, startTime: saved.position, videoMode: saved.videoMode });
+    // 启动只恢复曲目、队列和时间位置，保持暂停并停在主页；
+    // 避免应用打开时跳进播放页或突然出声。
+    await playTrack(track, { autoplay: false, startTime: saved.position, videoMode: saved.videoMode, keepView: true });
     if (state.current !== track) return; // 用户已选了另一首，不覆盖新的状态。
-    if (document.body.dataset.view === 'playing' && saved.view !== 'playing') go(saved.view);
   }
   renderQueue();
   syncToggleIcon();
@@ -432,6 +433,64 @@ let authRequest = null;
 let qrKey = '';
 let qrPollTimer = null;
 
+/* ---------- 本地数据按账号隔离：喜欢 / 自建歌单 / 历史随登录账号切换 ----------
+   游客数据在无后缀键，登录后用 base@mid；首次登录把游客数据拷进空账号桶，老用户不丢数据 */
+let dataNs = '';
+const dataKey = (base) => (dataNs ? `${base}@${dataNs}` : base);
+
+async function loadBuckets() {
+  const adopt = {
+    'biu-likes': (v) => { likes = v; },
+    'biu-playlists': (v) => { customPlaylists = v; },
+    'biu-history': (v) => { playHistory = v; },
+  };
+  for (const base of Object.keys(adopt)) {
+    const k = dataKey(base);
+    try {
+      let v = api.hasBridge && window.bili.storeGet ? await window.bili.storeGet(k) : null;
+      if (v == null) {
+        const legacy = localStorage.getItem(k);
+        if (legacy != null) {
+          v = JSON.parse(legacy);
+          if (api.hasBridge && window.bili.storeSet) window.bili.storeSet(k, v);
+        }
+      }
+      adopt[base](Array.isArray(v) ? v : []);
+    } catch (e) {}
+  }
+}
+
+async function switchDataNs(ns) {
+  if (ns === dataNs) return;
+  const prev = dataNs;
+  dataNs = ns;
+  if (ns && !prev) {
+    // 游客 → 登录：账号桶为空时把游客数据拷过去（不搬动，游客数据保留）
+    for (const base of ['biu-likes', 'biu-playlists', 'biu-history']) {
+      try {
+        const to = `${base}@${ns}`;
+        let existing = api.hasBridge && window.bili.storeGet ? await window.bili.storeGet(to) : null;
+        if (existing == null) {
+          const raw = localStorage.getItem(to);
+          existing = raw != null ? JSON.parse(raw) : null;
+        }
+        if (existing != null) continue;
+        let val = api.hasBridge && window.bili.storeGet ? await window.bili.storeGet(base) : null;
+        if (val == null) {
+          const raw = localStorage.getItem(base);
+          val = raw != null ? JSON.parse(raw) : null;
+        }
+        if (val == null) continue;
+        try { localStorage.setItem(to, JSON.stringify(val)); } catch (e) {}
+        if (api.hasBridge && window.bili.storeSet) window.bili.storeSet(to, val);
+      } catch (e) {}
+    }
+  }
+  await loadBuckets();
+  try { await loadLibrary(); } catch (e) {}
+  renderFavButtons();
+}
+
 function renderAuth(auth = authState) {
   authState = auth || { isLogin: false };
   if (!$('authLoggedOut')) return;
@@ -442,6 +501,9 @@ function renderAuth(auth = authState) {
     $('authName').textContent = authState.uname || '已登录';
     $('authFace').src = authState.face || '';
   }
+  // 喜欢 / 自建歌单 / 历史随账号切换（游客 ↔ mid 命名空间）
+  const ns = authState.isLogin && authState.mid ? String(authState.mid) : '';
+  if (ns !== dataNs) switchDataNs(ns).catch(() => {});
 }
 
 async function ensureAuth(force = false) {
@@ -460,6 +522,19 @@ function hideQrLogin() {
   clearTimeout(qrPollTimer);
   qrPollTimer = null;
   qrKey = '';
+  resetSmsLogin();
+}
+
+// 登录弹窗 Tab：扫码 / 验证码。切到扫码时重新生成二维码，离开时停轮询
+function switchLoginTab(tab) {
+  $('tabQrLogin').classList.toggle('on', tab === 'qr');
+  $('tabSmsLogin').classList.toggle('on', tab === 'sms');
+  $('tabQrLogin').setAttribute('aria-selected', String(tab === 'qr'));
+  $('tabSmsLogin').setAttribute('aria-selected', String(tab === 'sms'));
+  $('paneQr').hidden = tab !== 'qr';
+  $('paneSms').hidden = tab !== 'sms';
+  if (tab === 'qr') refreshQrLogin();
+  else { clearTimeout(qrPollTimer); qrPollTimer = null; qrKey = ''; }
 }
 
 async function refreshQrLogin() {
@@ -517,23 +592,151 @@ async function pollQrLogin() {
   qrPollTimer = setTimeout(pollQrLogin, 1800);
 }
 
-function showQrLogin() {
+function showLogin(tab = 'qr') {
   closePanel();
   $('qrLoginMask').classList.add('show');
-  refreshQrLogin();
+  switchLoginTab(tab);
 }
 
-function openCodeLogin() {
-  if (!api.hasBridge) { toast('验证码登录仅在客户端中可用'); return; }
-  hideQrLogin();
-  window.bili.authOpenLogin();
-  toast('已打开 B 站官方验证码登录页');
+/* ---- 短信验证码登录（参考 wood3n/biu：极验滑块 → 发短信 → 登录） ---- */
+let gtScriptLoading = null;
+let smsCaptchaKey = '';
+let smsCountdown = 0;
+let smsCountdownTimer = null;
+let smsBusy = false;
+
+function loadGeetest() {
+  if (typeof window.initGeetest === 'function') return Promise.resolve();
+  if (gtScriptLoading) return gtScriptLoading;
+  gtScriptLoading = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://static.geetest.com/static/tools/gt.js';
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('极验组件加载失败，请检查网络'));
+    document.body.appendChild(s);
+  });
+  return gtScriptLoading;
+}
+
+// 弹出极验滑块，成功返回 { token, challenge, validate, seccode }，取消/失败返回 null
+async function runGeetest() {
+  await loadGeetest();
+  const cap = await window.bili.authSmsCaptcha();
+  if (!cap.ok) throw new Error(cap.message || '获取验证参数失败');
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+    window.initGeetest({
+      gt: cap.gt, challenge: cap.challenge, offline: false,
+      new_captcha: true, product: 'bind', https: true, width: '100%',
+    }, (obj) => {
+      obj.onReady(() => obj.verify());
+      obj.onSuccess(() => {
+        const r = obj.getValidate();
+        done(r && typeof r !== 'boolean' ? {
+          token: cap.token,
+          challenge: r.geetest_challenge || cap.challenge,
+          validate: r.geetest_validate,
+          seccode: r.geetest_seccode,
+        } : null);
+      });
+      obj.onError(() => done(null));
+      if (obj.onClose) obj.onClose(() => done(null));
+      const slot = $('geetestSlot');
+      if (slot) { slot.innerHTML = ''; obj.appendTo(slot); }
+    });
+  });
+}
+
+function setSmsStatus(text, cls = '') {
+  const el = $('smsStatus');
+  el.className = 'login-status' + (cls ? ' ' + cls : '');
+  el.textContent = text;
+}
+
+function startSmsCountdown() {
+  smsCountdown = 60;
+  const btn = $('btnSmsSend');
+  btn.disabled = true;
+  clearInterval(smsCountdownTimer);
+  smsCountdownTimer = setInterval(() => {
+    smsCountdown -= 1;
+    if (smsCountdown <= 0) {
+      clearInterval(smsCountdownTimer);
+      btn.disabled = false;
+      btn.textContent = '获取验证码';
+    } else btn.textContent = `${smsCountdown}s 后重发`;
+  }, 1000);
+}
+
+function resetSmsLogin() {
+  clearInterval(smsCountdownTimer);
+  smsCountdown = 0;
+  smsCaptchaKey = '';
+  smsBusy = false;
+  const btn = $('btnSmsSend');
+  if (btn) { btn.disabled = false; btn.textContent = '获取验证码'; }
+  const slot = $('geetestSlot');
+  if (slot) slot.innerHTML = '';
+  if ($('smsStatus')) setSmsStatus('');
+}
+
+async function sendSmsCode() {
+  if (smsBusy) return;
+  const tel = $('smsPhone').value.replace(/\D/g, '');
+  if (!/^1\d{10}$/.test(tel)) { setSmsStatus('请输入正确的 11 位手机号'); $('smsPhone').focus(); return; }
+  smsBusy = true;
+  const btn = $('btnSmsSend');
+  btn.disabled = true;
+  setSmsStatus('请完成滑块验证…');
+  try {
+    const gt = await runGeetest();
+    if (!gt) { setSmsStatus('验证未完成，请重试'); btn.disabled = false; return; }
+    setSmsStatus('正在发送验证码…');
+    const r = await window.bili.authSmsSend({ tel, ...gt });
+    if (!r.ok) { setSmsStatus(r.message || '验证码发送失败'); btn.disabled = false; return; }
+    smsCaptchaKey = r.captchaKey || '';
+    setSmsStatus('验证码已发送，请查收短信', 'success');
+    startSmsCountdown();
+    $('smsCode').focus();
+  } catch (e) {
+    setSmsStatus(e.message || '发送失败，稍后重试');
+    btn.disabled = false;
+  } finally { smsBusy = false; }
+}
+
+async function submitSmsLogin() {
+  if (smsBusy) return;
+  const tel = $('smsPhone').value.replace(/\D/g, '');
+  const code = $('smsCode').value.replace(/\D/g, '');
+  if (!/^1\d{10}$/.test(tel)) { setSmsStatus('请输入正确的 11 位手机号'); return; }
+  if (!smsCaptchaKey) { setSmsStatus('请先获取验证码'); return; }
+  if (!/^\d{6}$/.test(code)) { setSmsStatus('请输入 6 位数字验证码'); $('smsCode').focus(); return; }
+  smsBusy = true;
+  $('btnSmsLogin').disabled = true;
+  setSmsStatus('正在登录…');
+  try {
+    const r = await window.bili.authSmsLogin({ tel, code, captchaKey: smsCaptchaKey });
+    if (!r.ok) { setSmsStatus(r.message || '登录失败'); return; }
+    setSmsStatus('登录成功', 'success');
+    renderAuth(r.auth && r.auth.isLogin ? r.auth : await ensureAuth(true));
+    setTimeout(() => {
+      hideQrLogin();
+      toast(`欢迎回来，${authState.uname || 'B 站用户'}`);
+      loadFav();
+    }, 500);
+  } catch (e) { setSmsStatus(e.message || '登录失败，稍后重试'); }
+  finally { smsBusy = false; $('btnSmsLogin').disabled = false; }
 }
 
 function initAuth() {
-  $('btnQrLogin').addEventListener('click', showQrLogin);
-  $('btnCodeLogin').addEventListener('click', openCodeLogin);
-  $('btnQrToCode').addEventListener('click', openCodeLogin);
+  $('btnQrLogin').addEventListener('click', () => showLogin('qr'));
+  $('btnCodeLogin').addEventListener('click', () => showLogin('sms'));
+  $('tabQrLogin').addEventListener('click', () => switchLoginTab('qr'));
+  $('tabSmsLogin').addEventListener('click', () => switchLoginTab('sms'));
+  $('btnSmsSend').addEventListener('click', sendSmsCode);
+  $('btnSmsLogin').addEventListener('click', submitSmsLogin);
+  $('smsCode').addEventListener('keydown', (e) => { if (e.key === 'Enter') submitSmsLogin(); });
   $('btnCloseQr').addEventListener('click', hideQrLogin);
   $('btnRefreshQr').addEventListener('click', refreshQrLogin);
   $('qrLoginMask').addEventListener('click', (e) => { if (e.target === $('qrLoginMask')) hideQrLogin(); });
@@ -1018,6 +1221,9 @@ function renderFavButtons() {
   // 原视频页统计行的收藏状态同步
   const vsFav = $('vsFavBtn');
   if (vsFav) vsFav.classList.toggle('on', favored);
+  // 移动端迷你播放条的喜欢钮同步
+  const ppLike = $('ppLike');
+  if (ppLike) ppLike.classList.toggle('on', liked);
 }
 
 function closeFavPop() {
@@ -1721,8 +1927,8 @@ let likes = [];
 try { likes = JSON.parse(localStorage.getItem('biu-likes') || '[]'); } catch (e) { likes = []; }
 // 双写：主进程 JSON（主存储，抗崩溃）+ localStorage（冗余镜像）
 const saveLikes = () => {
-  try { localStorage.setItem('biu-likes', JSON.stringify(likes)); } catch (e) {}
-  if (api.hasBridge && window.bili.storeSet) window.bili.storeSet('biu-likes', likes);
+  try { localStorage.setItem(dataKey('biu-likes'), JSON.stringify(likes)); } catch (e) {}
+  if (api.hasBridge && window.bili.storeSet) window.bili.storeSet(dataKey('biu-likes'), likes);
 };
 const isLiked = (t) => !!(t && trackKey(t) && likes.some((l) => trackKey(l) === trackKey(t)));
 function toggleLike(t) {
@@ -1874,7 +2080,7 @@ async function playTrack(t, options = {}) {
   $('ppCur').textContent = '00:00';
   $('ppFill').style.width = '0%';
   pushDeskLyric(null); // 清空桌面歌词，等待新曲歌词就绪
-  go('playing');
+  if (!options.keepView) go('playing');
   resetFavState();
 
   savePlaybackSession();
@@ -2170,6 +2376,12 @@ function fillPlayingBase(t) {
   $('npAlbum').textContent = t.isLive ? 'LIVE' : (t.up || 'Bilibili 音乐');
   requestAnimationFrame(syncPlayingHeaderLayout);
   $('ppTitle').textContent = t.title || '未在播放';
+  // 移动端迷你播放条封面（桌面端隐藏）
+  const ppCover = $('ppCover');
+  if (ppCover) {
+    if (t.pic) { ppCover.src = t.pic; ppCover.hidden = false; }
+    else { ppCover.removeAttribute('src'); ppCover.hidden = true; }
+  }
   $('vTitle').textContent = t.title || '—';
   $('vUpName').textContent = t.up || '—';
   $('vUpFans').textContent = '';
@@ -2186,6 +2398,8 @@ function fillPlayingDetail(d) {
     state.current.pic = d.pic.replace(/^http:/, 'https:');
     $('npCover').innerHTML = `<img src="${esc(state.current.pic)}" alt="">`;
     $('artBackdrop').style.backgroundImage = `url(${JSON.stringify(state.current.pic)})`;
+    const ppCover = $('ppCover');
+    if (ppCover && ppCover.hidden) { ppCover.src = state.current.pic; ppCover.hidden = false; }
   }
   if (d.owner) {
     $('vUpName').textContent = d.owner.name || '—';
@@ -3414,8 +3628,12 @@ function recordHistory(t) {
   playHistory = playHistory.filter((x) => historyKey(x) !== key);
   playHistory.unshift({ ...t, playedAt: Date.now() });
   if (playHistory.length > 60) playHistory.length = 60;
-  store.set('biu-history', playHistory);
-  if (api.hasBridge && window.bili.storeSet) window.bili.storeSet('biu-history', playHistory);
+  store.set(dataKey('biu-history'), playHistory);
+  if (api.hasBridge && window.bili.storeSet) window.bili.storeSet(dataKey('biu-history'), playHistory);
+  // 可选：同步到 B 站观看历史（需登录），失败静默
+  if (settings.syncHistory && authState.isLogin && !t.isLive && t.bvid) {
+    api.historyReport(t, Math.max(0, Math.round(t.from || 0))).catch(() => {});
+  }
   // 首页轮播的历史卡片封面同步成最近播放封面
   const card = $('cardHistory');
   if (card && t.pic) card.querySelector('.cover').innerHTML = `<img src="${esc(t.pic)}" alt="">`;
@@ -3579,8 +3797,8 @@ function bindPlTrackEdit(container, plEntry) {
 let customPlaylists = store.get('biu-playlists', []);
 if (!Array.isArray(customPlaylists)) customPlaylists = [];
 const saveCustomPlaylists = () => {
-  store.set('biu-playlists', customPlaylists);
-  if (api.hasBridge && window.bili.storeSet) window.bili.storeSet('biu-playlists', customPlaylists);
+  store.set(dataKey('biu-playlists'), customPlaylists);
+  if (api.hasBridge && window.bili.storeSet) window.bili.storeSet(dataKey('biu-playlists'), customPlaylists);
 };
 
 let plDialogMode = 'create'; // 'create' | 'delete'
@@ -4030,7 +4248,7 @@ function renderFavSignedOut(grid) {
     <h3>同步你的 B 站收藏夹</h3>
     <p>使用哔哩哔哩客户端扫码，或通过 B 站官方手机验证码登录，<br>
     无需复制 Cookie，登录后会自动同步收藏夹。</p>
-    <button class="btn-primary" onclick="showQrLogin()">扫码登录</button>
+    <button class="btn-primary" onclick="showLogin('qr')">扫码登录</button>
   </div>`;
 }
 
@@ -4081,7 +4299,7 @@ async function loadFav() {
       grid.dataset.state = 'error';
       grid.innerHTML = `<div class="empty-guide">
         <h3>收藏夹加载失败</h3><p>${esc(e.message || e)}<br>请重新扫码或使用验证码登录。</p>
-        <button class="btn-primary" onclick="showQrLogin()">重新登录</button>
+        <button class="btn-primary" onclick="showLogin('qr')">重新登录</button>
       </div>`;
     }
   })();
@@ -4644,6 +4862,16 @@ function initSettings() {
     else if (state.current && videoModeOn()) loadDanmaku(state.current, videoLoadToken);
   });
 
+  // 同步观看记录到 B 站历史开关
+  const swSyncHis = $('swSyncHistory');
+  swSyncHis.classList.toggle('off', !settings.syncHistory);
+  swSyncHis.addEventListener('click', () => {
+    settings.syncHistory = settings.syncHistory ? 0 : 1;
+    store.set('biu-sync-history', settings.syncHistory);
+    swSyncHis.classList.toggle('off', !settings.syncHistory);
+    if (settings.syncHistory && !authState.isLogin) toast('未登录：记录会在登录后才开始同步');
+  });
+
   // 背景模糊度：0 - 40px
   const setBlur = (px) => {
     settings.blur = px;
@@ -4719,6 +4947,13 @@ function init() {
   $('btnToggle').addEventListener('click', togglePlay);
   $('ppToggle').addEventListener('click', togglePlay);
   $('ppPrev').addEventListener('click', prev);
+  // 移动端迷你播放条：喜欢钮 / 封面点开播放页（桌面端这两个元素隐藏）
+  $('ppLike').addEventListener('click', () => {
+    if (!state.current) return;
+    toggleLike(state.current);
+    renderFavButtons();
+  });
+  $('ppCover').addEventListener('click', () => { if (state.current) go('playing'); });
   $('ppNext').addEventListener('click', next);
   $('liveToggle').addEventListener('click', togglePlay);
   $('liveDmToggle').addEventListener('click', () => {
@@ -5128,6 +5363,8 @@ function init() {
     setModeUI(false);
     lyrics = []; lastLi = -1;
     $('ppTitle').textContent = '未在播放';
+    const ppCover = $('ppCover');
+    if (ppCover) { ppCover.removeAttribute('src'); ppCover.hidden = true; }
     setLyricHint('选择一首歌曲开始播放');
     renderQueue();
     syncToggleIcon();
@@ -5227,27 +5464,13 @@ function init() {
   loadRadio();
 }
 
-// 启动时先从主进程 JSON 仓恢复 likes / 自建歌单 / 历史；文件没有时回退 localStorage 并迁移过去
+// 启动时先恢复 likes / 自建歌单 / 历史：主进程 JSON 仓优先，文件没有时回退 localStorage 并迁移过去
 (async () => {
   let playbackSession = store.get(PLAYBACK_SESSION_KEY, null);
   if (api.hasBridge && window.bili.storeGet) {
     try { playbackSession = await window.bili.storeGet(PLAYBACK_SESSION_KEY) ?? playbackSession; } catch (e) {}
-    const adopt = {
-      'biu-likes': (v) => { likes = v; },
-      'biu-playlists': (v) => { customPlaylists = v; },
-      'biu-history': (v) => { playHistory = v; },
-    };
-    for (const k of Object.keys(adopt)) {
-      try {
-        let v = await window.bili.storeGet(k);
-        if (v == null) {
-          const legacy = localStorage.getItem(k);
-          if (legacy != null) { v = JSON.parse(legacy); window.bili.storeSet(k, v); }
-        }
-        if (Array.isArray(v)) adopt[k](v);
-      } catch (e) {}
-    }
   }
+  await loadBuckets(); // 游客命名空间（登录后 renderAuth 会切到账号桶）
   init();
   initPlaybackSession();
   await restorePlaybackSession(playbackSession);

@@ -536,6 +536,52 @@ app.whenReady().then(() => {
     }
   });
   ipcMain.on('auth:open-login', () => openOfficialLogin());
+
+  /* ---- 短信验证码登录（参考 wood3n/biu，全流程内置，不跳外部页面）----
+     流程：captcha 取极验参数 → 渲染层加载 gt.js 完成滑块 → sms/send 发短信 → login/sms 登录。
+     全程走 biliFetch（credentials: include），Set-Cookie 直接落 Electron session。 */
+  const passportPost = async (url, params) => {
+    const res = await biliFetch(url, {
+      method: 'POST',
+      referer: 'https://passport.bilibili.com/login',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams(params).toString(),
+    });
+    return JSON.parse(await res.text());
+  };
+  // 取极验验证码参数（gt/challenge/token）
+  ipcMain.handle('auth:sms-captcha', async () => {
+    try {
+      const res = await biliFetch('https://passport.bilibili.com/x/passport-login/captcha?source=main_web',
+        { referer: 'https://passport.bilibili.com/login' });
+      const json = JSON.parse(await res.text());
+      if (json.code !== 0 || !json.data || !json.data.geetest) throw new Error(json.message || '获取验证参数失败');
+      return { ok: true, token: json.data.token, gt: json.data.geetest.gt, challenge: json.data.geetest.challenge };
+    } catch (e) { return { ok: false, message: String(e.message || e) }; }
+  });
+  // 极验通过后发送短信验证码
+  ipcMain.handle('auth:sms-send', async (_e, p) => {
+    try {
+      const json = await passportPost('https://passport.bilibili.com/x/passport-login/web/sms/send', {
+        cid: p.cid || 86, tel: p.tel, source: 'main_web',
+        token: p.token, challenge: p.challenge, validate: p.validate, seccode: p.seccode,
+      });
+      return { ok: json.code === 0, message: json.message || '', captchaKey: json.data && json.data.captcha_key };
+    } catch (e) { return { ok: false, message: String(e.message || e) }; }
+  });
+  // 提交短信验证码完成登录
+  ipcMain.handle('auth:sms-login', async (_e, p) => {
+    try {
+      const json = await passportPost('https://passport.bilibili.com/x/passport-login/web/login/sms', {
+        cid: p.cid || 86, tel: p.tel, code: p.code, source: 'main_web',
+        captcha_key: p.captchaKey, keep: true,
+      });
+      if (json.code !== 0) return { ok: false, message: json.message || '登录失败' };
+      const auth = await getAuthStatus();
+      notifyAuthChanged(auth);
+      return { ok: true, auth };
+    } catch (e) { return { ok: false, message: String(e.message || e) }; }
+  });
   ipcMain.handle('auth:logout', async () => {
     const authNames = new Set(['SESSDATA', 'bili_jct', 'DedeUserID', 'DedeUserID__ckMd5', 'sid']);
     const cookies = await session.defaultSession.cookies.get({ url: 'https://www.bilibili.com/' });

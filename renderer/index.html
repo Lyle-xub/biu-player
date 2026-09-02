@@ -35,13 +35,14 @@
 <!-- ============ 顶栏 ============ -->
 <header class="topbar">
   <div class="brand" onclick="go('library')">
-    <img class="brand-icon" src="assets/icon.png" alt="">Biu
+    <span class="dot"></span>Biu
     <span class="gear" onclick="event.stopPropagation();openPanel('settings')"><svg width="16" height="16" viewBox="0 0 1024 1024" fill="currentColor"><path d="M924.8 625.7l-65.5-56c3.1-19 4.7-38.4 4.7-57.8s-1.6-38.8-4.7-57.8l65.5-56c10.1-8.6 13.8-22.6 9.3-35.2l-2.6-7.3a281.6 281.6 0 00-76-131.6l-4.9-5.2c-11.3-12-27.1-16.4-42.3-11.9l-76 22.4c-28.9-24.1-61.8-42.6-97.6-54.6l-21-73.9c-3.6-12.7-14.3-22.5-27.2-25.1l-7.5-1.4a281 281 0 00-154.5 0l-7.5 1.4c-12.9 2.6-23.6 12.4-27.2 25.1l-21 73.9c-35.8 12-68.7 30.5-97.6 54.6l-76-22.4c-15.2-4.5-31-.1-42.3 11.9l-4.9 5.2a281.6 281.6 0 00-76 131.6l-2.6 7.3c-4.5 12.6-.8 26.6 9.3 35.2l65.5 56c-3.1 19-4.7 38.4-4.7 57.8s1.6 38.8 4.7 57.8l-65.5 56c-10.1 8.6-13.8 22.6-9.3 35.2l2.6 7.3a281.6 281.6 0 0076 131.6l4.9 5.2c11.3 12 27.1 16.4 42.3 11.9l76-22.4c28.9 24.1 61.8 42.6 97.6 54.6l21 73.9c3.6 12.7 14.3 22.5 27.2 25.1l7.5 1.4a281 281 0 00154.5 0l7.5-1.4c12.9-2.6 23.6-12.4 27.2-25.1l21-73.9c35.8-12 68.7-30.5 97.6-54.6l76 22.4c15.2 4.5 31 .1 42.3-11.9l4.9-5.2a281.6 281.6 0 0076-131.6l2.6-7.3c4.5-12.6.8-26.6-9.3-35.2zM512 704c-106 0-192-86-192-192s86-192 192-192 192 86 192 192-86 192-192 192z"/></svg></span>
   </div>
   <nav class="seg pill" id="mainNav">
-    <button data-v="library" class="on">歌单</button>
-    <button data-v="fav">收藏夹</button>
-    <button data-v="radio">电台</button>
+    <button data-v="library" class="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18.5V6.8L20 4.5v11.7"/><circle cx="6.5" cy="18.5" r="2.5"/><circle cx="17.5" cy="16.2" r="2.5"/></svg><span>歌单</span></button>
+    <button data-v="fav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.6l2.5 5.2 5.7.7-4.2 3.9 1.1 5.6-5.1-2.8-5.1 2.8 1.1-5.6L3.8 9.5l5.7-.7z"/></svg><span>收藏夹</span></button>
+    <button data-v="radio"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2.1" fill="currentColor" stroke="none"/><path d="M8.2 8.2a5.4 5.4 0 0 0 0 7.6M15.8 8.2a5.4 5.4 0 0 1 0 7.6M5.3 5.3a9.5 9.5 0 0 0 0 13.4M18.7 5.3a9.5 9.5 0 0 1 0 13.4"/></svg><span>电台</span></button>
+    <button data-v="search" class="nav-search-tab"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><span>搜索</span></button>
   </nav>
   <div class="top-right">
     <button class="nav-back pill" id="navBack" type="button" aria-label="返回上一页" title="返回上一页">
@@ -439,6 +440,7 @@
 </button>
 
 <div class="progress-pill pill">
+  <img class="pp-cover" id="ppCover" alt="" hidden>
   <div class="progress-main">
     <span class="num" id="ppCur">00:00</span>
     <div class="track" id="ppTrack"><i id="ppFill" style="width:0%"></i></div>
@@ -453,6 +455,9 @@
       <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4h2.5v16H6zM20 5v14L9.5 12z"/></svg>
     </button>
     <span class="pp-title" id="ppTitle">未在播放</span>
+    <button type="button" class="pp-like" id="ppLike" aria-label="喜欢" title="喜欢">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20.4C7.1 16.5 3.7 13.2 3.7 9.6 3.7 7.1 5.7 5.1 8.1 5.1c1.5 0 3 .8 3.9 2 .9-1.2 2.4-2 3.9-2 2.4 0 4.4 2 4.4 4.5 0 3.6-3.4 6.9-8.3 10.8z"/></svg>
+    </button>
     <button type="button" class="pp-step" id="ppNext" aria-label="下一首" title="下一首">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M15.5 4H18v16h-2.5zM4 5v14l10.5-7z"/></svg>
     </button>
@@ -536,6 +541,10 @@
       <div class="mr"><span class="switch" id="swDanmaku"></span></div>
     </div>
     <div class="mrow">
+      <div class="ml"><b>同步观看记录</b><small>播放时把记录上报到 B 站历史，需登录</small></div>
+      <div class="mr"><span class="switch off" id="swSyncHistory"></span></div>
+    </div>
+    <div class="mrow">
       <div class="ml"><b>背景模糊度</b><small>沉浸式封面背景的模糊强度</small></div>
       <div class="mr"><span class="slider" id="slBlur"><i></i></span></div>
     </div>
@@ -547,21 +556,43 @@
   </div>
 </div>
 
-<!-- ============ 扫码登录弹窗 ============ -->
+<!-- ============ 登录弹窗：扫码 / 手机验证码 ============ -->
 <div class="login-mask" id="qrLoginMask">
   <div class="login-card">
     <button class="login-close" id="btnCloseQr" aria-label="关闭">×</button>
     <span class="login-kicker">BILIBILI CONNECT</span>
-    <h3>扫码登录</h3>
-    <p>使用哔哩哔哩客户端扫码，并在手机上确认</p>
-    <div class="qr-shell" id="qrShell">
-      <img id="qrImage" alt="B 站登录二维码">
-      <div class="qr-state" id="qrState">正在生成二维码…</div>
+    <div class="login-tabs" role="tablist">
+      <button class="on" id="tabQrLogin" role="tab" aria-selected="true">扫码登录</button>
+      <button id="tabSmsLogin" role="tab" aria-selected="false">验证码登录</button>
     </div>
-    <div class="login-status" id="qrStatus">请使用哔哩哔哩客户端扫码</div>
-    <div class="login-buttons">
-      <button class="btn-primary" id="btnRefreshQr">刷新二维码</button>
-      <button class="btn-ghost" id="btnQrToCode">改用验证码</button>
+    <div class="login-pane" id="paneQr">
+      <p>使用哔哩哔哩客户端扫码，并在手机上确认</p>
+      <div class="qr-shell" id="qrShell">
+        <img id="qrImage" alt="B 站登录二维码">
+        <div class="qr-state" id="qrState">正在生成二维码…</div>
+      </div>
+      <div class="login-status" id="qrStatus">请使用哔哩哔哩客户端扫码</div>
+      <div class="login-buttons">
+        <button class="btn-primary" id="btnRefreshQr">刷新二维码</button>
+      </div>
+    </div>
+    <div class="login-pane" id="paneSms" hidden>
+      <p>使用手机号 + 短信验证码登录，全程在应用内完成</p>
+      <div class="sms-form">
+        <label class="sms-field">
+          <span class="sms-prefix">+86</span>
+          <input id="smsPhone" type="tel" maxlength="11" placeholder="手机号" autocomplete="tel">
+        </label>
+        <div class="sms-code-row">
+          <label class="sms-field">
+            <input id="smsCode" type="text" inputmode="numeric" maxlength="6" placeholder="6 位验证码" autocomplete="one-time-code">
+          </label>
+          <button class="btn-ghost" id="btnSmsSend" type="button">获取验证码</button>
+        </div>
+        <div class="geetest-slot" id="geetestSlot"></div>
+        <div class="login-status" id="smsStatus"></div>
+        <button class="btn-primary" id="btnSmsLogin" type="button">登录</button>
+      </div>
     </div>
     <small>登录凭证由 Electron 会话安全保存，不写入页面存储。</small>
   </div>
