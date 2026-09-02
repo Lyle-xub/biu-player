@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../renderer/styles.css">
+<style>
+  html, body { height: 100%; margin: 0; background: linear-gradient(160deg, #1c1a16, #0f0e0c 70%); }
+  .pl-dialog-mask { position: static !important; display: flex !important; background: transparent !important; }
+  .split-panel { animation: none !important; }
+</style>
+</head>
+<body>
+<div class="pl-dialog-mask" id="splitMask">
+  <div class="split-panel" role="dialog" aria-modal="true">
+    <h3>MixSplitR 分切</h3>
+    <p id="splitHint">本地分析完成，识别 20 个分段；可点「识别曲目」自动识别歌名，或手动填写后联网匹配。</p>
+    <div class="split-wave" id="splitWave">
+      <canvas id="splitWaveCanvas"></canvas>
+      <div class="split-wave-overlay" id="splitWaveOverlay"></div>
+      <div class="split-wave-line" id="splitWaveHover" hidden><i></i></div>
+      <div class="split-wave-tip" id="splitWaveTip" hidden></div>
+      <div class="split-wave-time" id="splitWaveTime">12:34 / 45:20</div>
+    </div>
+    <div class="split-list" id="splitList"></div>
+    <div class="split-log" id="splitLog"></div>
+    <div class="split-foot">
+      <span class="mseg" id="splitModeSeg" title="智能分析的分割方式">
+        <button type="button" data-sm="transition" class="on">Transition</button>
+        <button type="button" data-sm="silence">静音间隙</button>
+        <button type="button" data-sm="interval">等间隔</button>
+      </span>
+      <button class="btn-ghost" id="splitAnalyze" type="button">智能分析</button>
+      <button class="btn-ghost" id="splitIdentify" type="button">识别曲目</button>
+      <button class="btn-ghost" id="splitImport" type="button">导入时间表</button>
+      <button class="btn-ghost" id="splitAdd" type="button">添加分段</button>
+      <span class="split-count" id="splitCount">20 段</span>
+      <button class="btn-ghost" id="splitCancel" type="button">取消</button>
+      <button class="btn-primary" id="splitCreate" type="button">创建歌单</button>
+    </div>
+  </div>
+</div>
+<script>
+  // 假波形 + 假分段 + 假日志，验证视觉
+  const canvas = document.getElementById('splitWaveCanvas');
+  const wrap = document.getElementById('splitWave');
+  const dpr = 2;
+  const w = wrap.clientWidth, h = wrap.clientHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.fillStyle = 'rgba(255,255,255,.32)';
+  let seed = 7;
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  for (let x = 0; x < w; x++) {
+    const m = 0.15 + Math.abs(Math.sin(x / 37) * 0.5) + rnd() * 0.3;
+    const bh = Math.max(1, m * (h - 8));
+    ctx.fillRect(x, h / 2 - bh / 2, 1, bh);
+  }
+  const overlay = document.getElementById('splitWaveOverlay');
+  let left = 0;
+  for (let i = 0; i < 20; i++) {
+    const wpc = i % 4 === 0 ? 8 : 3.5;
+    overlay.innerHTML += `<div class="split-region" style="left:${left}%;width:${wpc}%"><b>${i + 1}</b><i class="rh-l"></i><i class="rh-r"></i></div>`;
+    left += wpc;
+    if (left > 99) break;
+  }
+  const rows = ['00:00–01:11', '01:11–03:11', '03:11–04:20'];
+  document.getElementById('splitList').innerHTML = rows.map((r, i) => `
+    <div class="split-row"><span class="split-idx num">0${i + 1}</span>
+      <input class="split-time num" value="${r.slice(0, 5)}"><span class="split-sep">–</span>
+      <input class="split-time num" value="${r.slice(6)}">
+      <input class="split-name" placeholder="填写歌名后自动匹配" value="${['晴天', '七里香', ''][i]}">
+      ${i === 1
+        ? `<span class="split-match"><em>周杰伦</em><i>QQ音乐</i><b class="split-pick" title="选择其他匹配结果 / 搜索"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></b></span>`
+        : '<span class="split-match"><i>未匹配</i></span>'}
+    </div>`).join('');
+  // 候选下拉预览（fixed 定位，内联 left/top）
+  const pop = document.createElement('div');
+  pop.className = 'split-pop';
+  pop.style.left = '560px'; pop.style.top = '268px';
+  const cands = [
+    { title: '七里香', artist: '周杰伦', dur: '4:04', src: 'QQ音乐', pic: true },
+    { title: '七里香 (Live)', artist: '周杰伦', dur: '4:31', src: 'QQ音乐', pic: true },
+    { title: '七里香', artist: '周杰伦', dur: '4:05', src: '网易云', pic: false },
+    { title: '七里香remix', artist: 'KOZAY / 周杰伦', dur: '2:48', src: 'QQ音乐', pic: true },
+  ];
+  pop.innerHTML = `<input class="split-pop-search" value="七里香" placeholder="输入歌名搜索…" spellcheck="false">
+    <div class="split-pop-list">${cands.map((c) => `
+      <div class="split-pop-row">
+        ${c.pic ? '<span class="split-pop-nopic" style="background:linear-gradient(135deg,#8a7bd8,#5fb7a5)"></span>' : '<span class="split-pop-nopic"></span>'}
+        <div class="split-pop-meta"><b>${c.title}</b><i>${c.artist}</i></div>
+        <span class="split-pop-dur num">${c.dur}</span><em>${c.src}</em>
+      </div>`).join('')}</div>`;
+  document.body.appendChild(pop);
+  const logs = [
+    '[06:35:10] 开始智能分析，分割方式：Transition（能量跃迁）',
+    '[06:35:26] 解码完成：45:20，已保留原始采样率音源',
+    '[06:35:27] 检测完成：20 个分段',
+    '[06:35:31] 开始识别曲目，共 20 段（先网易云，未命中回退 Shazam）',
+    '[06:35:31] 第 1 段（0:00 – 1:11）开始识别',
+    '[06:35:32] 网易云识曲：截取 25s clip，探针 4s 起 6s',
+    '[06:35:33] 网易云命中：晴天 - 周杰伦',
+    '[06:35:33] 第 2 段（1:11 – 3:11）开始识别',
+    '[06:35:34] 网易云未命中，回退 Shazam…',
+    '[06:35:35] Shazam 命中：七里香 - 周杰伦',
+    '[06:35:35] 第 3 段（3:11 – 4:20）开始识别',
+  ];
+  const box = document.getElementById('splitLog');
+  logs.forEach((l) => { const d = document.createElement('div'); d.textContent = l; box.appendChild(d); });
+  box.scrollTop = box.scrollHeight;
+  document.title = 'ready';
+</script>
+</body>
+</html>

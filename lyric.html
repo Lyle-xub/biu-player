@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Biu 桌面歌词</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; background: transparent; overflow: hidden; }
+  body {
+    font-family: -apple-system, "PingFang SC", "HarmonyOS Sans SC",
+                 "Source Han Sans SC", "Noto Sans CJK SC", sans-serif;
+    -webkit-font-smoothing: antialiased; user-select: none;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .bar {
+    -webkit-app-region: drag;
+    width: calc(100% - 20px); height: calc(100% - 20px);
+    border-radius: 999px;
+    background: transparent;
+    border: 1px solid transparent;
+    display: flex; align-items: center; justify-content: center;
+    padding: 0 56px; position: relative;
+    transition: background .3s, border-color .3s;
+  }
+  /* 悬停时浮出淡底，提示可拖拽并衬托关闭钮 */
+  .bar:hover {
+    background: rgba(16, 17, 12, .3);
+    border-color: rgba(255, 255, 255, .1);
+    backdrop-filter: blur(20px) saturate(1.2);
+  }
+  /* 单行歌词：换行时整体淡出/淡入；水平方向用 padding+负 margin 给扫光/发光预留溢出空间，
+     否则 overflow:hidden 的内容盒紧贴首字，左侧光效会被截断 */
+  .cur {
+    --desk-accent: #ffffff;
+    max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    padding: .45em .9em; margin: -.45em -.9em;
+    font-size: 24px; font-weight: 700; letter-spacing: .06em; color: rgba(255,255,255,.72);
+    text-shadow: 0 1px 10px rgba(0, 0, 0, .55), 0 0 3px rgba(0, 0, 0, .45);
+    transition: opacity .16s ease, transform .16s ease, filter .16s ease;
+  }
+  .cur.swap { opacity: 0; transform: translateY(5px); filter: blur(2px); }
+  .cur.interlude { letter-spacing: .32em; }
+  /* 词级 token：基底字形恒在，扫光层绝对覆盖并通过 mask 前沿逐字点亮（与主窗歌词页一致） */
+  .lw { position: relative; display: inline-block; white-space: pre; }
+  .lw-base, .lws { color: rgba(255,255,255,.62); }
+  .lw.w-passed .lw-base { color: var(--desk-accent); }
+  /* 扫光覆盖层必须掐断 text-shadow 继承，否则投影会透过 mask 形成跟着扫光走的黑影 */
+  .lw-sweep, .lw-fill { text-shadow: none; }
+  /* 扫光覆盖层上下各扩 .5em，避免下沉笔画（g/j/p/捺）被 mask 截断 */
+  .lw-sweep {
+    position: absolute; left: 0; right: 0; top: -.5em; bottom: -.5em;
+    padding: .5em 0; box-sizing: border-box; pointer-events: none;
+    white-space: pre;
+    -webkit-mask-image: linear-gradient(90deg,
+      #000 0px,
+      #000 var(--w-solid, 0px),
+      rgba(0,0,0,.92) var(--w-feather, 0px),
+      transparent var(--w-sweep, 0px),
+      transparent 100%);
+    mask-image: linear-gradient(90deg,
+      #000 0px,
+      #000 var(--w-solid, 0px),
+      rgba(0,0,0,.92) var(--w-feather, 0px),
+      transparent var(--w-sweep, 0px),
+      transparent 100%);
+    -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+    -webkit-mask-size: 100% 100%; mask-size: 100% 100%;
+  }
+  .lw-fill {
+    display: block; margin-top: -.5em; padding: .5em 0;
+    color: transparent; -webkit-text-fill-color: transparent;
+    background-clip: text; -webkit-background-clip: text;
+  }
+  .close {
+    -webkit-app-region: no-drag;
+    position: absolute; right: 14px; top: 50%; transform: translateY(-50%);
+    width: 28px; height: 28px; border-radius: 50%; border: 0; cursor: pointer;
+    background: transparent; color: rgba(255, 255, 255, .5);
+    display: grid; place-items: center; opacity: 0; transition: .2s;
+  }
+  .bar:hover .close { opacity: 1; }
+  .close:hover { background: rgba(255, 255, 255, .12); color: #fff; }
+</style>
+</head>
+<body>
+  <div class="bar">
+    <div class="cur" id="cur">Biu · 桌面歌词</div>
+    <button class="close" id="close" title="关闭桌面歌词">
+      <svg width="12" height="12" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.4" fill="none"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
+  <script>
+    'use strict';
+    /* ===== 与主窗歌词页同源的逐词扫光（Folia Monet 移植，单行版） ===== */
+    const GLOW_RISE = 1.18;    // 发光爬升时长 = 词时长 × 1.18
+    const GLOW_TAIL = 1.05;    // 词结束后发光驻留尾部
+    const GLOW_MAX_ALPHA = .88;
+    const GLOW_R1 = .28;       // × fontPx
+    const GLOW_R2 = .65;       // × fontPx
+    const BASE_ALPHA = .34;
+
+    const curEl = document.getElementById('cur');
+    const esc = (s) => String(s).replace(/[&<>"']/g,
+      (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const segmenter = typeof Intl !== 'undefined' && Intl.Segmenter
+      ? new Intl.Segmenter('zh', { granularity: 'grapheme' }) : null;
+    const graphemes = (t) => segmenter
+      ? Array.from(segmenter.segment(t), (s) => s.segment) : Array.from(t);
+    const measureCtx = document.createElement('canvas').getContext('2d');
+    const smooth = (v) => { const t = Math.min(1, Math.max(0, v)); return t * t * (3 - 2 * t); };
+    const mixRgb = (from, to, amount, alpha) => {
+      const t = Math.min(1, Math.max(0, amount));
+      const a = Math.min(1, Math.max(0, alpha));
+      return `rgba(${Math.round(from[0] + (to[0] - from[0]) * t)}, ${Math.round(from[1] + (to[1] - from[1]) * t)}, ${Math.round(from[2] + (to[2] - from[2]) * t)}, ${a})`;
+    };
+
+    /* 透明底下文字可读性靠描边阴影；发光叠加其上，不能整体抹成 none */
+    const OUTLINE = '0 1px 10px rgba(0,0,0,.55), 0 0 3px rgba(0,0,0,.45)';
+
+    // 播放时钟：主窗 150ms 对齐一次，帧间本地插值，暂停即冻结
+    let clock = { time: 0, playing: false, at: performance.now() };
+    let accent = [255, 255, 255];
+    let lineKey = '';
+    let lineEnd = 0;
+    let tokenStates = []; // { text, t0, t1, el, base, fill, offsets, count, edge, fontPx }
+
+    const mediaTime = () => clock.playing
+      ? clock.time + (performance.now() - clock.at) / 1000 : clock.time;
+
+    function renderLine(p) {
+      lineEnd = p.to || 0;
+      curEl.classList.add('swap');
+      setTimeout(() => {
+        tokenStates = [];
+        if (!p.text) {
+          curEl.classList.remove('interlude');
+          curEl.textContent = '♪';
+          curEl.classList.remove('swap');
+          return;
+        }
+        curEl.classList.toggle('interlude', !!p.interlude);
+        curEl.innerHTML = (p.tokens || []).map((tk) => tk.timed
+          ? `<span class="lw"><span class="lw-base">${esc(tk.text)}</span><span class="lw-sweep" aria-hidden="true"><span class="lw-fill">${esc(tk.text)}</span></span></span>`
+          : `<span class="lws">${esc(tk.text)}</span>`).join('');
+        // 测量字素累计宽度，扫光前沿在词内按字素时间插值
+        const cs = getComputedStyle(curEl);
+        const fontPx = parseFloat(cs.fontSize) || 24;
+        const edge = Math.max(6, Math.min(16, fontPx * .45));
+        measureCtx.font = `${cs.fontWeight} ${fontPx}px ${cs.fontFamily}`;
+        const wordEls = [...curEl.querySelectorAll('.lw')];
+        let wi = 0;
+        (p.tokens || []).forEach((tk) => {
+          if (!tk.timed) return;
+          const el = wordEls[wi++];
+          if (!el) return;
+          const gs = graphemes(tk.text);
+          const offsets = [0];
+          for (let k = 1; k <= gs.length; k++) {
+            offsets.push(measureCtx.measureText(gs.slice(0, k).join('')).width);
+          }
+          tokenStates.push({
+            t0: tk.t0, t1: tk.t1,
+            el, base: el.querySelector('.lw-base'), fill: el.querySelector('.lw-fill'),
+            offsets, count: gs.length, edge, fontPx,
+          });
+        });
+        curEl.classList.remove('swap');
+      }, 150);
+    }
+
+    window.lyricApi.onLine((p) => {
+      if (!p) return;
+      clock = { time: p.time || 0, playing: !!p.playing, at: performance.now() };
+      if (p.tick) return; // 纯时钟对齐，不换行
+      if (Array.isArray(p.accent)) {
+        accent = p.accent;
+        curEl.style.setProperty('--desk-accent', `rgb(${accent.map(Math.round).join(',')})`);
+      }
+      const key = (p.interlude ? '~' : '') + (p.text || '') + '@' + (p.from || 0);
+      if (key === lineKey) return;
+      lineKey = key;
+      renderLine(p);
+    });
+
+    /* 逐帧扫光：mask 前沿 + 词发光 + 填充渐变，算法与主窗 updateMonetLineWords 一致 */
+    function frame() {
+      const t = mediaTime();
+      for (const tk of tokenStates) {
+        const wordPassed = t > tk.t1;
+        const wordActive = t >= tk.t0 && !wordPassed;
+        tk.el.classList.toggle('w-passed', wordPassed);
+
+        // 发光：唱词期间 smoothstep 爬升，过峰后驻留衰减
+        let intensity = 0;
+        if (t > tk.t0) {
+          const wd = Math.max(.001, tk.t1 - tk.t0);
+          const peak = tk.t0 + wd * GLOW_RISE;
+          if (t <= peak) intensity = smooth((t - tk.t0) / (wd * GLOW_RISE));
+          else {
+            const tailEnd = Math.max(lineEnd, tk.t1 + GLOW_TAIL);
+            intensity = smooth(1 - (t - peak) / Math.max(.18, tailEnd - peak));
+          }
+        }
+        if (intensity > 0) {
+          const r1 = Math.round(tk.fontPx * GLOW_R1);
+          const r2 = Math.round(tk.fontPx * GLOW_R2);
+          const glow = mixRgb([255, 255, 255], accent, intensity, intensity * GLOW_MAX_ALPHA);
+          tk.base.style.textShadow = `${OUTLINE}, 0 0 ${r1}px ${glow}, 0 0 ${r2}px ${glow}`;
+        } else {
+          tk.base.style.textShadow = OUTLINE;
+        }
+
+        // 扫光 mask：实芯 → 0.92 羽化 → 透明
+        const full = tk.offsets[tk.offsets.length - 1] || 0;
+        let filled = 0;
+        if (t >= tk.t1) filled = full;
+        else if (t > tk.t0) {
+          const progress = (t - tk.t0) / Math.max(.001, tk.t1 - tk.t0);
+          const floatIndex = progress * tk.count;
+          const whole = Math.floor(floatIndex);
+          const frac = floatIndex - whole;
+          const startW = tk.offsets[Math.min(whole, tk.offsets.length - 1)] || 0;
+          const endW = tk.offsets[Math.min(whole + 1, tk.offsets.length - 1)] || startW;
+          filled = startW + (endW - startW) * frac;
+        }
+        const sweepEnd = full > 0 ? filled + tk.edge * Math.min(1, Math.max(0, filled / full)) : 0;
+        tk.el.style.setProperty('--w-solid', `${Math.max(sweepEnd - tk.edge, 0).toFixed(2)}px`);
+        tk.el.style.setProperty('--w-feather', `${Math.max(sweepEnd - tk.edge * .55, 0).toFixed(2)}px`);
+        tk.el.style.setProperty('--w-sweep', `${sweepEnd.toFixed(2)}px`);
+
+        // 填充渐变随进度从基色混入高亮色
+        const progress = wordPassed ? 1 : wordActive
+          ? (t - tk.t0) / Math.max(.001, tk.t1 - tk.t0) : 0;
+        const alpha = Math.min(1, BASE_ALPHA + (0.98 - BASE_ALPHA) * progress);
+        tk.fill.style.backgroundImage = `linear-gradient(90deg, ${mixRgb([255,255,255], accent, progress, alpha)} 0%, ${mixRgb([255,255,255], accent, progress, .92 * alpha)} 68%, ${mixRgb([255,255,255], accent, progress, .72 * alpha)} 100%)`;
+      }
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+
+    document.getElementById('close').addEventListener('click', () => window.lyricApi.close());
+  </script>
+</body>
+</html>

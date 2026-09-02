@@ -1,0 +1,577 @@
+/* Biu Player · 主进程 */
+const { app, BrowserWindow, ipcMain, net, session, protocol, dialog } = require('electron');
+const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
+const QRCode = require('qrcode');
+
+// 桌面 Chrome UA + B 站页面 Referer（CDN 无 Referer 会 403）
+const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+const REFERER = 'https://www.bilibili.com/';
+// 需要统一补 Referer/UA 的 B 站 CDN 域名
+const CDN_HOSTS = ['bilivideo.com', 'bilivideo.cn', 'hdslb.com', 'acgvideo.com'];
+
+// 媒体通过应用内安全代理流式读取，浏览器侧无需直接跨域访问带签名的 CDN URL。
+protocol.registerSchemesAsPrivileged([{
+  scheme: 'biu-media',
+  privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true },
+}]);
+
+let mainWin = null;
+let lyricWin = null; // 桌面歌词悬浮窗
+let loginWin = null; // B 站官方验证码登录窗
+let buvid3 = ''; // 匿名访客标识：搜索 / playurl 接口风控需要
+
+/* ---------- WBI 签名（参考 wood3n/biu：/x/player/wbi/playurl 等接口需要） ---------- */
+const MIXIN_TAB = [46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
+  27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16,
+  24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63,
+  57, 62, 11, 36, 20, 34, 44, 52];
+let wbiKeys = null;
+let wbiKeysAt = 0;
+
+async function getWbiKeys() {
+  if (wbiKeys && Date.now() - wbiKeysAt < 12 * 3600 * 1000) return wbiKeys;
+  const res = await net.fetch('https://api.bilibili.com/x/web-interface/nav', {
+    headers: { 'User-Agent': UA, Referer: REFERER },
+  });
+  const data = JSON.parse(await res.text());
+  const wbi = data.data && data.data.wbi_img;
+  if (!wbi) throw new Error('无法获取 WBI 密钥');
+  const keyOf = (u) => u.split('/').pop().split('.')[0];
+  wbiKeys = { img: keyOf(wbi.img_url), sub: keyOf(wbi.sub_url) };
+  wbiKeysAt = Date.now();
+  return wbiKeys;
+}
+
+// 对 URL 查询串做 WBI 签名，返回带 wts + w_rid 的新查询串
+async function signWbi(query) {
+  const keys = await getWbiKeys();
+  const raw = keys.img + keys.sub;
+  const mixin = MIXIN_TAB.map((i) => raw[i]).join('').slice(0, 32);
+  const params = new URLSearchParams(query);
+  params.set('wts', Math.floor(Date.now() / 1000));
+  const entries = [...params.entries()]
+    .map(([k, v]) => [k, String(v).replace(/[!'()*]/g, '')])
+    .sort((a, b) => (a[0] < b[0] ? -1 : 1));
+  const q = new URLSearchParams(entries).toString();
+  const wrid = crypto.createHash('md5').update(q + mixin).digest('hex');
+  return q + '&w_rid=' + wrid;
+}
+
+// 通过 spi 接口获取并缓存 buvid3
+async function ensureBuvid() {
+  if (buvid3) return buvid3;
+  try {
+    const res = await net.fetch('https://api.bilibili.com/x/frontend/finger/spi', {
+      headers: { 'User-Agent': UA, Referer: REFERER },
+    });
+    const data = JSON.parse(await res.text());
+    buvid3 = (data.data && data.data.b_3) || '';
+  } catch (e) {
+    console.error('获取 buvid3 失败:', e);
+  }
+  return buvid3;
+}
+
+/* ---------- Shazam：shazamio-core WASM 指纹签名 ---------- */
+// 懒加载 shazamio-core（wasm-bindgen Node 构建，require 即同步就绪）
+let shazamioMod = null;
+function getShazamio() {
+  if (!shazamioMod) shazamioMod = require(path.join(__dirname, 'node_modules/shazamio-core/node/shazamio-core.js'));
+  return shazamioMod;
+}
+// pcmF32: ArrayBuffer（Float32 单声道 @16000Hz）→ Shazam 匹配结果或 null
+async function shazamRecognize(pcmF32) {
+  const sz = getShazamio();
+  const f32 = new Float32Array(pcmF32);
+  const sig = sz.DecodedSignature.new(f32, 16000, 1);
+  try {
+    const url = 'https://amp.shazam.com/discovery/v5/en-US/GB/iphone/-/tag/'
+      + crypto.randomUUID().toUpperCase() + '/' + crypto.randomUUID().toUpperCase()
+      + '?sync=true&webv3=true&sampling=true&connected=&shazamapiversion=v3&sharehub=true&hubv5minorversion=v5.1&hidelb=true&video=v3';
+    const res = await fetchWithFallback(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept-Language': 'en-US',
+        'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 5.0.2; VS980 4G Build/LRX22G)',
+      },
+      body: JSON.stringify({
+        timezone: 'Asia/Shanghai',
+        signature: { uri: sig.uri, samplems: sig.samplems },
+        timestamp: Date.now(),
+        context: {},
+        geolocation: {},
+      }),
+    });
+    const json = JSON.parse(await res.text());
+    const track = json && json.track;
+    if (!track || !track.title) return null;
+    // 专辑/年份在 sections[0].metadata 里；封面取 images.coverart
+    let album = null;
+    let year = null;
+    const sections = track.sections || [];
+    for (const sec of sections) {
+      (sec.metadata || []).forEach((m) => {
+        if (m.title === 'Album') album = m.text;
+        if (m.title === 'Released') year = m.text;
+      });
+    }
+    return {
+      title: track.title,
+      artist: track.subtitle || '',
+      album,
+      year,
+      genre: (track.genres && track.genres.primary) || null,
+      pic: (track.images && track.images.coverart) || null,
+    };
+  } finally { sig.free(); }
+}
+
+/* ---------- 登录态 / Cookie ---------- */
+async function cookieHeader(extraCookie = '') {
+  const values = new Map();
+  const saved = await session.defaultSession.cookies.get({ url: 'https://www.bilibili.com/' });
+  saved.forEach((cookie) => values.set(cookie.name, cookie.value));
+  const bv = await ensureBuvid();
+  if (bv && !values.has('buvid3')) values.set('buvid3', bv);
+  String(extraCookie || '').split(';').forEach((part) => {
+    const pos = part.indexOf('=');
+    if (pos > 0) values.set(part.slice(0, pos).trim(), part.slice(pos + 1).trim());
+  });
+  return [...values].map(([key, value]) => `${key}=${value}`).join('; ');
+}
+
+// 带直连兜底的请求：Electron net.fetch 走 Chromium 网络栈，会应用系统代理，
+// 代理规则/TLS 拦截对个别域名（如 interface.music.163.com）可能直接重置连接（net::ERR_FAILED）。
+// 网络层失败时用 Node 内置 undici fetch 直连重试（默认不走系统代理；Cookie 等头部是显式传递的，行为一致）。
+async function fetchWithFallback(url, opts) {
+  try {
+    return await net.fetch(url, opts);
+  } catch (e) {
+    console.warn('net.fetch 失败，直连重试:', url.split('?')[0], '—', String((e && e.message) || e));
+    const directOpts = { ...opts };
+    delete directOpts.credentials; // undici 无 Electron session，Cookie 已在 headers 里显式带上
+    return fetch(url, directOpts);
+  }
+}
+
+async function biliFetch(url, opts = {}) {
+  let finalUrl = url;
+  if (opts.wbi) {
+    const qi = url.indexOf('?');
+    const base = qi >= 0 ? url.slice(0, qi) : url;
+    const query = qi >= 0 ? url.slice(qi + 1) : '';
+    finalUrl = base + '?' + (await signWbi(query));
+  }
+  const cookie = await cookieHeader(opts.cookie);
+  return fetchWithFallback(finalUrl, {
+    method: opts.method || 'GET',
+    credentials: 'include',
+    headers: {
+      'User-Agent': UA,
+      Referer: opts.referer || REFERER,
+      ...(cookie ? { Cookie: cookie } : {}),
+      ...(opts.headers || {}),
+    },
+    ...(opts.body ? { body: opts.body } : {}),
+  });
+}
+
+async function getAuthStatus() {
+  try {
+    const res = await biliFetch('https://api.bilibili.com/x/web-interface/nav');
+    const json = JSON.parse(await res.text());
+    const data = json && json.data;
+    if (json.code !== 0 || !data || !data.isLogin) return { isLogin: false };
+    return {
+      isLogin: true,
+      mid: data.mid,
+      uname: data.uname || '',
+      face: data.face || '',
+      vipType: data.vipType || 0,
+    };
+  } catch (e) {
+    return { isLogin: false, error: String(e) };
+  }
+}
+
+function notifyAuthChanged(auth) {
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('auth:changed', auth);
+}
+
+function openOfficialLogin() {
+  if (loginWin && !loginWin.isDestroyed()) {
+    loginWin.focus();
+    return;
+  }
+  loginWin = new BrowserWindow({
+    width: 1040,
+    height: 760,
+    minWidth: 900,
+    minHeight: 680,
+    parent: mainWin || undefined,
+    modal: !!mainWin,
+    show: false,
+    title: 'Bilibili 验证码登录',
+    backgroundColor: '#ffffff',
+    webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
+  });
+  let checking = false;
+  const check = async () => {
+    if (checking || !loginWin) return;
+    checking = true;
+    const auth = await getAuthStatus();
+    checking = false;
+    if (auth.isLogin && loginWin) {
+      notifyAuthChanged(auth);
+      loginWin.close();
+    }
+  };
+  const cookieChanged = (_event, cookie, _cause, removed) => {
+    if (!removed && /(^|\.)bilibili\.com$/.test(cookie.domain || '')) check();
+  };
+  session.defaultSession.cookies.on('changed', cookieChanged);
+  loginWin.webContents.on('page-title-updated', (event) => {
+    event.preventDefault();
+    if (loginWin) loginWin.setTitle('Bilibili 验证码登录');
+  });
+  loginWin.webContents.on('did-finish-load', check);
+  loginWin.on('closed', () => {
+    session.defaultSession.cookies.removeListener('changed', cookieChanged);
+    loginWin = null;
+  });
+  loginWin.once('ready-to-show', () => loginWin && loginWin.show());
+  loginWin.loadURL('https://passport.bilibili.com/login');
+}
+
+function createWindow() {
+  mainWin = new BrowserWindow({
+    width: 1200,
+    height: 780,
+    minWidth: 1120,
+    minHeight: 720,
+    frame: false, // 使用应用内右上角窗口控制，彻底隐藏系统红绿灯
+    roundedCorners: true,
+    backgroundColor: '#141610',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+    },
+  });
+  mainWin.loadFile(path.join(__dirname, 'renderer/index.html'));
+
+  // 渲染层右上角三个圆形按钮 → 窗口控制
+  ipcMain.on('win:min', () => mainWin.minimize());
+  ipcMain.on('win:max', () => {
+    if (mainWin.isMaximized()) mainWin.unmaximize();
+    else mainWin.maximize();
+  });
+  ipcMain.on('win:close', () => mainWin.close());
+}
+
+app.whenReady().then(() => {
+  // 开发态 Dock 图标（打包后由 app bundle 提供）
+  if (process.platform === 'darwin' && !app.isPackaged) {
+    app.dock.setIcon(path.join(__dirname, 'renderer/assets/icon.png'));
+  }
+  protocol.handle('biu-media', async (request) => {
+    const parsed = new URL(request.url);
+    const target = parsed.searchParams.get('url') || '';
+    if (!/^https:\/\//i.test(target)) return new Response('Invalid media URL', { status: 400 });
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+        'Access-Control-Allow-Headers': 'Range',
+      } });
+    }
+    let connectTimer;
+    try {
+      const cookie = await cookieHeader();
+      const range = request.headers.get('range');
+      const controller = new AbortController();
+      connectTimer = setTimeout(() => controller.abort(), 8000);
+      const remote = await net.fetch(target, {
+        method: request.method === 'HEAD' ? 'HEAD' : 'GET',
+        credentials: 'include',
+        signal: controller.signal,
+        headers: {
+          'User-Agent': UA,
+          Referer: REFERER,
+          ...(cookie ? { Cookie: cookie } : {}),
+          ...(range ? { Range: range } : {}),
+        },
+      });
+      const headers = new Headers(remote.headers);
+      headers.set('Access-Control-Allow-Origin', '*');
+      headers.set('Access-Control-Expose-Headers', 'Accept-Ranges, Content-Length, Content-Range');
+      // 渲染层放弃加载（切歌/重置媒体元素）时必须取消上游下载，
+      // 否则被遗弃的大视频流会一直占着 CDN 连接配额，后续请求全部挂起超时。
+      const body = remote.body ? new ReadableStream({
+        async start(out) {
+          const reader = remote.body.getReader();
+          try {
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) { out.close(); break; }
+              out.enqueue(value);
+            }
+          } catch (streamError) { try { out.error(streamError); } catch (e) {} }
+        },
+        cancel() {
+          controller.abort();
+          try { remote.body.cancel(); } catch (e) {}
+        },
+      }) : null;
+      return new Response(body, { status: remote.status, statusText: remote.statusText, headers });
+    } catch (error) {
+      console.error('媒体代理失败:', error);
+      return new Response('Media proxy failed', { status: 502 });
+    } finally {
+      clearTimeout(connectTimer);
+    }
+  });
+
+  // 关键：给发往 B 站 CDN 的请求统一加 Referer / UA，否则音/图 403
+  session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
+    const host = new URL(details.url).hostname;
+    const hit = CDN_HOSTS.some((d) => host === d || host.endsWith('.' + d));
+    if (hit) {
+      details.requestHeaders['Referer'] = REFERER;
+      details.requestHeaders['User-Agent'] = UA;
+    }
+    callback({ requestHeaders: details.requestHeaders });
+  });
+
+  // Web Audio 分析器需要可读的跨域媒体响应；仅为 B 站 CDN 补 CORS 响应头。
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    const host = new URL(details.url).hostname;
+    const hit = CDN_HOSTS.some((d) => host === d || host.endsWith('.' + d));
+    if (!hit) { callback({ responseHeaders: details.responseHeaders }); return; }
+    const headers = { ...(details.responseHeaders || {}) };
+    Object.keys(headers).forEach((key) => {
+      if (key.toLowerCase() === 'access-control-allow-origin') delete headers[key];
+    });
+    headers['Access-Control-Allow-Origin'] = ['*'];
+    callback({ responseHeaders: headers });
+  });
+
+  // 通用 GET：带 UA + Referer + Electron 持久化 Cookie，返回文本由渲染层自行解析
+  // opts.wbi = true 时对查询串做 WBI 签名（playurl / 字幕等接口风控需要）
+  ipcMain.handle('bili:get', async (_e, url, opts = {}) => {
+    try {
+      const res = await biliFetch(url, opts);
+      return { status: res.status, body: await res.text() };
+    } catch (e) {
+      return { status: -1, body: String(e) };
+    }
+  });
+
+  // Shazam 识曲：渲染层传入 16kHz 单声道 Float32 PCM，主进程出签名并请求匹配
+  ipcMain.handle('shazam:recognize', async (_e, payload) => {
+    try {
+      return await shazamRecognize(payload.pcm);
+    } catch (e) {
+      console.error('Shazam 识曲失败:', e);
+      return null;
+    }
+  });
+
+  // 网易云听歌识曲：vendored afp WASM 指纹 → interface.music.163.com 匹配
+  // payload: { pcm: ArrayBuffer（Float32 单声道 @48000Hz）, from, len }（from/len 单位：秒）
+  ipcMain.handle('ncm:recognize', async (_e, payload) => {
+    try {
+      // 渲染层已从原始 44.1/48k 音频截取 clip 并重采样为真实 48kHz Float32，
+      // 构造 AudioBuffer 形态（sampleRate + getChannelData）喂给 Encode
+      const audio48k = { sampleRate: 48000, getChannelData: () => new Float32Array(payload.pcm) };
+      const encoded = await require(path.join(__dirname, 'vendor/ncm/sandbox.bundle.cjs'))
+        .Encode(audio48k, payload.from, payload.len, 0);
+      // 直接 fetchWithFallback（不走 biliFetch，避免带 B 站 cookie；代理重置时自动直连重试）
+      const res = await fetchWithFallback('https://interface.music.163.com/api/music/audio/match', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          'origin': 'chrome-extension://pgphbbekcgpfaekhcbjamjjkegcclhhd',
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/102.0.0.0 Safari/537.36',
+        },
+        body: new URLSearchParams({
+          sessionId: '441df692-afea-4a54-8aff-f5f20fd34f12',
+          algorithmCode: 'shazam_v2',
+          duration: String(payload.len),
+          rawdata: encoded,
+          times: '2',
+          decrypt: '1',
+        }).toString(),
+      });
+      const json = JSON.parse(await res.text());
+      const result = (json && json.data && json.data.result) || [];
+      // 每项真实歌曲信息包在 .song 里（外层带 startTime 等匹配信息）
+      return result.map((item) => {
+        const song = item.song || item;
+        return {
+          id: song.id,
+          title: song.name,
+          artist: (song.artists || []).map((a) => a.name).join('/'),
+          album: song.album && song.album.name,
+        };
+      }).filter((s) => s.id && s.title);
+    } catch (e) {
+      console.error('网易云识曲失败:', e);
+      return null;
+    }
+  });
+
+  // 通用 POST：form 编码，自动从 session Cookie 补 bili_jct 作为 csrf（收藏等写接口需要）
+  ipcMain.handle('bili:post', async (_e, url, body = {}) => {
+    try {
+      const cookies = await session.defaultSession.cookies.get({ url: 'https://www.bilibili.com/' });
+      const csrf = ((cookies.find((c) => c.name === 'bili_jct') || {}).value) || '';
+      const params = new URLSearchParams();
+      Object.entries(body).forEach(([key, value]) => {
+        if (value !== undefined && value !== null) params.set(key, String(value));
+      });
+      if (csrf && !params.has('csrf')) params.set('csrf', csrf);
+      const res = await biliFetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: params.toString(),
+      });
+      return { status: res.status, body: await res.text() };
+    } catch (e) {
+      return { status: -1, body: String(e) };
+    }
+  });
+
+  // 扫码登录：主进程请求与轮询，Cookie 只保存在 Electron session 中。
+  ipcMain.handle('auth:status', () => getAuthStatus());
+  ipcMain.handle('auth:qr-start', async () => {
+    try {
+      const res = await biliFetch('https://passport.bilibili.com/x/passport-login/web/qrcode/generate', {
+        referer: 'https://passport.bilibili.com/login',
+      });
+      const json = JSON.parse(await res.text());
+      if (json.code !== 0 || !json.data) throw new Error(json.message || '无法生成二维码');
+      return {
+        ok: true,
+        key: json.data.qrcode_key,
+        image: await QRCode.toDataURL(json.data.url, {
+          width: 320, margin: 1,
+          color: { dark: '#171810', light: '#ffffff' },
+        }),
+      };
+    } catch (e) {
+      return { ok: false, message: String(e.message || e) };
+    }
+  });
+  ipcMain.handle('auth:qr-poll', async (_e, key) => {
+    try {
+      const url = 'https://passport.bilibili.com/x/passport-login/web/qrcode/poll?qrcode_key=' + encodeURIComponent(key);
+      const res = await biliFetch(url, { referer: 'https://passport.bilibili.com/login' });
+      const json = JSON.parse(await res.text());
+      if (json.code !== 0 || !json.data) throw new Error(json.message || '二维码轮询失败');
+      const result = { ok: true, code: json.data.code, message: json.data.message || '' };
+      if (json.data.code === 0) {
+        result.auth = await getAuthStatus();
+        notifyAuthChanged(result.auth);
+      }
+      return result;
+    } catch (e) {
+      return { ok: false, message: String(e.message || e) };
+    }
+  });
+  ipcMain.on('auth:open-login', () => openOfficialLogin());
+  ipcMain.handle('auth:logout', async () => {
+    const authNames = new Set(['SESSDATA', 'bili_jct', 'DedeUserID', 'DedeUserID__ckMd5', 'sid']);
+    const cookies = await session.defaultSession.cookies.get({ url: 'https://www.bilibili.com/' });
+    await Promise.all(cookies.filter((cookie) => authNames.has(cookie.name)).map((cookie) =>
+      session.defaultSession.cookies.remove('https://' + cookie.domain.replace(/^\./, '') + cookie.path, cookie.name)
+    ));
+    const auth = { isLogin: false };
+    notifyAuthChanged(auth);
+    return auth;
+  });
+
+  // 图片转 dataURL：渲染层 canvas 取色用，避免跨域污染
+  ipcMain.handle('bili:image', async (_e, url) => {
+    try {
+      const res = await net.fetch(url, { headers: { 'User-Agent': UA, Referer: REFERER } });
+      if (!res.ok) return null;
+      const buf = Buffer.from(await res.arrayBuffer());
+      const mime = res.headers.get('content-type') || 'image/jpeg';
+      return `data:${mime};base64,${buf.toString('base64')}`;
+    } catch (e) {
+      return null;
+    }
+  });
+
+  // 下载整文件视频：保存对话框 → 流式写盘，进度经 download:progress 事件回报
+  ipcMain.handle('download:start', async (_e, { url, filename }) => {
+    try {
+      const { canceled, filePath } = await dialog.showSaveDialog(mainWin, {
+        defaultPath: filename || 'biu-download.mp4',
+      });
+      if (canceled || !filePath) return { ok: false, canceled: true };
+      const res = await net.fetch(url, { headers: { 'User-Agent': UA, Referer: REFERER } });
+      if (!res.ok || !res.body) throw new Error('HTTP ' + res.status);
+      const total = +res.headers.get('content-length') || 0;
+      const file = fs.createWriteStream(filePath);
+      const reader = res.body.getReader();
+      let got = 0;
+      let lastNotify = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!file.write(value)) await new Promise((r) => file.once('drain', r));
+        got += value.length;
+        if (mainWin && !mainWin.isDestroyed() && got - lastNotify >= 4 * 1024 * 1024) {
+          lastNotify = got;
+          mainWin.webContents.send('download:progress', { got, total });
+        }
+      }
+      await new Promise((resolve, reject) => file.end((e) => (e ? reject(e) : resolve())));
+      return { ok: true, path: filePath };
+    } catch (e) {
+      console.error('下载失败:', e);
+      return { ok: false, message: String(e.message || e) };
+    }
+  });
+
+  // ---------- 桌面歌词悬浮窗 ----------
+  ipcMain.on('lyric:toggle', (_e, on) => {
+    if (on && !lyricWin) {
+      lyricWin = new BrowserWindow({
+        width: 880, height: 112,
+        frame: false, transparent: true, hasShadow: false,
+        alwaysOnTop: true, skipTaskbar: true, resizable: true,
+        minimizable: false, maximizable: false, fullscreenable: false,
+        webPreferences: { preload: path.join(__dirname, 'lyric-preload.js') },
+      });
+      lyricWin.setAlwaysOnTop(true, 'screen-saver');
+      lyricWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+      lyricWin.loadFile(path.join(__dirname, 'lyric.html'));
+      lyricWin.on('closed', () => {
+        lyricWin = null;
+        if (mainWin) mainWin.webContents.send('lyric:closed');
+      });
+    } else if (!on && lyricWin) {
+      lyricWin.close();
+      lyricWin = null;
+    }
+  });
+  // 主窗 → 歌词窗：同步当前歌词行
+  ipcMain.on('lyric:line', (_e, payload) => {
+    if (lyricWin) lyricWin.webContents.send('lyric:line', payload);
+  });
+
+  createWindow();
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  });
+});
+
+app.on('window-all-closed', () => {
+  if (lyricWin) { lyricWin.close(); lyricWin = null; }
+  app.quit(); // 单窗口播放器，关闭即退出
+});

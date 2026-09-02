@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><style>html,body{margin:0;height:100%}iframe{width:100vw;height:100vh;border:0;display:block}
+#err{position:fixed;left:8px;top:8px;z-index:99;color:#0f0;background:#000;font:11px/1.4 monospace;max-width:60vw;white-space:pre-wrap}</style></head>
+<body>
+<iframe id="f" src="../renderer/index.html"></iframe>
+<div id="err"></div>
+<script>
+  const f = document.getElementById('f');
+  f.addEventListener('load', () => {
+    const w = f.contentWindow;
+    const params = new URLSearchParams(location.search);
+    const apply = () => {
+      try {
+        w.eval(`
+          state.current = { bvid: 'BV1demo', aid: 1001, cid: 1, title: '直到世界尽头', up: '果味VC', duration: 299, pic: null };
+          (typeof updateView === 'function' ? updateView : go)('playing');
+          document.getElementById('npArtist').textContent = '果味VC';
+          document.getElementById('npTitle').textContent = '直到世界尽头';
+          document.getElementById('npAlbum').textContent = '专辑 · 果味VC';
+          ${params.get('like') ? "likes = [{ bvid: 'BV1demo', aid: 1001, cid: 1, title: '直到世界尽头', up: '果味VC', duration: 299, pic: null }];" : ''}
+          ${params.get('mode') ? `playMode = '${params.get('mode')}'; renderMode();` : ''}
+          ${params.get('fav') ? `
+          favFoldersCache = [
+            { id: 1, title: '默认收藏夹', count: 12, favored: true },
+            { id: 2, title: '华语宝藏', count: 46, favored: false },
+            { id: 3, title: '跑步歌单', count: 8, favored: false },
+          ];
+          renderFavButtons();
+          ${params.get('fav') === 'pop' ? 'openFavPop();' : ''}` : 'renderFavButtons();'}
+        // 无头截图排查：去掉弹层 backdrop-filter（软件渲染可能不合成）
+        const popEl = document.getElementById('favPop');
+        if (popEl && !popEl.hidden) popEl.style.backdropFilter = 'none';
+        `);
+      } catch (e) {
+        document.getElementById('err').textContent = 'EVAL ERROR: ' + (e.stack || e);
+      }
+      try {
+        const pop = f.contentDocument.getElementById('favPop');
+        const cs = f.contentWindow.getComputedStyle(pop);
+        const r = pop.getBoundingClientRect();
+        document.getElementById('err').textContent +=
+          `\npop: hidden=${pop.hidden} display=${cs.display} pos=${cs.position} left=${cs.left} top=${cs.top} rect=${Math.round(r.x)},${Math.round(r.y)} ${Math.round(r.width)}x${Math.round(r.height)} opacity=${cs.opacity} z=${cs.zIndex}` +
+          `\nchain=${(() => { let n = pop, c = []; while (n && n !== n.ownerDocument.body) { c.push(n.className || n.tagName); n = n.parentElement; } return c.join(' < '); })()}` +
+          `\nview=${pop.ownerDocument.body.dataset.view} viewClass=${(() => { const v = pop.closest('.view'); return v ? v.className + ' vis=' + pop.ownerDocument.defaultView.getComputedStyle(v).visibility + ' disp=' + pop.ownerDocument.defaultView.getComputedStyle(v).display : 'none'; })()}`;
+      } catch (e2) {
+        document.getElementById('err').textContent += '\nDIAG ERROR: ' + e2;
+      }
+      document.title = 'ready';
+    }, 900);
+  });
+</script>
+</body>
+</html>
