@@ -66,18 +66,29 @@ body {
 .boot-mask.done { opacity: 0; visibility: hidden; }
 .boot-mask.done .boot-badge { transform: scale(1.09); }
 .boot-mask.done .boot-word { opacity: 0; transition: opacity .4s ease; }
-.boot-badge { position: relative; display: grid; place-items: center; transition: transform .7s ease; }
-.boot-logo { width: 108px; height: 108px; display: block; border-radius: 26px;
-  filter: drop-shadow(0 10px 34px rgba(251,114,153,.35));
-  animation: boot-pop .8s cubic-bezier(.2,.9,.26,1.18) both, boot-breathe 2.6s ease-in-out .85s infinite; }
-.boot-ring { position: absolute; inset: -21px; border-radius: 50%;
-  border: 1.5px solid rgba(251,114,153,.5); animation: boot-ring 1.7s ease-out .3s infinite; }
+.boot-badge { position: relative; isolation: isolate; display: grid; place-items: center;
+  transition: transform .7s ease; }
+.boot-logo { position: relative; width: 108px; height: 108px; display: block;
+  animation: boot-pop .85s cubic-bezier(.22,.61,.36,1) both; }
+.boot-glow { position: absolute; width: 300px; height: 300px; z-index: -1; pointer-events: none;
+  background: radial-gradient(ellipse at center,
+    rgba(248,124,160,.52) 0%, rgba(245,110,151,.44) 15%, rgba(241,96,143,.30) 30%,
+    rgba(236,83,135,.16) 46%, rgba(231,75,129,.065) 62%, rgba(231,75,129,.015) 77%,
+    rgba(231,75,129,0) 100%);
+  filter: blur(22px); opacity: .72; will-change: transform, opacity;
+  animation: boot-glow-breathe 4.6s ease-in-out infinite; }
 .boot-word { font-size: 11px; font-weight: 600; letter-spacing: .42em; text-indent: .42em;
   color: rgba(255,255,255,.38); animation: boot-fade .9s ease .25s both; }
-@keyframes boot-pop { from { opacity: 0; transform: scale(.76); } }
-@keyframes boot-breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.035); } }
-@keyframes boot-ring { from { opacity: .75; transform: scale(.62); } to { opacity: 0; transform: scale(1.5); } }
+@keyframes boot-pop { from { opacity: 0; transform: scale(.94) translateY(4px); } }
+@keyframes boot-glow-breathe {
+  0%, 100% { opacity: .62; transform: scale(.96); }
+  50% { opacity: .9; transform: scale(1.07); }
+}
 @keyframes boot-fade { from { opacity: 0; transform: translateY(6px); } }
+@media (prefers-reduced-motion: reduce) {
+  .boot-logo, .boot-glow, .boot-word { animation: none; }
+  .boot-mask.done .boot-badge { transform: none; }
+}
 
 /* ============ 背景层 ============ */
 .backdrop { position: fixed; inset: 0; z-index: 0; filter: blur(var(--bg-blur, 0px)); }
@@ -192,8 +203,7 @@ body[data-view="playing"] .backdrop { opacity: .22; }
   font-size: var(--fs-logo); font-weight: 700; letter-spacing: -.01em;
   cursor: pointer;
 }
-.brand .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent);
-  box-shadow: 0 0 12px rgba(251,114,153,.8); }
+.brand-icon { width: 30px; height: 30px; flex: none; object-fit: contain; }
 .brand .gear { margin-left: var(--sp-4); width: 34px; height: 34px; border-radius: 50%;
   display: grid; place-items: center; color: var(--text-2); transition: .25s var(--ease); }
 .brand .gear:hover { background: var(--fill-hover); color: var(--text-1); }

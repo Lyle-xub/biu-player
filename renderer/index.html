@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <title>Biu · B 站音乐播放器</title>
+<link rel="icon" type="image/png" href="assets/icon.png">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body data-view="library">
@@ -10,7 +11,7 @@
 <!-- ============ 启动遮罩：应用图标 + 简洁入场动画，首帧即显示，load 后淡出 ============ -->
 <div class="boot-mask" id="bootMask" aria-hidden="true">
   <span class="boot-badge">
-    <span class="boot-ring"></span>
+    <span class="boot-glow"></span>
     <img class="boot-logo" src="assets/icon.png" alt="Biu">
   </span>
   <span class="boot-word">BIU PLAYER</span>
@@ -34,7 +35,7 @@
 <!-- ============ 顶栏 ============ -->
 <header class="topbar">
   <div class="brand" onclick="go('library')">
-    <span class="dot"></span>Biu
+    <img class="brand-icon" src="assets/icon.png" alt="">Biu
     <span class="gear" onclick="event.stopPropagation();openPanel('settings')"><svg width="16" height="16" viewBox="0 0 1024 1024" fill="currentColor"><path d="M924.8 625.7l-65.5-56c3.1-19 4.7-38.4 4.7-57.8s-1.6-38.8-4.7-57.8l65.5-56c10.1-8.6 13.8-22.6 9.3-35.2l-2.6-7.3a281.6 281.6 0 00-76-131.6l-4.9-5.2c-11.3-12-27.1-16.4-42.3-11.9l-76 22.4c-28.9-24.1-61.8-42.6-97.6-54.6l-21-73.9c-3.6-12.7-14.3-22.5-27.2-25.1l-7.5-1.4a281 281 0 00-154.5 0l-7.5 1.4c-12.9 2.6-23.6 12.4-27.2 25.1l-21 73.9c-35.8 12-68.7 30.5-97.6 54.6l-76-22.4c-15.2-4.5-31-.1-42.3 11.9l-4.9 5.2a281.6 281.6 0 00-76 131.6l-2.6 7.3c-4.5 12.6-.8 26.6 9.3 35.2l65.5 56c-3.1 19-4.7 38.4-4.7 57.8s1.6 38.8 4.7 57.8l-65.5 56c-10.1 8.6-13.8 22.6-9.3 35.2l2.6 7.3a281.6 281.6 0 0076 131.6l4.9 5.2c11.3 12 27.1 16.4 42.3 11.9l76-22.4c28.9 24.1 61.8 42.6 97.6 54.6l21 73.9c3.6 12.7 14.3 22.5 27.2 25.1l7.5 1.4a281 281 0 00154.5 0l7.5-1.4c12.9-2.6 23.6-12.4 27.2-25.1l21-73.9c35.8-12 68.7-30.5 97.6-54.6l76 22.4c15.2 4.5 31 .1 42.3-11.9l4.9-5.2a281.6 281.6 0 0076-131.6l2.6-7.3c4.5-12.6.8-26.6-9.3-35.2zM512 704c-106 0-192-86-192-192s86-192 192-192 192 86 192 192-86 192-192 192z"/></svg></span>
   </div>
   <nav class="seg pill" id="mainNav">

@@ -255,6 +255,7 @@ function createWindow() {
     minHeight: 720,
     frame: false, // 使用应用内右上角窗口控制，彻底隐藏系统红绿灯
     roundedCorners: true,
+    icon: path.join(__dirname, 'renderer/assets/icon.png'),
     backgroundColor: '#141610',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),

@@ -8,6 +8,15 @@ const heading = index.slice(index.indexOf('<div class="np-heading"'), index.inde
 const esc = (s) => s.replaceAll('&', '&amp;').replaceAll('"', '&quot;');
 http.createServer((req, res) => {
   res.setHeader('Cache-Control', 'no-store');
+  if (req.url === '/assets/icon.png') {
+    res.setHeader('Content-Type', 'image/png');
+    return res.end(fs.readFileSync(path.join(root, 'renderer/assets/icon.png')));
+  }
+  if (req.url === '/boot') {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    return res.end('<link rel="stylesheet" href="/styles.css">' +
+      index.slice(index.indexOf('<div class="boot-mask"'), index.indexOf('<!-- ============ 背景层')));
+  }
   if (req.url === '/styles.css') {
     res.setHeader('Content-Type', 'text/css');
     return res.end(fs.readFileSync(path.join(root, 'renderer/styles.css')));
