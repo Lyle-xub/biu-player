@@ -261,7 +261,10 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
     },
   });
-  mainWin.loadFile(path.join(__dirname, 'renderer/index.html'));
+  // React 重构版 UI：BIU_WEB_UI=1 或 renderer 缺位时加载 web-dist；默认仍走旧版 renderer
+  const useWebUi = process.env.BIU_WEB_UI === '1' ||
+    !fs.existsSync(path.join(__dirname, 'renderer/index.html'));
+  mainWin.loadFile(path.join(__dirname, useWebUi ? 'web-dist/index.html' : 'renderer/index.html'));
 
   // 渲染层右上角三个圆形按钮 → 窗口控制
   ipcMain.on('win:min', () => mainWin.minimize());

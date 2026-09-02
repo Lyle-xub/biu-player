@@ -252,16 +252,25 @@ function serveFile(res, file) {
 }
 
 // index.html 注入：viewport meta + bridge.js（须在 api.js 之前）+ mobile.css
+// React 构建版（web-dist/ 存在时优先）：bridge.js 插到 module 脚本前（module 延迟执行，bridge 先跑），
+// viewport 与 mobile.css 已分别内建于 web/index.html 与打包 CSS，无需再注入。
 let indexCache = null;
+const WEBDIST = path.join(ROOT, 'web-dist');
+const STATIC_ROOT = fs.existsSync(path.join(WEBDIST, 'index.html')) ? WEBDIST : RENDERER;
 function mobileIndex() {
   if (indexCache) return indexCache;
-  let html = fs.readFileSync(path.join(RENDERER, 'index.html'), 'utf8');
-  html = html.replace('<meta charset="UTF-8">',
-    '<meta charset="UTF-8">\n<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">');
-  html = html.replace('<link rel="stylesheet" href="styles.css">',
-    '<link rel="stylesheet" href="styles.css">\n<link rel="stylesheet" href="/__mobile/mobile.css">');
-  html = html.replace('<script src="api.js"></script>',
-    '<script src="/__mobile/bridge.js"></script>\n<script src="api.js"></script>');
+  let html = fs.readFileSync(path.join(STATIC_ROOT, 'index.html'), 'utf8');
+  if (STATIC_ROOT === WEBDIST) {
+    html = html.replace('<script type="module"',
+      '<script src="/__mobile/bridge.js"></script>\n<script type="module"');
+  } else {
+    html = html.replace('<meta charset="UTF-8">',
+      '<meta charset="UTF-8">\n<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">');
+    html = html.replace('<link rel="stylesheet" href="styles.css">',
+      '<link rel="stylesheet" href="styles.css">\n<link rel="stylesheet" href="/__mobile/mobile.css">');
+    html = html.replace('<script src="api.js"></script>',
+      '<script src="/__mobile/bridge.js"></script>\n<script src="api.js"></script>');
+  }
   indexCache = html;
   return html;
 }
@@ -479,9 +488,9 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // 其余按 renderer/ 静态文件处理
-    const f = path.normalize(path.join(RENDERER, p));
-    if (!f.startsWith(RENDERER)) { res.writeHead(403); res.end(); return; }
+    // 其余按静态文件处理（React 构建版优先，否则旧版 renderer/）
+    const f = path.normalize(path.join(STATIC_ROOT, p));
+    if (!f.startsWith(STATIC_ROOT)) { res.writeHead(403); res.end(); return; }
     serveFile(res, f);
   } catch (e) {
     console.error(p, e);

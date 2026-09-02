@@ -1692,3 +1692,8 @@ const api = {
     return window.bili.image(url);
   },
 };
+
+// 供 React 版前端（ES 模块）复用：挂到全局对象，模块内未限定标识符可经全局对象解析到。
+// 旧版渲染层是经典脚本共享词法作用域，这两行对它无副作用。
+window.api = api;
+window.coverSVG = coverSVG;

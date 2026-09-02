@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Biu · B 站音乐播放器</title>
+<link rel="icon" type="image/png" href="./assets/icon.png">
+</head>
+<body data-view="library">
+
+<!-- 启动遮罩：静态内联，首帧即显示，React 挂载后由其接管淡出 -->
+<div class="boot-mask" id="bootMask" aria-hidden="true">
+  <span class="boot-badge">
+    <span class="boot-glow"></span>
+    <img class="boot-logo" src="./assets/icon.png" alt="Biu">
+  </span>
+  <span class="boot-word">BIU PLAYER</span>
+</div>
+
+<div id="root"></div>
+<script src="./vendor/hls.min.js"></script>
+<script type="module" src="/src/main.jsx"></script>
+</body>
+</html>
