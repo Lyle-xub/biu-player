@@ -74,7 +74,7 @@ function toast(msg) {
 }
 
 /* ---------- 视图 / 面板控制 ---------- */
-const VIEW_ORDER = ['library', 'fav', 'radio', 'playlist', 'search', 'playing'];
+const VIEW_ORDER = ['library', 'fav', 'radio', 'playlist', 'search', 'up', 'playing'];
 let lastNonPlayingView = 'library'; // 播放页「返回上一页」用
 let prevView = 'library';           // 全局「返回上一页」用（任意视图）
 function updateView(v) {
@@ -111,12 +111,20 @@ function go(v) {
     return;
   }
   document.body.dataset.navDir = VIEW_ORDER.indexOf(v) >= VIEW_ORDER.indexOf(from) ? 'forward' : 'back';
+  closePanel(); // 切换视图时收掉抽屉（队列/设置），避免抽屉悬停在新页面上
   const primaryViews = new Set(['library', 'fav', 'radio']);
   const primarySwitch = primaryViews.has(from) && primaryViews.has(v);
   // 搜索页不走快照过渡：大搜索框带 backdrop-filter，快照会闪/残留毛玻璃方块，改用实时动画
   const searchInvolved = from === 'search' || v === 'search';
   if (primarySwitch) {
-    // 主导航由顶部选中条承担动效；页面自身不再从透明/模糊态二次淡入，避免闪白。
+    // 主导航切换：顶部选中条滑动 + 页面按方向平移淡入（无模糊，避免闪白）
+    const view = document.querySelector('.view-' + v);
+    if (view && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      view.classList.remove('view-entering');
+      void view.offsetWidth;
+      view.classList.add('view-entering');
+      setTimeout(() => view.classList.remove('view-entering'), 460);
+    }
     updateView(v);
   } else if (document.startViewTransition && !searchInvolved && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
     document.startViewTransition(() => updateView(v));
@@ -689,6 +697,23 @@ async function positionPreparedVideo(time, token, timeout = 800) {
   if (token !== videoLoadToken) throw new Error('视频加载已取消');
 }
 
+// 切回歌词页前等音频在目标位置缓冲出可播数据（MP4 合体流接管用），避免断音
+function waitForAudioHandoff(timeout = 900) {
+  if (audio.readyState >= 3) return Promise.resolve();
+  return new Promise((resolve) => {
+    let timer;
+    const done = () => { clean(); resolve(); };
+    const clean = () => {
+      clearTimeout(timer);
+      audio.removeEventListener('canplay', done);
+      audio.removeEventListener('error', done);
+    };
+    audio.addEventListener('canplay', done, { once: true });
+    audio.addEventListener('error', done, { once: true });
+    timer = setTimeout(done, timeout);
+  });
+}
+
 async function waitForDecodedVideoFrame(timeout = 420) {
   if (typeof video.requestVideoFrameCallback !== 'function') {
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
@@ -754,23 +779,40 @@ async function setVideoMode(on, force = false, immediate = false) {
     const wasVideoMode = videoModeOn();
     const videoWasActive = wasVideoMode && video.dataset.ready === 'true' && !video.paused;
     const wasPlaying = videoWasActive || !audio.paused;
-    const pos = videoWasActive && isFinite(video.currentTime) ? video.currentTime : audio.currentTime;
-    const muted = videoUsesSeparateAudio() ? audio.muted : video.muted;
-    if (audio.src && state.current) {
-      if (isFinite(pos)) audio.currentTime = Math.min(pos, audio.duration || pos);
+    if (videoUsesSeparateAudio()) {
+      // DASH 双轨：音频元素本来就是出声且在播的主时间轴（画面轨追随它），
+      // 切回歌词页完全不动音频，只停掉静音的画面轨——
+      // 旧逻辑用滞后最多 0.28s 的视频进度回设音频，每次切换都造成回跳卡顿。
+      video.muted = true;
+      video.pause();
+    } else if (audio.src && state.current && videoWasActive) {
+      // MP4 合体流且视频正在出声：切回时需要音频接管。
+      // 先静音定位并等目标位置缓冲就绪，再停视频、立即放音，把断点压到最小。
+      const pos = isFinite(video.currentTime) ? video.currentTime : audio.currentTime;
+      const muted = video.muted;
+      if (isFinite(pos)) {
+        audio.muted = true; // 定位期间不出声，避免与视频双重发声
+        try { audio.currentTime = Math.min(pos, audio.duration || pos); } catch (e) {}
+        if (wasPlaying) await waitForAudioHandoff(900);
+      }
+      video.muted = true;
+      video.pause();
       audio.muted = muted;
       if (wasPlaying && audio.paused) audio.play().catch(() => {});
+    } else {
+      // 视频没在出声（含未进入视频模式的路过调用）：音频本就是声音来源，完全不动
+      video.muted = true;
+      video.pause();
     }
     // 先让音频轨接管声音，再停掉视频并开始视觉转场，避免返回歌词时出现音频断点。
-    video.muted = true;
-    video.pause();
     if (immediate) setModeUI(false); else transitionMode(false);
     syncToggleIcon();
     return;
   }
   const token = force ? ++videoLoadToken : videoLoadToken;
   const source = activeMedia();
-  const wasPlaying = !source.paused;
+  // 段尾连播时 handleSegmentEnd 刚把旧流停掉（boundaryAdvanceAt），视为正在播放
+  const wasPlaying = !source.paused || Date.now() - boundaryAdvanceAt < 2000;
   // 进入视频前声音由 audio 承担；不要读取预热阶段被强制静音的 video。
   const desiredMuted = !!audio.muted;
   document.body.classList.add('video-pending');
@@ -889,6 +931,9 @@ function renderFavButtons() {
   like.setAttribute('aria-pressed', String(liked));
   fav.classList.toggle('on', favored);
   fav.setAttribute('aria-pressed', String(favored));
+  // 原视频页统计行的收藏状态同步
+  const vsFav = $('vsFavBtn');
+  if (vsFav) vsFav.classList.toggle('on', favored);
 }
 
 function closeFavPop() {
@@ -925,14 +970,17 @@ function renderFavPopList() {
   const keepScroll = list.scrollTop;
   if (!authState.isLogin) {
     list.innerHTML = '<div class="fav-pop-hint">登录 B 站后可收藏</div>';
+    positionFavPop();
     return;
   }
   if (!favFoldersCache) {
     list.innerHTML = '<div class="fav-pop-hint">加载中…</div>';
+    positionFavPop();
     return;
   }
   if (!favFoldersCache.length) {
     list.innerHTML = '<div class="fav-pop-hint">暂无收藏夹，请先在 B 站创建</div>';
+    positionFavPop();
     return;
   }
   list.innerHTML = favFoldersCache.map((f, i) => `
@@ -944,19 +992,34 @@ function renderFavPopList() {
   list.scrollTop = keepScroll;
   list.querySelectorAll('.fav-pop-item').forEach((el) =>
     el.addEventListener('click', () => toggleFavFolder(+el.dataset.fi)));
+  positionFavPop(); // 列表高度变化后重新判断上/下展开
 }
 
-async function openFavPop() {
+let favPopAnchor = null; // 弹层锚点按钮（btnFav / vsFavBtn），重绘后需要重新定位
+
+// fixed 定位：默认在按钮下方；下方空间不足时翻到上方展开，避免被窗口底边截断
+function positionFavPop() {
+  const pop = $('favPop');
+  const btn = favPopAnchor;
+  if (!pop || pop.hidden || !btn) return;
+  const rect = btn.getBoundingClientRect();
+  pop.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 268))}px`;
+  const h = pop.offsetHeight;
+  const up = rect.bottom + 10 + h > window.innerHeight - 12 && rect.top - h - 10 >= 8;
+  pop.classList.toggle('up', up);
+  pop.style.top = up ? `${rect.top - h - 10}px` : `${rect.bottom + 10}px`;
+}
+
+async function openFavPop(anchor) {
   const pop = $('favPop');
   if (!pop) return;
+  const btn = anchor || $('btnFav');
   closePlPop();
   favPopOpen = true;
-  // fixed 定位到按钮下方，避免被 np-heading 的 overflow 截断
-  const rect = $('btnFav').getBoundingClientRect();
-  pop.style.left = `${Math.max(8, rect.left)}px`;
-  pop.style.top = `${rect.bottom + 10}px`;
-  pop.hidden = false;
-  $('btnFav').setAttribute('aria-expanded', 'true');
+  favPopAnchor = btn;
+  pop.hidden = false; // 先显示再量高度，定位才准
+  positionFavPop();
+  if (btn === $('btnFav')) btn.setAttribute('aria-expanded', 'true');
   renderFavPopList();
   const t = state.current;
   if (authState.isLogin && !favFoldersCache && t) {
@@ -1002,6 +1065,27 @@ const trackCopy = (t) => ({
   up: t.up, duration: t.duration, pic: t.pic,
   ...(t.isSegment ? { isSegment: true, from: t.from, to: t.to, lyricRef: t.lyricRef } : {}),
 });
+
+/* ---------- 歌词偏移：按曲目持久化，同步时钟 = 播放时间 + 偏移 ---------- */
+let lyricOffsets = store.get('biu-lyric-offsets', {});
+if (!lyricOffsets || typeof lyricOffsets !== 'object' || Array.isArray(lyricOffsets)) lyricOffsets = {};
+const lyricOffsetOf = (t) => {
+  const k = trackKey(t);
+  return k && Number.isFinite(lyricOffsets[k]) ? lyricOffsets[k] : 0;
+};
+const fmtLyricOffset = (v) => (v > 0 ? '+' : '') + v.toFixed(1) + 's';
+function setLyricOffset(t, v) {
+  const k = trackKey(t);
+  if (!k) return;
+  v = Math.round(v * 10) / 10;
+  if (Math.abs(v) < 0.05) delete lyricOffsets[k];
+  else lyricOffsets[k] = v;
+  store.set('biu-lyric-offsets', lyricOffsets);
+  if (api.hasBridge && window.bili.storeSet) window.bili.storeSet('biu-lyric-offsets', lyricOffsets);
+  const el = $('lyricOffVal');
+  if (el) el.textContent = fmtLyricOffset(lyricOffsetOf(t));
+  syncLyric(true);
+}
 let plPopOpen = false;
 
 function closePlPop() {
@@ -1051,8 +1135,9 @@ function toggleTrackInPlaylist(index) {
   saveCustomPlaylists();
   renderPlPopList();
   renderMyPlaylists();
-  // 正在看这张歌单的详情页时同步刷新
-  if (state.playlist && state.playlist.customId === pl.id) openPlaylist(customPlaylistDetail(pl));
+  // 正在看这张歌单的详情页时同步刷新（不在详情页绝不能把页面拉回 playlist）
+  if (state.playlist && state.playlist.customId === pl.id
+      && document.body.dataset.view === 'playlist') openPlaylist(customPlaylistDetail(pl));
 }
 
 function openPlPop() {
@@ -1372,7 +1457,7 @@ function splitWaveCursorLoop() {
       && splitWave.duration > 0;
     cursor.style.display = ok ? '' : 'none';
     if (ok) cursor.style.left = (audio.currentTime / splitWave.duration * 100) + '%';
-    // 波形条右下角时间徽标：当前时间 / 总时长
+    // 波形上方时间徽标：当前时间 / 总时长
     const timeEl = $('splitWaveTime');
     if (timeEl && splitWave) {
       timeEl.textContent = `${fmtWave(ok ? audio.currentTime : 0)} / ${fmtWave(splitWave.duration)}`;
@@ -1480,6 +1565,7 @@ async function openSplitPanel() {
   splitSegments = [];
   splitWave = null;
   $('splitWave').hidden = true;
+  $('splitWaveTime').hidden = true;
   $('splitLog').innerHTML = '';
   $('splitLog').hidden = true;
   $('splitMask').hidden = false;
@@ -1502,6 +1588,7 @@ function closeSplitPanel() {
   splitSource = null;
   splitWave = null;
   $('splitWave').hidden = true;
+  $('splitWaveTime').hidden = true;
   stopSplitWaveCursor();
   Object.keys(splitMatchTimers).forEach((k) => clearTimeout(splitMatchTimers[k]));
 }
@@ -1548,7 +1635,11 @@ function destroyHls() {
 /* ---------- 「我喜欢」本地收藏 ---------- */
 let likes = [];
 try { likes = JSON.parse(localStorage.getItem('biu-likes') || '[]'); } catch (e) { likes = []; }
-const saveLikes = () => localStorage.setItem('biu-likes', JSON.stringify(likes));
+// 双写：主进程 JSON（主存储，抗崩溃）+ localStorage（冗余镜像）
+const saveLikes = () => {
+  try { localStorage.setItem('biu-likes', JSON.stringify(likes)); } catch (e) {}
+  if (api.hasBridge && window.bili.storeSet) window.bili.storeSet('biu-likes', likes);
+};
 const isLiked = (t) => !!(t && trackKey(t) && likes.some((l) => trackKey(l) === trackKey(t)));
 function toggleLike(t) {
   if (!t || t.isLive) { toast('直播不支持收藏'); return; }
@@ -1568,58 +1659,37 @@ function refreshLikeUI() {
   $('shelfMeta').innerHTML = `${likes.length} 首歌曲<i>·</i>本地收藏`;
   const count = $('shelfLikeCount');
   if (count) count.textContent = `${likes.length} 首歌曲`;
-  if (state.playlist && state.playlist.isLikes) openPlaylist(likesPlaylist());
+  if (state.playlist && state.playlist.isLikes
+      && document.body.dataset.view === 'playlist') openPlaylist(likesPlaylist());
 }
 
 const likeSVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 21C7 16.5 4 13.3 4 9.8 4 7.2 6 5 8.7 5c1.6 0 2.8.7 3.3 1.7C12.5 5.7 13.7 5 15.3 5 18 5 20 7.2 20 9.8c0 3.5-3 6.7-8 11.2z"/></svg>';
 
 /* ---------- 封面 HTML：有真实封面用 img，否则占位渐变 SVG ---------- */
-/* 封面内存缓存：加载成功后后台转成 blob: URL，重渲染/回滚时秒显，不再走网络 */
-const coverBlobCache = new Map(); // 原始 url -> blob: URL
-const coverBlobPending = new Set();
-
 function covHTML(t, size = 100) {
   if (t && t.pic) {
-    const cached = coverBlobCache.get(t.pic);
-    return `<img src="${esc(cached || t.pic)}"${cached ? '' : ` data-pic="${esc(t.pic)}"`} loading="lazy" alt="">`;
+    // 保留稳定的资源地址，让浏览器复用缓存；显示后换成 blob 会再次加载/解码。
+    return `<img src="${esc(t.pic)}" loading="lazy" decoding="async" alt="">`;
   }
   return coverSVG((t && t.seed) || 1, size);
 }
 
-// 封面加载完成后拉一份进内存缓存（跳过 data:/blob: 等本地地址），
-// 并把页面上所有引用该地址的 img 原地换成 blob: URL——
-// Chromium 会丢弃远离视口的 lazy 图片，回滚时改为从内存解码，不再走网络重取。
-function cacheCoverBlob(img) {
-  const orig = img.dataset.pic;
-  if (!orig || /^(data|blob|biu-media):/.test(orig)
-      || coverBlobCache.has(orig) || coverBlobPending.has(orig)) return;
-  coverBlobPending.add(orig);
-  fetch(orig)
-    .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
-    .then((blob) => {
-      if (coverBlobCache.size > 400) { // 简易上限，先进先出；不 revoke，避免仍在引用的 img 失效
-        coverBlobCache.delete(coverBlobCache.keys().next().value);
-      }
-      const burl = URL.createObjectURL(blob);
-      coverBlobCache.set(orig, burl);
-      document.querySelectorAll('img[data-pic]').forEach((el) => {
-        if (el.dataset.pic === orig) { el.removeAttribute('data-pic'); el.src = burl; }
-      });
-    })
-    .catch(() => {})
-    .finally(() => coverBlobPending.delete(orig));
-}
-
 /* ---------- 列表行 / 卡片渲染（沿用设计稿类名） ---------- */
-function trowHTML(t, i, on) {
+function trowHTML(t, i, on, editable = false) {
   const tag = t.isLive ? '<span class="tag-live">直播</span>' : '';
-  return `<div class="trow${on ? ' on' : ''}" data-qi="${i}">
+  const editBtns = editable
+    ? `<span class="t-grip" role="button" aria-label="拖动排序" title="按住拖动排序">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg></span>
+       <span class="t-del" data-del="${i}" role="button" aria-label="从歌单删除" title="从歌单删除">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></span>`
+    : '';
+  return `<div class="trow${on ? ' on' : ''}${editable ? ' editable' : ''}" data-qi="${i}">
     <span class="idx num"><i>${String(i + 1).padStart(2, '0')}</i><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></span>
     <span class="tt"><span class="tcov">${covHTML(t)}</span>
       <span style="min-width:0"><b>${esc(t.title)}${tag}</b><small>${esc(t.up)}</small></span></span>
     <span class="up">${esc(t.up)}</span>
     <span class="dur num">${t.isLive ? 'LIVE' : fmt(t.duration)}</span>
-    <span class="like${isLiked(t) ? ' liked' : ''}" data-like="${i}">${likeSVG}</span></div>`;
+    <span class="t-acts"><span class="like${isLiked(t) ? ' liked' : ''}" data-like="${i}">${likeSVG}</span>${editBtns}</span></div>`;
 }
 
 // 通用歌单卡片
@@ -1631,21 +1701,29 @@ function gcardHTML(title, meta, cover, badge = '', extra = '') {
     </div><h4>${esc(title)}</h4><p>${esc(meta)}</p></div>`;
 }
 
-// 封面作为整体加载：图片就绪前整卡毛玻璃遮罩，隐藏角标/计数，避免出现半成品的黑色块
-// 注意：img.complete 只代表数据就绪，不代表解码绘制完成——命中缓存的图仍需解码，
-// 这期间就揭罩会让角标先压在未绘制的深色封面上（黑色长方形）。所以统一等 decode()。
+// 追加推荐时只绑定新卡片。完成后真正移除占位层，而不是留下透明的无限动画。
+const boundCoverCards = new WeakSet();
 function bindCoverLoading(scope) {
   scope.querySelectorAll('.gcard:not(.cover-ready)').forEach((card) => {
+    if (boundCoverCards.has(card)) return;
+    boundCoverCards.add(card);
     const img = card.querySelector('.cover img');
-    if (!img) { card.classList.add('cover-ready'); return; }
-    const reveal = () => { card.classList.add('cover-ready'); cacheCoverBlob(img); };
+    const reveal = () => {
+      card.classList.add('cover-ready');
+      card.querySelector('.cover-loading')?.remove();
+    };
+    if (!img) { reveal(); return; }
     const decodeThenReveal = () => {
       if (!img.decode) { reveal(); return; }
       img.decode().then(reveal).catch(reveal);
     };
-    if (img.complete && img.naturalWidth) { decodeThenReveal(); return; }
+    if (img.complete) {
+      if (img.naturalWidth) decodeThenReveal();
+      else reveal(); // 缓存的失败图片可能已经触发过 error，不能永远保留加载层。
+      return;
+    }
     img.addEventListener('load', decodeThenReveal, { once: true });
-    img.addEventListener('error', () => card.classList.add('cover-ready'), { once: true });
+    img.addEventListener('error', reveal, { once: true });
   });
 }
 
@@ -1730,13 +1808,22 @@ async function playTrack(t) {
     }
     syncFavState(t);
     // 2. 拿音频地址并播放（音质跟随设置）
-    const url = await api.playUrl(t.bvid, t.cid, settings.quality);
-    if (state.current !== t) return;
-    audio.src = api.media(url);
+    // 分切歌单连播：同一稿件同一音质时复用已加载的音频管线，只做段内定位。
+    // 否则每次切歌都重新请求签名地址并重建整个媒体管线，冷缓冲深度 seek 必造成开头卡顿。
+    const reuseAudio = !!(t.isSegment && audio.src && !audio.error
+      && audio.dataset.bvid === t.bvid
+      && audio.dataset.quality === String(settings.quality));
+    if (!reuseAudio) {
+      const url = await api.playUrl(t.bvid, t.cid, settings.quality);
+      if (state.current !== t) return;
+      audio.src = api.media(url);
+      audio.dataset.bvid = t.bvid;
+      audio.dataset.quality = String(settings.quality);
+    }
     // 分切歌单的曲目：先定位到本段起点再播放（metadata 未就绪时浏览器会挂起此次 seek，
     // 即使 play() 因网络 stalled 也不会从整曲开头播起）
-    if (t.isSegment && isFinite(t.from) && t.from > 0) {
-      try { audio.currentTime = t.from; } catch (e) {}
+    if (t.isSegment && isFinite(t.from)) {
+      try { audio.currentTime = Math.max(0, t.from); } catch (e) {}
     }
     await audio.play();
     // 3. 封面取色 + 热评 + 歌词（不阻塞播放）
@@ -1761,6 +1848,8 @@ async function playLive(t) {
   try {
     audio.pause();
     audio.removeAttribute('src');
+    audio.removeAttribute('data-bvid');
+    audio.removeAttribute('data-quality');
     audio.load();
     liveVideo.poster = t.pic || '';
     $('liveTitle').textContent = t.title || '直播电台';
@@ -1990,6 +2079,16 @@ function fillPlayingDetail(d) {
   if (d.owner) {
     $('vUpName').textContent = d.owner.name || '—';
     if (d.owner.face) $('vUpAva').innerHTML = `<img src="${esc(d.owner.face)}" alt="">`;
+    // 关注按钮挂上 mid 并回填关注状态
+    const mid = d.owner.mid || 0;
+    const fol = $('vUpFol');
+    fol.dataset.fol = mid || '';
+    setFollowBtn(fol, false);
+    if (mid) {
+      api.upRelation(mid).then((attr) => {
+        if (fol.dataset.fol === String(mid) && (attr === 2 || attr === 6)) setFollowBtn(fol, true);
+      }).catch(() => {});
+    }
   }
   if (d.stat) {
     $('vsPlay').textContent = fmtNum(d.stat.view);
@@ -1997,6 +2096,16 @@ function fillPlayingDetail(d) {
     $('vsLike').textContent = fmtNum(d.stat.like);
     $('vsCoin').textContent = fmtNum(d.stat.coin);
     $('vsFav').textContent = fmtNum(d.stat.favorite);
+  }
+  // 点赞 / 投币 / 收藏的状态回填（未登录接口失败则保持默认）
+  if (d.bvid) {
+    ['vsLikeBtn', 'vsCoinBtn'].forEach((id) => $(id).classList.remove('on'));
+    api.arcRelation(d.bvid).then((rel) => {
+      if (!rel || !state.current || state.current.bvid !== d.bvid) return;
+      $('vsLikeBtn').classList.toggle('on', !!rel.like);
+      $('vsCoinBtn').classList.toggle('on', !!rel.coin);
+      $('vsFavBtn').classList.toggle('on', !!rel.favorite);
+    });
   }
 }
 
@@ -2458,7 +2567,16 @@ async function loadLyrics(t) {
   try {
     // 单曲：先按歌名 + UP 主搜索匹配歌词；搜不到（或不是单曲）再回退 B 站 AI 字幕
     let lines = null;
-    if (t.isSegment) {
+    // 手动匹配（分切段自动匹配同路径）：lyricRef 指向 QQ/网易云 LRC，优先于一切自动来源
+    if (t.lyricRef) {
+      const rel = await api.lyricForMatch(t.lyricRef);
+      if (state.current !== t) return;
+      if (rel && rel.length) {
+        const off = t.isSegment ? (t.from || 0) : 0;
+        lines = rel.map((l) => ({ ...l, from: l.from + off, to: l.to + off }));
+      }
+    }
+    if ((!lines || !lines.length) && t.isSegment) {
       // 分切曲目：优先匹配到的 QQ/网易云 LRC（相对歌曲起点 → 平移到视频绝对时钟）；
       // 没有匹配歌词则回退 AI 字幕，并裁到段内（防点击跳出分段）
       if (t.lyricRef) {
@@ -2474,7 +2592,7 @@ async function loadLyrics(t) {
         if (state.current !== t) return;
         lines = all ? all.filter((l) => l.to > (t.from || 0) && l.from < (Number.isFinite(t.to) ? t.to : Infinity)) : null;
       }
-    } else {
+    } else if (!lines || !lines.length) {
       if (isSingleTrack(t)) {
         lines = await api.searchLyric(t.title, t.up, t.duration || 0);
         if (state.current !== t) return;
@@ -2531,7 +2649,8 @@ async function loadLyrics(t) {
         const media = activeMedia();
         if (!l || !isFinite(media.duration)) return;
         lyricManualAnchor = null;
-        let target = l.from + 0.01;
+        // 有手动偏移时反推媒体时间，让点击落点与显示的歌词进度一致
+        let target = l.from - lyricOffsetOf(state.current) + 0.01;
         const seg = state.current;
         if (seg && seg.isSegment && Number.isFinite(seg.to)) {
           target = Math.max(seg.from || 0, Math.min(seg.to - 0.05, target));
@@ -2547,7 +2666,8 @@ async function loadLyrics(t) {
 
 function syncLyric(force) {
   if (!lyrics.length) return;
-  const cur = activeMedia().currentTime;
+  // 同步时钟 = 播放时间 + 该曲目的手动歌词偏移
+  const cur = activeMedia().currentTime + lyricOffsetOf(state.current);
   const box = $('lyrics');
   const lineEls = box.querySelectorAll('.line');
   let idx = -1;
@@ -2590,10 +2710,67 @@ function pushDeskLyric(line) {
     from: line.from,
     to: line.to,
     tokens: (line.tokens || []).map((tk) => ({ text: tk.text, t0: tk.t0, t1: tk.t1, timed: !!tk.timed })),
-    time: isFinite(media.currentTime) ? media.currentTime : 0,
+    time: isFinite(media.currentTime) ? media.currentTime + lyricOffsetOf(state.current) : 0,
     playing: !media.paused,
     accent: resolveMonetAccentRgb(),
   });
+}
+
+/* ---------- 手动匹配歌词：搜索 QQ/网易云候选 → 选曲换词；偏移见 lyricOffsets ---------- */
+let lyricMatchTrack = null; // 面板操作的曲目（通常即当前播放）
+
+function closeLyricMatch() {
+  $('lyricMask').hidden = true;
+  lyricMatchTrack = null;
+}
+
+function openLyricMatch() {
+  const t = state.current;
+  if (!t || t.isLive || !t.bvid) { toast('当前曲目不支持匹配歌词'); return; }
+  lyricMatchTrack = t;
+  $('lyricMask').hidden = false;
+  $('lyricMatchInput').value = `${t.title || ''} ${t.up || ''}`.trim();
+  $('lyricOffVal').textContent = fmtLyricOffset(lyricOffsetOf(t));
+  $('lyricMatchHint').textContent = '搜索 QQ 音乐 / 网易云，点选正确的歌曲替换当前歌词。';
+  $('lyricCands').innerHTML = '';
+  runLyricMatchSearch();
+}
+
+async function runLyricMatchSearch() {
+  const t = lyricMatchTrack;
+  const kw = $('lyricMatchInput').value.trim();
+  if (!t) return;
+  if (!kw) { $('lyricCands').innerHTML = '<div class="list-hint">输入关键词后搜索</div>'; return; }
+  $('lyricCands').innerHTML = '<div class="list-hint">搜索中…</div>';
+  let list;
+  try {
+    list = await api.searchSongCandidates(kw);
+  } catch (e) {
+    list = [];
+  }
+  if (lyricMatchTrack !== t || $('lyricMask').hidden) return;
+  if (!list.length) {
+    $('lyricCands').innerHTML = '<div class="list-hint">没有找到候选歌曲，换个关键词试试</div>';
+    return;
+  }
+  $('lyricCands').innerHTML = list.map((c, i) =>
+    `<div class="lyric-cand" data-ci="${i}">
+      <span class="lc-src ${c.source}">${c.source === 'qq' ? 'QQ 音乐' : '网易云'}</span>
+      <span class="lc-meta"><b>${esc(c.title)}</b><small>${esc(c.artist || '未知歌手')}</small></span>
+      <span class="lc-dur num">${c.duration > 0 ? fmt(c.duration) : ''}</span>
+    </div>`).join('');
+  $('lyricCands').querySelectorAll('.lyric-cand').forEach((el) =>
+    el.addEventListener('click', () => pickLyricCandidate(list[+el.dataset.ci])));
+}
+
+async function pickLyricCandidate(c) {
+  const t = lyricMatchTrack;
+  if (!t || !c) return;
+  // lyricRef 进入 loadLyrics 最高优先级：QQ 用 songmid、网易云用 id 拉 LRC
+  t.lyricRef = { source: c.source, id: c.id, songmid: c.songmid };
+  toast(`歌词已匹配：${c.title}${c.artist ? ' - ' + c.artist : ''}`);
+  closeLyricMatch();
+  if (state.current === t) loadLyrics(t);
 }
 
 /* 封面取色：dataURL → canvas 平均色，提亮/压暗生成三色驱动背景 */
@@ -2633,6 +2810,9 @@ function segmentRange(t) {
   return { from, to };
 }
 
+// 拖动进度条期间：timeupdate 不刷新进度 UI，避免与指针位置打架
+let progressDragging = false;
+
 function syncProgress(media = activeMedia()) {
   if (media !== activeMedia()) return;
   let dur = media.duration || 0;
@@ -2644,25 +2824,38 @@ function syncProgress(media = activeMedia()) {
     $('ppFill').style.width = '100%';
     return;
   }
-  // 分切曲目：进度映射到段内（0 → 段长），到达段尾自动切下一首
+  // 分切曲目：进度映射到段内（0 → 段长）；段尾兜底检测（主检测在 lyricFrame rAF）
   const seg = segmentRange(state.current);
   if (seg) {
-    if (cur >= seg.to) {
-      if (playMode === 'one') { try { media.currentTime = seg.from; } catch (e) {} }
-      else next();
+    if (cur >= seg.to && segHandledToken !== videoLoadToken) {
+      handleSegmentEnd(media, seg);
       return;
     }
     dur = seg.to - seg.from;
     cur = Math.max(0, cur - seg.from);
   }
-  $('ppCur').textContent = fmt(cur);
-  if (dur) {
-    $('ppDur').textContent = fmt(dur);
-    $('ppFill').style.width = (cur / dur * 100).toFixed(2) + '%';
-    const ring = $('ringPg');
-    if (ring) ring.style.strokeDasharray = `${(cur / dur * 132).toFixed(1)} 132`;
+  if (!progressDragging) {
+    $('ppCur').textContent = fmt(cur);
+    if (dur) {
+      $('ppDur').textContent = fmt(dur);
+      $('ppFill').style.width = (cur / dur * 100).toFixed(2) + '%';
+      const ring = $('ringPg');
+      if (ring) ring.style.strokeDasharray = `${(cur / dur * 132).toFixed(1)} 132`;
+    }
   }
   syncLyric();
+}
+
+// 拖动中直接按指针位置画进度 UI（不 seek），松手才提交 seek
+function paintProgressAt(frac) {
+  const media = activeMedia();
+  const seg = segmentRange(state.current);
+  const dur = seg ? seg.to - seg.from : media.duration;
+  if (!dur || !isFinite(dur)) return;
+  $('ppFill').style.width = (frac * 100).toFixed(2) + '%';
+  $('ppCur').textContent = fmt(frac * dur);
+  const ring = $('ringPg');
+  if (ring) ring.style.strokeDasharray = `${(frac * 132).toFixed(1)} 132`;
 }
 
 function bindMediaEvents(media) {
@@ -2677,6 +2870,9 @@ function bindMediaEvents(media) {
   media.addEventListener('pause', syncToggleIcon);
   media.addEventListener('ended', () => {
     if (media !== activeMedia()) return;
+    // 分切曲目由段尾检测（handleSegmentEnd）接管；此处的 ended 多为段尾切换等待期
+    // 旧流自然播完，若放行会连跳两首
+    if (segmentRange(state.current)) return;
     if (playMode === 'one') { media.currentTime = 0; media.play().catch(() => {}); }
     else next();
   });
@@ -2887,10 +3083,34 @@ video.addEventListener('error', () => {
   setVideoMode(true, true);
 });
 
+/* 分切段尾自动连播：timeupdate 粒度只有 ~250ms，发现段尾时旧流已经越界，
+   会继续播出一小段「下一段的内容」（听起来像别的歌闪了一下）。
+   这里用 rAF 提前 60ms 检测并立即停住旧流，把越界压到听不见的量级。 */
+let segHandledToken = -1;   // 当前曲目是否已触发过段尾切换（playTrack 里 ++videoLoadToken 天然重置）
+let boundaryAdvanceAt = 0;  // 段尾触发的连播时刻，setVideoMode 据此视为「正在播放」
+function handleSegmentEnd(media, seg) {
+  if (playMode === 'one') {
+    try { media.currentTime = seg.from; } catch (e) {}
+    return;
+  }
+  segHandledToken = videoLoadToken;
+  boundaryAdvanceAt = Date.now();
+  // 立即停掉发声的元素：音频模式停 audio；视频模式 DASH 双轨停 audio、合体流停 video
+  try { audio.pause(); } catch (e) {}
+  if (videoModeOn() && !videoUsesSeparateAudio()) { try { video.pause(); } catch (e) {} }
+  next();
+}
+
 // timeupdate 频率较低，歌词扫光用 rAF 补齐到屏幕刷新率。
 let deskTickAt = 0;
 function lyricFrame() {
   const media = activeMedia();
+  // 段尾提前检测（见 handleSegmentEnd 注释）
+  const segNow = state.current && segmentRange(state.current);
+  if (segNow && segHandledToken !== videoLoadToken && !media.paused && !media.ended
+      && isFinite(media.currentTime) && media.currentTime >= segNow.to - 0.06) {
+    handleSegmentEnd(media, segNow);
+  }
   if (lyrics.length && !media.paused) syncLyric();
   syncDanmaku();
   // 桌面歌词时钟：150ms 一次对齐播放位置，扫光由歌词窗本地插值渲染
@@ -2915,6 +3135,8 @@ let spectrumAnalyser = null;
 let spectrumData = null;
 let spectrumReady = false;
 let spectrumLevels = new Float32Array(SPECTRUM_BARS);
+// 空闲（未播放且各柱已回落到基线）时跳过一帧 112 次 DOM 写入，避免空转烧 CPU
+let spectrumSettled = false;
 
 function initSpectrum() {
   const box = $('viz');
@@ -2958,6 +3180,8 @@ function activateSpectrum() {
 function renderSpectrum(now) {
   const media = activeMedia();
   const playing = !!media && !media.paused && !media.ended;
+  if (playing) spectrumSettled = false;
+  if (spectrumSettled) { requestAnimationFrame(renderSpectrum); return; }
   if (spectrumReady && spectrumAnalyser && spectrumData) spectrumAnalyser.getByteFrequencyData(spectrumData);
   let measuredEnergy = 0;
   if (spectrumData) {
@@ -2966,6 +3190,7 @@ function renderSpectrum(now) {
   }
   const useFallback = playing && measuredEnergy < 1.5;
   const t = (media && isFinite(media.currentTime) ? media.currentTime * 1000 : now) / 1000;
+  let maxLevel = 0;
   spectrumEls.forEach((bar, i) => {
     const x = i / Math.max(1, SPECTRUM_BARS - 1);
     const band = spectrumData
@@ -2976,18 +3201,52 @@ function renderSpectrum(now) {
     const signal = !playing ? 0 : (useFallback ? Math.max(.05, breathing) * .48 : Math.pow(band, .72));
     const target = .025 + signal * envelope * .96;
     spectrumLevels[i] += (target - spectrumLevels[i]) * (target > spectrumLevels[i] ? .38 : .12);
+    if (spectrumLevels[i] > maxLevel) maxLevel = spectrumLevels[i];
     bar.style.transform = `scaleY(${Math.max(.018, spectrumLevels[i]).toFixed(3)})`;
     bar.style.opacity = (.34 + Math.min(1, signal) * .66).toFixed(2);
   });
+  // 未播放且所有柱都回落到基线附近后进入空闲态，停止每帧 DOM 写入
+  if (!playing && maxLevel < 0.028) spectrumSettled = true;
   requestAnimationFrame(renderSpectrum);
 }
 
-// 点击进度条跳转
-$('ppTrack').addEventListener('click', (e) => {
+// 进度定位：按比例跳转（分切曲目映射到段内；DASH 双轨模式音视频一起定位）
+function seekToFraction(f) {
   const media = activeMedia();
   if (!media.duration || !isFinite(media.duration)) return;
-  const rect = e.currentTarget.getBoundingClientRect();
-  media.currentTime = ((e.clientX - rect.left) / rect.width) * media.duration;
+  const frac = Math.min(1, Math.max(0, f));
+  const seg = segmentRange(state.current);
+  const target = seg ? seg.from + frac * (seg.to - seg.from) : frac * media.duration;
+  if (videoModeOn() && videoUsesSeparateAudio()) seekVideoTimeline(target);
+  else media.currentTime = target;
+}
+
+// 播放页进度条（底部浮层 hover 后展开的同一条）：按住拖动 + 点击跳转
+$('ppTrack').addEventListener('pointerdown', (e) => {
+  const media = activeMedia();
+  if (!media.duration || !isFinite(media.duration)) return;
+  e.preventDefault();
+  const track = e.currentTarget;
+  track.setPointerCapture(e.pointerId);
+  progressDragging = true;
+  let frac = 0;
+  const fracOf = (ev) => {
+    const rect = track.getBoundingClientRect();
+    return Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
+  };
+  frac = fracOf(e);
+  paintProgressAt(frac);
+  const move = (ev) => { frac = fracOf(ev); paintProgressAt(frac); };
+  const up = () => {
+    progressDragging = false;
+    seekToFraction(frac);
+    track.removeEventListener('pointermove', move);
+    track.removeEventListener('pointerup', up);
+    track.removeEventListener('pointercancel', up);
+  };
+  track.addEventListener('pointermove', move);
+  track.addEventListener('pointerup', up);
+  track.addEventListener('pointercancel', up);
 });
 
 /* ---------- 音量 ---------- */
@@ -3045,6 +3304,7 @@ function recordHistory(t) {
   playHistory.unshift({ ...t, playedAt: Date.now() });
   if (playHistory.length > 60) playHistory.length = 60;
   store.set('biu-history', playHistory);
+  if (api.hasBridge && window.bili.storeSet) window.bili.storeSet('biu-history', playHistory);
   // 首页轮播的历史卡片封面同步成最近播放封面
   const card = $('cardHistory');
   if (card && t.pic) card.querySelector('.cover').innerHTML = `<img src="${esc(t.pic)}" alt="">`;
@@ -3092,10 +3352,14 @@ function openPlaylist(pl) {
     actions.querySelector('[data-custom-act="edit"]')
       .addEventListener('click', togglePlEditing);
   }
+  // 自建歌单（含 MixSplitR 分切歌单）：行内排序 / 删除。
+  // 分切曲目的 from/to/isSegment 都在 track 对象上，移动/删除只是数组操作，互不影响。
+  const plEntry = pl.customId ? customPlaylists.find((p) => p.id === pl.customId) : null;
   $('list-playlist').innerHTML = pl.tracks.length
-    ? pl.tracks.map((t, i) => trowHTML(t, i, state.current === t)).join('')
+    ? pl.tracks.map((t, i) => trowHTML(t, i, state.current === t, !!plEntry)).join('')
     : `<div class="list-hint">${esc(pl.emptyHint || '这里还空空如也，去点几个心形吧')}</div>`;
   bindTrackList($('list-playlist'), pl.tracks);
+  if (plEntry) bindPlTrackEdit($('list-playlist'), plEntry);
   go('playlist');
 }
 // 绑定列表点击：行 → 播放；心形 → 收藏
@@ -3112,10 +3376,101 @@ function bindTrackList(container, tracks) {
   });
 }
 
+// 自建歌单（含分切歌单）行内编辑：手柄拖拽排序 + 删除；改动直接落在 customPlaylists 并持久化
+function bindPlTrackEdit(container, plEntry) {
+  container.querySelectorAll('.t-del').forEach((el) => {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const i = +el.dataset.del;
+      const t = plEntry.tracks[i];
+      if (!t) return;
+      // 删除动画：淡出 + 高度收拢，动画结束后再真正移除并重绘
+      const row = el.closest('.trow');
+      if (row && !row.classList.contains('t-removing')) {
+        row.classList.add('t-removing');
+        row.style.height = row.offsetHeight + 'px';
+        requestAnimationFrame(() => row.classList.add('t-gone'));
+        setTimeout(() => {
+          plEntry.tracks.splice(i, 1);
+          saveCustomPlaylists();
+          toast(`已从「${plEntry.title}」删除《${t.title}》`);
+          refreshCustomPlaylist(plEntry);
+        }, 280);
+        return;
+      }
+      plEntry.tracks.splice(i, 1);
+      saveCustomPlaylists();
+      refreshCustomPlaylist(plEntry);
+    });
+  });
+  // 只有按住手柄才允许拖起整行，避免点行播放时误触发拖拽
+  const rows = () => [...container.querySelectorAll('.trow')];
+  rows().forEach((row) => {
+    const grip = row.querySelector('.t-grip');
+    if (!grip) return;
+    grip.addEventListener('pointerdown', () => { row.draggable = true; });
+    grip.addEventListener('click', (e) => e.stopPropagation());
+    row.addEventListener('dragstart', (e) => {
+      if (!row.draggable) { e.preventDefault(); return; }
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', row.dataset.qi);
+      row.classList.add('dragging');
+    });
+    row.addEventListener('dragend', () => {
+      row.draggable = false;
+      row.classList.remove('dragging');
+      // 拖动中 DOM 已实时重排，松手时按 DOM 顺序（data-qi 为原下标）写回数据
+      const order = rows().map((x) => +x.dataset.qi);
+      if (order.some((v, i) => v !== i)) {
+        const old = plEntry.tracks;
+        plEntry.tracks = order.map((i) => old[i]);
+        saveCustomPlaylists();
+      }
+      refreshCustomPlaylist(plEntry);
+    });
+  });
+  // 实时重排：找到第一个中点在指针下方的行，把被拖行插到它前面；否则排到末尾。
+  // 直接移动 DOM 节点（不用 transform 位移做命中），天然没有振荡，也支持拖到最底部；
+  // 移动时对其余行做 FLIP 动画：先按旧视觉位置反向位移一帧，再平滑滑向新槽位。
+  // 一段滑动未落定（.fly）时跳过本次移动，等下一拍 dragover——避免在途位移污染命中测试
+  container.addEventListener('dragover', (e) => {
+    const dragging = container.querySelector('.dragging');
+    if (!dragging) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (container.querySelector('.fly')) return;
+    const ref = rows().find((x) => {
+      if (x === dragging) return false;
+      const rect = x.getBoundingClientRect();
+      return e.clientY < rect.top + rect.height / 2;
+    });
+    if (ref ? dragging.nextElementSibling === ref : container.lastElementChild === dragging) return;
+    const before = new Map(rows().map((x) => [x, x.getBoundingClientRect().top]));
+    if (ref) container.insertBefore(dragging, ref);
+    else container.appendChild(dragging);
+    const movers = rows().filter((x) => x !== dragging)
+      .map((x) => [x, before.get(x) - x.getBoundingClientRect().top])
+      .filter(([, d]) => d);
+    movers.forEach(([x, d]) => {
+      x.classList.add('fly');
+      x.style.transition = 'none';
+      x.style.transform = `translateY(${d}px)`;
+    });
+    requestAnimationFrame(() => movers.forEach(([x]) => {
+      x.style.transition = 'transform .22s var(--ease)';
+      x.style.transform = '';
+      setTimeout(() => { x.classList.remove('fly'); x.style.transition = ''; }, 230);
+    }));
+  });
+}
+
 /* ---------- 本地自定义歌单：新建 / 删除 / 详情页内联编辑 ---------- */
 let customPlaylists = store.get('biu-playlists', []);
 if (!Array.isArray(customPlaylists)) customPlaylists = [];
-const saveCustomPlaylists = () => store.set('biu-playlists', customPlaylists);
+const saveCustomPlaylists = () => {
+  store.set('biu-playlists', customPlaylists);
+  if (api.hasBridge && window.bili.storeSet) window.bili.storeSet('biu-playlists', customPlaylists);
+};
 
 let plDialogMode = 'create'; // 'create' | 'delete'
 let plDialogTarget = -1;
@@ -3174,7 +3529,13 @@ function compressCoverFile(file, cb) {
 
 function refreshCustomPlaylist(pl) {
   renderMyPlaylists();
-  if (state.playlist && state.playlist.customId === pl.id) openPlaylist(customPlaylistDetail(pl));
+  if (state.playlist && state.playlist.customId === pl.id
+      && document.body.dataset.view === 'playlist') {
+    // 排序/删除触发的重绘保持编辑模式（不重新聚焦标题输入框）
+    const wasEditing = plEditing;
+    openPlaylist(customPlaylistDetail(pl));
+    if (wasEditing) setPlEditing(true, false);
+  }
 }
 
 function submitPlDialog() {
@@ -3217,6 +3578,8 @@ function currentFavFolder() {
 function resetPlEditingUI() {
   plEditing = false;
   document.querySelector('.pl-head').classList.remove('editing');
+  const tl = document.querySelector('.view-playlist .tlist');
+  if (tl) tl.classList.remove('editing');
   plCoverEditBtn.hidden = true;
   $('plTitle').style.display = '';
   $('plDesc').style.display = '';
@@ -3224,9 +3587,12 @@ function resetPlEditingUI() {
   $('plDescEdit').hidden = true;
 }
 
-function setPlEditing(on) {
+function setPlEditing(on, focus = true) {
   plEditing = on;
   document.querySelector('.pl-head').classList.toggle('editing', on);
+  // 行内排序 / 删除控件仅本地歌单（含分切歌单）在编辑模式下出现
+  const tl = document.querySelector('.view-playlist .tlist');
+  if (tl) tl.classList.toggle('editing', on && !!(state.playlist && state.playlist.customId));
   const btn = document.querySelector('[data-custom-act="edit"]');
   if (btn) btn.textContent = on ? '完成' : '编辑';
   // 封面角标仅本地歌单可用（B 站收藏夹封面不支持本地修改）
@@ -3255,7 +3621,7 @@ function setPlEditing(on) {
         }).catch(() => {});
       }
     }
-    $('plTitleEdit').focus();
+    if (focus) $('plTitleEdit').focus();
   }
 }
 
@@ -3633,7 +3999,7 @@ async function openFavFolder(folder) {
   $('list-playlist').innerHTML = '<div class="list-hint">加载中…</div>';
   try {
     pl.tracks = await api.favItems(folder.id);
-    if (state.playlist === pl) openPlaylist(pl);
+    if (state.playlist === pl && document.body.dataset.view === 'playlist') openPlaylist(pl);
   } catch (e) {
     $('list-playlist').innerHTML = '<div class="list-hint">加载失败：' + esc(e.message || e) + '</div>';
   }
@@ -3779,6 +4145,12 @@ async function doSearch(kw, page = 1) {
   $('vgrid').innerHTML = '<div class="list-hint">搜索中…</div>';
   $('ups').innerHTML = '';
   renderSearchPager();
+  // UP 主按名字匹配（与视频搜索并行，不阻塞视频结果）
+  if (page === 1) {
+    api.searchUps(searchKw)
+      .then((r) => renderUps(r.list))
+      .catch(() => { $('ups').innerHTML = '<div class="list-hint">UP 主搜索失败</div>'; });
+  }
   try {
     const res = await api.search(searchKw, searchOrder, searchDuration, searchPage);
     const results = res.list;
@@ -3791,18 +4163,305 @@ async function doSearch(kw, page = 1) {
       : '<div class="list-hint">没有找到相关视频</div>';
     $('vgrid').querySelectorAll('.vcard').forEach((el) =>
       el.addEventListener('click', () => setQueue(results, '搜索 · ' + searchKw, +el.dataset.vi)));
-    // UP 主：按作者聚合去重
-    const seen = new Map();
-    results.forEach((t) => seen.set(t.up, (seen.get(t.up) || 0) + 1));
-    $('ups').innerHTML = [...seen.entries()].slice(0, 6).map(([name, count], i) =>
-      `<div class="up-card"><span class="ava">${coverSVG(70 + i * 3)}</span>
-       <span><b>${esc(name)}</b><small>${count} 个相关视频</small></span><span class="fol">+ 关注</span></div>`).join('');
     renderSearchPager();
   } catch (e) {
     console.error(e);
     $('vgrid').innerHTML = '<div class="list-hint">搜索失败：' + esc(e.message || e) + '</div>';
     renderSearchPager();
   }
+}
+
+/* ---------- UP 主：横向滚动列表 / 关注 / 主页 ---------- */
+function fmtFans(n) {
+  return n >= 10000 ? (n / 10000).toFixed(1).replace(/\.0$/, '') + ' 万' : String(n);
+}
+
+function setFollowBtn(btn, on) {
+  btn.classList.toggle('on', on);
+  btn.textContent = on ? '已关注' : '+ 关注';
+}
+
+async function toggleFollow(mid, btn) {
+  const next = !btn.classList.contains('on');
+  btn.disabled = true;
+  try {
+    await api.followUp(mid, next);
+    // 同步搜索页与 UP 主页上所有指向该 mid 的关注按钮
+    document.querySelectorAll(`[data-fol="${mid}"]`).forEach((b) => setFollowBtn(b, next));
+    toast(next ? '已关注' : '已取消关注');
+  } catch (e) {
+    toast(e.message || '关注操作失败');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// 搜索页 UP 主：按关键词直接匹配用户；横向滚动，点击进主页，按钮关注/取关
+function renderUps(list) {
+  const box = $('ups');
+  if (!list.length) { box.innerHTML = '<div class="list-hint">没有匹配的 UP 主</div>'; return; }
+  box.innerHTML = list.map((u, i) =>
+    `<div class="up-card" data-mid="${u.mid}">
+      <span class="ava">${u.pic ? `<img src="${esc(u.pic)}" loading="lazy" alt="">` : coverSVG(70 + i * 3)}</span>
+      <span class="up-meta"><b>${esc(u.name)}</b><small>${fmtFans(u.fans)} 粉丝 · ${u.videos} 视频</small></span>
+      <button type="button" class="fol" data-fol="${u.mid}">+ 关注</button>
+    </div>`).join('');
+  box.querySelectorAll('.up-card').forEach((el) =>
+    el.addEventListener('click', () => openUpPage(+el.dataset.mid)));
+  box.querySelectorAll('.fol').forEach((btn) =>
+    btn.addEventListener('click', (e) => { e.stopPropagation(); toggleFollow(+btn.dataset.fol, btn); }));
+  // 已关注状态异步回填（未登录时全部为「+ 关注」）
+  list.forEach((u) => {
+    api.upRelation(u.mid).then((attr) => {
+      const btn = box.querySelector(`[data-fol="${u.mid}"]`);
+      if (btn && (attr === 2 || attr === 6)) setFollowBtn(btn, true);
+    }).catch(() => {});
+  });
+}
+
+/* ---------- UP 主主页 ---------- */
+let upPageMid = 0;
+let upPageName = '';
+let upTab = 'video';
+let upVideoPage = 1;
+let upVideoTotal = 0;
+let upVideoList = [];
+let upDynOffset = '';
+let upDynHasMore = false;
+let upLoadingMore = false;
+
+async function openUpPage(mid) {
+  if (!mid) return;
+  upPageMid = mid;
+  upTab = 'video';
+  upVideoPage = 1;
+  upVideoTotal = 0;
+  upVideoList = [];
+  upDynOffset = '';
+  upDynHasMore = false;
+  go('up');
+  $('upName').textContent = '加载中…';
+  $('upSign').textContent = '';
+  $('upStat').textContent = '';
+  $('upFace').innerHTML = '';
+  $('upVideos').innerHTML = '<div class="list-hint">加载中…</div>';
+  $('upDyns').innerHTML = '';
+  $('upDyns').hidden = true;
+  $('upVideos').hidden = false;
+  $('upMoreWrap').hidden = true;
+  $('upTabs').querySelectorAll('button').forEach((b) =>
+    b.classList.toggle('on', b.dataset.utab === 'video'));
+  const folBtn = $('upFol');
+  folBtn.dataset.fol = mid;
+  setFollowBtn(folBtn, false);
+  try {
+    const [info, stat, attr] = await Promise.all([
+      api.upInfo(mid), api.upStat(mid), api.upRelation(mid),
+    ]);
+    if (upPageMid !== mid) return;
+    upPageName = (info && info.name) || `UID ${mid}`;
+    $('upName').textContent = upPageName;
+    $('upSign').textContent = (info && info.sign) || '';
+    $('upStat').textContent = `${fmtFans(stat.fans)} 粉丝 · ${stat.following} 关注`;
+    $('upFace').innerHTML = info && info.face
+      ? `<img src="${esc(info.face)}" alt="">` : coverSVG(70);
+    setFollowBtn(folBtn, attr === 2 || attr === 6);
+  } catch (e) {
+    if (upPageMid === mid) $('upName').textContent = `UID ${mid}`;
+  }
+  loadUpVideos(mid, 1, false);
+}
+
+async function loadUpVideos(mid, page, append) {
+  try {
+    const r = await api.upVideos(mid, page);
+    if (upPageMid !== mid) return;
+    upVideoList = append ? upVideoList.concat(r.list) : r.list;
+    upVideoTotal = r.total;
+    upVideoPage = page;
+    const box = $('upVideos');
+    box.innerHTML = upVideoList.length ? upVideoList.map((t, i) =>
+      `<div class="vcard" data-vi="${i}"><div class="vth">${covHTML(t, 320)}<span class="dur-b num">${fmt(t.duration)}</span></div>
+       <h4>${esc(t.title)}</h4><p>${esc(t.up)}</p></div>`).join('')
+      : '<div class="list-hint">TA 还没有投稿视频</div>';
+    box.querySelectorAll('.vcard').forEach((el) =>
+      el.addEventListener('click', () => setQueue(upVideoList, 'UP · ' + upPageName, +el.dataset.vi)));
+    $('upMoreWrap').hidden = upTab !== 'video' || upVideoList.length >= upVideoTotal;
+  } catch (e) {
+    if (!append && upPageMid === mid)
+      $('upVideos').innerHTML = '<div class="list-hint">视频加载失败：' + esc(e.message || e) + '</div>';
+  }
+}
+
+function renderUpDyns(list, append) {
+  const box = $('upDyns');
+  const html = list.map((d) => {
+    const picHtml = d.kind === 'video' && d.pic
+      ? `<div class="dyn-th">${`<img src="${esc(d.pic)}" loading="lazy" alt="">`}<span class="dur-b num">视频</span></div>`
+      : (d.pic ? `<div class="dyn-pic"><img src="${esc(d.pic)}" loading="lazy" alt=""></div>` : '');
+    return `<div class="dyn-card${d.bvid ? ' dyn-video' : ''}"${d.bvid ? ` data-bvid="${esc(d.bvid)}"` : ''}>
+      <div class="dyn-body">
+        ${d.title ? `<b>${esc(d.title)}</b>` : ''}
+        ${d.text ? `<p>${esc(d.text)}</p>` : ''}
+        <small>${esc(d.time)}</small>
+      </div>${picHtml}</div>`;
+  }).join('');
+  if (append) box.insertAdjacentHTML('beforeend', html);
+  else box.innerHTML = html || '<div class="list-hint">暂无动态</div>';
+  // 视频动态：点击直接播放
+  box.querySelectorAll('.dyn-video:not([data-bound])').forEach((el) => {
+    el.dataset.bound = '1';
+    el.addEventListener('click', async () => {
+      try {
+        const v = await api.view(el.dataset.bvid);
+        if (!v) return;
+        setQueue([{
+          bvid: v.bvid, aid: v.aid, cid: v.cid, title: v.title,
+          up: (v.owner && v.owner.name) || '', duration: v.duration || 0,
+          pic: v.pic ? v.pic.replace(/^http:/, 'https:') : null,
+        }], 'UP 动态 · ' + upPageName, 0);
+      } catch (e) { toast('视频加载失败'); }
+    });
+  });
+}
+
+async function loadUpDyns(mid, append) {
+  try {
+    const r = await api.upDynamics(mid, append ? upDynOffset : '');
+    if (upPageMid !== mid) return;
+    upDynOffset = r.offset;
+    upDynHasMore = r.hasMore;
+    renderUpDyns(r.list, append);
+    $('upMoreWrap').hidden = upTab !== 'dyn' || !upDynHasMore;
+  } catch (e) {
+    if (!append && upPageMid === mid)
+      $('upDyns').innerHTML = '<div class="list-hint">动态加载失败：' + esc(e.message || e) + '</div>';
+  }
+}
+
+// 补齐 aid：点赞/投币/收藏都需要；分切曲目等可能只有 bvid
+async function ensureAid(t) {
+  if (!t || t.aid || !t.bvid || !api.hasBridge) return t && t.aid;
+  try {
+    const d = await api.view(t.bvid);
+    if (state.current === t) t.aid = d.aid;
+  } catch (e) { /* 保持无 aid，调用方报错 */ }
+  return t.aid;
+}
+
+// 原视频页操作：关注 UP / 进 UP 主页 / 点赞 / 投币 / 收藏（复用收藏夹弹层）
+function initVideoActions() {
+  const fol = $('vUpFol');
+  fol.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (fol.dataset.fol) toggleFollow(+fol.dataset.fol, fol);
+  });
+  const gotoUp = () => {
+    const mid = +(fol.dataset.fol || 0);
+    if (mid) openUpPage(mid);
+  };
+  $('vUpAva').addEventListener('click', gotoUp);
+  $('vUpName').addEventListener('click', gotoUp);
+  $('vsLikeBtn').addEventListener('click', async () => {
+    const t = state.current;
+    if (!t || t.isLive || !api.hasBridge) return;
+    const btn = $('vsLikeBtn');
+    if (btn.disabled) return;
+    btn.disabled = true;
+    try {
+      const aid = await ensureAid(t);
+      if (!aid) throw new Error('无法获取稿件信息');
+      const on = !btn.classList.contains('on');
+      await api.likeVideo(aid, on);
+      btn.classList.toggle('on', on);
+      const cur = $('vsLike').textContent;
+      if (/^\d+$/.test(cur)) $('vsLike').textContent = String(Math.max(0, +cur + (on ? 1 : -1)));
+      toast(on ? '已点赞' : '已取消点赞');
+    } catch (e) { toast(e.message || '点赞失败'); }
+    finally { btn.disabled = false; }
+  });
+  // 投币：点击投 1 枚，长按（约 0.5s）投 2 枚；成功后硬币飞起动画
+  const coinBtn = $('vsCoinBtn');
+  let coinHoldTimer = 0;
+  let coinHeld = false; // 长按已触发，抑制随后的 click
+  const coinFly = (n) => {
+    const src = coinBtn.querySelector('svg');
+    if (!src) return;
+    for (let i = 0; i < n; i++) {
+      const c = document.createElement('span');
+      c.className = 'coin-fly';
+      c.style.animationDelay = `${i * 150}ms`;
+      c.appendChild(src.cloneNode(true));
+      coinBtn.appendChild(c);
+      setTimeout(() => c.remove(), 1250 + i * 150);
+    }
+  };
+  const doCoin = async (n) => {
+    const t = state.current;
+    if (!t || t.isLive || !api.hasBridge) return;
+    if (coinBtn.disabled) return;
+    if (coinBtn.classList.contains('on')) { toast('已投过币'); return; }
+    coinBtn.disabled = true;
+    try {
+      const aid = await ensureAid(t);
+      if (!aid) throw new Error('无法获取稿件信息');
+      await api.coinVideo(aid, n);
+      coinBtn.classList.add('on');
+      const cur = $('vsCoin').textContent;
+      if (/^\d+$/.test(cur)) $('vsCoin').textContent = String(+cur + n);
+      coinFly(n);
+      toast(n > 1 ? '投币成功 +2' : '投币成功 +1');
+    } catch (e) { toast(e.message || '投币失败'); }
+    finally { coinBtn.disabled = false; }
+  };
+  coinBtn.addEventListener('click', () => {
+    if (coinHeld) { coinHeld = false; return; }
+    doCoin(1);
+  });
+  coinBtn.addEventListener('pointerdown', () => {
+    if (coinBtn.disabled || coinBtn.classList.contains('on')) return;
+    coinBtn.classList.add('holding');
+    coinHoldTimer = setTimeout(() => { coinHeld = true; doCoin(2); }, 520);
+  });
+  ['pointerup', 'pointerleave', 'pointercancel'].forEach((ev) =>
+    coinBtn.addEventListener(ev, () => {
+      clearTimeout(coinHoldTimer);
+      coinBtn.classList.remove('holding');
+    }));
+  $('vsFavBtn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (favPopOpen) closeFavPop();
+    else openFavPop($('vsFavBtn'));
+  });
+}
+
+function initUpPage() {
+  $('upFol').addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (upPageMid) toggleFollow(upPageMid, $('upFol'));
+  });
+  $('upTabs').querySelectorAll('button').forEach((b) =>
+    b.addEventListener('click', () => {
+      if (b.dataset.utab === upTab) return;
+      upTab = b.dataset.utab;
+      $('upTabs').querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
+      $('upVideos').hidden = upTab !== 'video';
+      $('upDyns').hidden = upTab !== 'dyn';
+      if (upTab === 'video') {
+        $('upMoreWrap').hidden = !upVideoList.length || upVideoList.length >= upVideoTotal;
+      } else {
+        if (!$('upDyns').children.length) loadUpDyns(upPageMid, false);
+        else $('upMoreWrap').hidden = !upDynHasMore;
+      }
+    }));
+  $('upMore').addEventListener('click', async () => {
+    if (upLoadingMore) return;
+    upLoadingMore = true;
+    try {
+      if (upTab === 'video') await loadUpVideos(upPageMid, upVideoPage + 1, true);
+      else await loadUpDyns(upPageMid, true);
+    } finally { upLoadingMore = false; }
+  });
 }
 
 /* ---------- 设置项接线（全部真实生效） ---------- */
@@ -3824,6 +4483,8 @@ function initSettings() {
           const url = await api.playUrl(t.bvid, t.cid, settings.quality);
           if (state.current !== t) return;
           audio.src = url;
+          audio.dataset.bvid = t.bvid;
+          audio.dataset.quality = String(settings.quality);
           audio.currentTime = pos;
           if (wasPlaying) await audio.play();
         } catch (e) {
@@ -4059,6 +4720,29 @@ function init() {
   document.addEventListener('click', (event) => {
     if (!dlMenu.hidden && !event.target.closest('#dlMenu') && event.target.closest('#btnDownload') === null) closeDlMenu();
   });
+
+  // 手动匹配歌词 / 歌词偏移面板
+  $('btnLyricMatch').addEventListener('click', (event) => { event.stopPropagation(); openLyricMatch(); });
+  $('lyricMatchGo').addEventListener('click', runLyricMatchSearch);
+  $('lyricMatchInput').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') runLyricMatchSearch();
+  });
+  $('lyricOffDown').addEventListener('click', () => setLyricOffset(lyricMatchTrack, lyricOffsetOf(lyricMatchTrack) - 0.5));
+  $('lyricOffUp').addEventListener('click', () => setLyricOffset(lyricMatchTrack, lyricOffsetOf(lyricMatchTrack) + 0.5));
+  $('lyricOffReset').addEventListener('click', () => setLyricOffset(lyricMatchTrack, 0));
+  $('lyricClose').addEventListener('click', closeLyricMatch);
+  $('lyricAuto').addEventListener('click', () => {
+    const t = lyricMatchTrack;
+    if (t) {
+      delete t.lyricRef; // 清掉手动匹配，恢复自动链路（搜词 / AI 字幕）
+      if (state.current === t) loadLyrics(t);
+      toast('已恢复自动歌词');
+    }
+    closeLyricMatch();
+  });
+  $('lyricMask').addEventListener('click', (event) => {
+    if (event.target === $('lyricMask')) closeLyricMatch();
+  });
   // 下载进度：每 4MB 主进程推一次，百分比写进 toast
   let dlLastPct = -1;
   window.bili && window.bili.onDownloadProgress && window.bili.onDownloadProgress(({ got, total }) => {
@@ -4113,6 +4797,7 @@ function init() {
         duration: result.duration, srcPcm: result.srcPcm, srcRate: result.srcRate,
       };
       $('splitWave').hidden = false;
+      $('splitWaveTime').hidden = false;
       renderSplitWave();
       if (!segs.length) {
         splitLog('未检测到分段');
@@ -4194,9 +4879,13 @@ function init() {
       }
       return;
     }
-    // 单击（移动 <4px）：来源正在播放时跳转试听
+    // 单击（移动 <4px）：来源正在播放时跳转试听；
+    // 与进度条同一条 seek 路径——视频模式（DASH 双轨）必须两条轨一起定位，
+    // 只动 audio 会让音画时间轴互拽、反复回拉，整体播放卡死
     if (state.current === splitSource && splitSource && !splitSource.isLive) {
-      audio.currentTime = splitWaveTimeAt(e.clientX);
+      const t = splitWaveTimeAt(e.clientX);
+      if (videoModeOn()) seekVideoTimeline(t);
+      else audio.currentTime = t;
     }
   });
   splitWaveEl.addEventListener('pointerleave', () => {
@@ -4322,6 +5011,7 @@ function init() {
     document.body.classList.remove('live-on');
     destroyHls();
     audio.pause(); audio.removeAttribute('src');
+    audio.removeAttribute('data-bvid'); audio.removeAttribute('data-quality');
     video.pause(); video.removeAttribute('src'); video.removeAttribute('data-bvid'); video.load();
     liveVideo.pause(); liveVideo.removeAttribute('src'); liveVideo.load();
     setModeUI(false);
@@ -4402,6 +5092,8 @@ function init() {
   }
 
   initSpectrum();
+  initUpPage();
+  initVideoActions();
   // 卡带占位封面（mock 模式下的渐变封面）
   document.querySelectorAll('[data-cover]').forEach((el) => {
     el.innerHTML = coverSVG(+el.dataset.cover);
@@ -4424,4 +5116,24 @@ function init() {
   loadRadio();
 }
 
-init();
+// 启动时先从主进程 JSON 仓恢复 likes / 自建歌单 / 历史；文件没有时回退 localStorage 并迁移过去
+(async () => {
+  if (api.hasBridge && window.bili.storeGet) {
+    const adopt = {
+      'biu-likes': (v) => { likes = v; },
+      'biu-playlists': (v) => { customPlaylists = v; },
+      'biu-history': (v) => { playHistory = v; },
+    };
+    for (const k of Object.keys(adopt)) {
+      try {
+        let v = await window.bili.storeGet(k);
+        if (v == null) {
+          const legacy = localStorage.getItem(k);
+          if (legacy != null) { v = JSON.parse(legacy); window.bili.storeSet(k, v); }
+        }
+        if (Array.isArray(v)) adopt[k](v);
+      } catch (e) {}
+    }
+  }
+  init();
+})();

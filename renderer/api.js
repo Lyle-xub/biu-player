@@ -112,6 +112,14 @@ function withApiTimeout(promise, ms = 8000, message = 'B 站接口请求超时')
   ]).finally(() => clearTimeout(timer));
 }
 
+// 图片地址归一：B 站接口常返回协议相对（//i0.hdslb.com/…）或 http 地址，
+// file:// 页面里协议相对会被解析成 file:// 导致裂图，统一补成 https
+function absImg(u) {
+  if (!u) return null;
+  if (u.startsWith('//')) return 'https:' + u;
+  return u.replace(/^http:/, 'https:');
+}
+
 async function jget(url, opts) {
   // IPC/网络偶发不返回时必须主动结束；否则 videoManifest 会缓存永久 pending 的 Promise。
   const r = await withApiTimeout(window.bili.get(url, opts), 8000);
@@ -773,6 +781,160 @@ const api = {
       .map(toTrack)
       .filter((t) => t.bvid && t.duration > 60);
     return { list, numPages: data.numPages || 1, page: data.page || page };
+  },
+
+  /* ---------- UP 主：搜索 / 关注 / 空间 ---------- */
+  // UP 主搜索（按名字匹配用户，不是相关视频的作者聚合）
+  // 返回 { list: [{ mid, name, fans, videos, sign, pic }], numPages }
+  async searchUps(keyword, page = 1) {
+    if (!hasBridge) return { list: [], numPages: 1 };
+    const data = await jget('https://api.bilibili.com/x/web-interface/search/type?search_type=bili_user&keyword='
+      + encodeURIComponent(keyword) + '&page=' + page);
+    const list = (data.result || [])
+      .filter((u) => u.mid && u.uname)
+      .map((u) => ({
+        mid: u.mid,
+        name: String(u.uname).replace(/<[^>]+>/g, ''),
+        fans: u.fans || 0,
+        videos: u.videos || 0,
+        sign: u.usign || '',
+        pic: absImg(u.upic),
+      }));
+    return { list, numPages: data.numPages || 1 };
+  },
+
+  // 关注状态：attribute 2=已关注 6=互关；未登录/失败返回 0（WBI 签名，relation 接口风控需要）
+  async upRelation(mid) {
+    if (!hasBridge || !mid) return 0;
+    try {
+      const data = await jget(`https://api.bilibili.com/x/relation/acc/info?mid=${mid}`, { wbi: true });
+      return data.attribute || 0;
+    } catch (e) {
+      console.warn('关注状态查询失败:', e);
+      return 0;
+    }
+  },
+
+  // 关注 / 取关：act 1 关注 2 取关；csrf 由主进程自动补
+  async followUp(mid, follow) {
+    if (!hasBridge || !mid) throw new Error('预览模式不支持关注');
+    const r = await withApiTimeout(window.bili.post(
+      'https://api.bilibili.com/x/relation/modify', { fid: mid, act: follow ? 1 : 2, re_src: 11 }),
+      8000, '关注操作超时');
+    if (r.status !== 200) throw new Error('HTTP ' + r.status);
+    const d = JSON.parse(r.body);
+    if (d.code !== 0) throw new Error(d.code === -101 ? '请先登录 B 站账号' : (d.message || ('code ' + d.code)));
+    return true;
+  },
+
+  // 稿件与当前用户的关系：{ like, coin, favorite }（0/1）；未登录/失败返回 null
+  async arcRelation(bvid) {
+    if (!hasBridge || !bvid) return null;
+    try {
+      return await jget(
+        `https://api.bilibili.com/x/web-interface/archive/relation?bvid=${encodeURIComponent(bvid)}`,
+        { wbi: true });
+    } catch (e) { return null; }
+  },
+
+  // 点赞 / 取消点赞：like 1 点赞 3 取消；csrf 由主进程自动补
+  async likeVideo(aid, like) {
+    if (!hasBridge || !aid) throw new Error('预览模式不支持点赞');
+    const r = await withApiTimeout(window.bili.post(
+      'https://api.bilibili.com/x/web-interface/archive/like', { aid, like: like ? 1 : 3 }),
+      8000, '点赞操作超时');
+    if (r.status !== 200) throw new Error('HTTP ' + r.status);
+    const d = JSON.parse(r.body);
+    if (d.code !== 0) throw new Error(d.code === -101 ? '请先登录 B 站账号' : (d.message || ('code ' + d.code)));
+    return true;
+  },
+
+  // 投币：n = 1/2 枚；csrf 由主进程自动补
+  async coinVideo(aid, n = 1) {
+    if (!hasBridge || !aid) throw new Error('预览模式不支持投币');
+    const r = await withApiTimeout(window.bili.post(
+      'https://api.bilibili.com/x/web-interface/coin/add', { aid, multiply: n, select_like: 0 }),
+      8000, '投币操作超时');
+    if (r.status !== 200) throw new Error('HTTP ' + r.status);
+    const d = JSON.parse(r.body);
+    if (d.code !== 0) throw new Error(d.code === -101 ? '请先登录 B 站账号' : (d.message || ('code ' + d.code)));
+    return true;
+  },
+  // UP 主空间信息（名字 / 头像 / 签名 / 等级）
+  async upInfo(mid) {
+    if (!hasBridge || !mid) return null;
+    const data = await jget(`https://api.bilibili.com/x/space/wbi/acc/info?mid=${mid}`, { wbi: true });
+    return {
+      mid: data.mid, name: data.name || '',
+      face: absImg(data.face),
+      sign: data.sign || '', level: data.level || 0,
+    };
+  },
+
+  // UP 主粉丝 / 关注数
+  async upStat(mid) {
+    if (!hasBridge || !mid) return { fans: 0, following: 0 };
+    const data = await jget(`https://api.bilibili.com/x/relation/stat?vmid=${mid}`);
+    return { fans: data.follower || 0, following: data.following || 0 };
+  },
+
+  // UP 主投稿视频（WBI 签名；order: pubdate 最新 / click 最多播放 / stow 最多收藏）
+  async upVideos(mid, page = 1, ps = 30) {
+    if (!hasBridge || !mid) return { list: [], total: 0 };
+    const data = await jget(
+      `https://api.bilibili.com/x/space/wbi/arc/search?mid=${mid}&pn=${page}&ps=${ps}&order=pubdate`,
+      { wbi: true });
+    const vlist = (data.list && data.list.vlist) || [];
+    return {
+      total: (data.page && data.page.count) || 0,
+      list: vlist.filter((v) => v.bvid).map((v) => {
+        // length 为 "mm:ss" / "hh:mm:ss" 文本
+        const parts = String(v.length || '0:0').split(':').map(Number);
+        const duration = parts.length === 3
+          ? parts[0] * 3600 + parts[1] * 60 + parts[2]
+          : parts[0] * 60 + (parts[1] || 0);
+        return {
+          bvid: v.bvid, aid: v.aid, cid: 0,
+          title: v.title, up: v.author || '',
+          duration, pic: absImg(v.pic),
+        };
+      }),
+    };
+  },
+
+  // UP 主动态：简化成 { kind, title, text, bvid, pic, time }；offset 分页游标
+  async upDynamics(mid, offset = '') {
+    if (!hasBridge || !mid) return { list: [], offset: '', hasMore: false };
+    const data = await jget(
+      `https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space?host_mid=${mid}&timezone_offset=-480`
+      + (offset ? `&offset=${encodeURIComponent(offset)}` : ''));
+    const list = (data.items || []).map((it) => {
+      const author = (it.modules && it.modules.module_author) || {};
+      const dyn = (it.modules && it.modules.module_dynamic) || {};
+      const major = dyn.major || null;
+      let kind = 'word';
+      let title = '';
+      let text = (dyn.desc && dyn.desc.text) || '';
+      let bvid = null;
+      let pic = null;
+      if (major && major.type === 'MAJOR_TYPE_ARCHIVE' && major.archive) {
+        kind = 'video';
+        title = major.archive.title || '';
+        bvid = major.archive.bvid || null;
+        pic = absImg(major.archive.cover);
+        if (!text) text = major.archive.desc || '';
+      } else if (major && major.type === 'MAJOR_TYPE_OPUS' && major.opus) {
+        title = major.opus.title || '';
+        if (!text && major.opus.summary) text = major.opus.summary.text || '';
+        const pics = major.opus.pics || [];
+        if (pics.length) pic = absImg(pics[0].url);
+      } else if (major && major.type === 'MAJOR_TYPE_DRAW' && major.draw) {
+        const items = major.draw.items || [];
+        if (items.length) pic = absImg(items[0].src);
+      }
+      return { kind, title, text, bvid, pic, time: author.pub_time || '' };
+    }).filter((d) => d.title || d.text || d.bvid);
+    return { list, offset: data.offset || '', hasMore: !!data.has_more };
   },
 
   // 视频详情：cid / aid / pic / owner / pages / stat

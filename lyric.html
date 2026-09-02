@@ -165,12 +165,14 @@
           });
         });
         curEl.classList.remove('swap');
+        if (!clock.playing && tokenStates.length) paint(); // 暂停中换行：静态渲染一帧
       }, 150);
     }
 
     window.lyricApi.onLine((p) => {
       if (!p) return;
       clock = { time: p.time || 0, playing: !!p.playing, at: performance.now() };
+      if (clock.playing) ensureLoop(); // 暂停时由 frame 自行停表，恢复播放时重新启动
       if (p.tick) return; // 纯时钟对齐，不换行
       if (Array.isArray(p.accent)) {
         accent = p.accent;
@@ -183,7 +185,7 @@
     });
 
     /* 逐帧扫光：mask 前沿 + 词发光 + 填充渐变，算法与主窗 updateMonetLineWords 一致 */
-    function frame() {
+    function paint() {
       const t = mediaTime();
       for (const tk of tokenStates) {
         const wordPassed = t > tk.t1;
@@ -234,9 +236,20 @@
         const alpha = Math.min(1, BASE_ALPHA + (0.98 - BASE_ALPHA) * progress);
         tk.fill.style.backgroundImage = `linear-gradient(90deg, ${mixRgb([255,255,255], accent, progress, alpha)} 0%, ${mixRgb([255,255,255], accent, progress, .92 * alpha)} 68%, ${mixRgb([255,255,255], accent, progress, .72 * alpha)} 100%)`;
       }
+    }
+
+    // 只在播放中跑 rAF；暂停时渲染最后一帧静态画面后停表，避免 60fps 空转烧 CPU/GPU
+    let rafRunning = false;
+    function ensureLoop() {
+      if (rafRunning || !clock.playing) return;
+      rafRunning = true;
       requestAnimationFrame(frame);
     }
-    requestAnimationFrame(frame);
+    function frame() {
+      paint();
+      if (clock.playing) requestAnimationFrame(frame);
+      else rafRunning = false;
+    }
 
     document.getElementById('close').addEventListener('click', () => window.lyricApi.close());
   </script>

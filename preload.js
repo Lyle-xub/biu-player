@@ -22,6 +22,9 @@ contextBridge.exposeInMainWorld('bili', {
   authOpenLogin: () => ipcRenderer.send('auth:open-login'),
   authLogout: () => ipcRenderer.invoke('auth:logout'),
   onAuthChanged: (cb) => ipcRenderer.on('auth:changed', (_event, auth) => cb(auth)),
+  // 本地数据仓（likes / 自建歌单 / 历史）：主进程 JSON 文件，带原子写入与 .bak
+  storeGet: (key) => ipcRenderer.invoke('store:get', key),
+  storeSet: (key, val) => ipcRenderer.send('store:set', key, val),
   // 窗口控制
   winMin: () => ipcRenderer.send('win:min'),
   winMax: () => ipcRenderer.send('win:max'),

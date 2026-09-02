@@ -248,8 +248,9 @@ function openOfficialLogin() {
 
 function createWindow() {
   mainWin = new BrowserWindow({
-    width: 1200,
-    height: 780,
+    // 启动即最小尺寸
+    width: 1120,
+    height: 720,
     minWidth: 1120,
     minHeight: 720,
     frame: false, // 使用应用内右上角窗口控制，彻底隐藏系统红绿灯
@@ -308,12 +309,13 @@ app.whenReady().then(() => {
       headers.set('Access-Control-Expose-Headers', 'Accept-Ranges, Content-Length, Content-Range');
       // 渲染层放弃加载（切歌/重置媒体元素）时必须取消上游下载，
       // 否则被遗弃的大视频流会一直占着 CDN 连接配额，后续请求全部挂起超时。
+      let bodyReader = null;
       const body = remote.body ? new ReadableStream({
         async start(out) {
-          const reader = remote.body.getReader();
+          bodyReader = remote.body.getReader();
           try {
             for (;;) {
-              const { done, value } = await reader.read();
+              const { done, value } = await bodyReader.read();
               if (done) { out.close(); break; }
               out.enqueue(value);
             }
@@ -321,7 +323,12 @@ app.whenReady().then(() => {
         },
         cancel() {
           controller.abort();
-          try { remote.body.cancel(); } catch (e) {}
+          // body 被上面的 getReader() 锁定，直接 body.cancel() 会得到一个
+          // 拒绝的 Promise（未处理即闪退）；取消 reader 才是合法路径
+          try {
+            if (bodyReader) bodyReader.cancel().catch(() => {});
+            else remote.body.cancel().catch(() => {});
+          } catch (e) {}
         },
       }) : null;
       return new Response(body, { status: remote.status, statusText: remote.statusText, headers });
@@ -376,6 +383,43 @@ app.whenReady().then(() => {
       console.error('Shazam 识曲失败:', e);
       return null;
     }
+  });
+
+  /* ---------- 本地数据仓：likes / 自建歌单 / 历史 ----------
+     之前存在 Chromium localStorage，渲染进程被强杀导致 leveldb 损坏时
+     Chromium 会整库删除重建，数据全丢。改为 userData 下独立 JSON：
+     写临时文件再原子替换 + .bak 冗余，崩溃也不会留半个文件。 */
+  let biuStoreCache = null;
+  const biuStoreFile = () => path.join(app.getPath('userData'), 'biu-store.json');
+  const readBiuStore = () => {
+    if (biuStoreCache) return biuStoreCache;
+    try { biuStoreCache = JSON.parse(fs.readFileSync(biuStoreFile(), 'utf8')); } catch (e) {
+      // 主文件损坏时回退 .bak
+      try { biuStoreCache = JSON.parse(fs.readFileSync(biuStoreFile() + '.bak', 'utf8')); } catch (e2) { biuStoreCache = {}; }
+    }
+    if (!biuStoreCache || typeof biuStoreCache !== 'object') biuStoreCache = {};
+    return biuStoreCache;
+  };
+  let biuStoreTimer = null;
+  const scheduleBiuStoreWrite = () => {
+    clearTimeout(biuStoreTimer);
+    biuStoreTimer = setTimeout(() => {
+      try {
+        const f = biuStoreFile();
+        const body = JSON.stringify(readBiuStore());
+        fs.writeFileSync(f + '.tmp', body);
+        fs.renameSync(f + '.tmp', f);
+        fs.writeFileSync(f + '.bak', body);
+      } catch (e) { /* 磁盘异常时静默，内存数据仍在 */ }
+    }, 300);
+  };
+  ipcMain.handle('store:get', (_e, key) => {
+    const v = readBiuStore()[String(key)];
+    return v === undefined ? null : v;
+  });
+  ipcMain.on('store:set', (_e, key, val) => {
+    readBiuStore()[String(key)] = val;
+    scheduleBiuStoreWrite();
   });
 
   // 网易云听歌识曲：vendored afp WASM 指纹 → interface.music.163.com 匹配

@@ -18,7 +18,7 @@
 
 <!-- ============ 背景层 ============ -->
 <div class="backdrop"><div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div><div class="blob b4"></div></div>
-<div class="art-backdrop" id="artBackdrop" aria-hidden="true"></div>
+<div class="art-backdrop-drift" aria-hidden="true"><div class="art-backdrop" id="artBackdrop"></div></div>
 <div class="grain"></div>
 <div class="topbar-bg"></div>
 <div class="window-drag-region" aria-hidden="true"></div>
@@ -209,6 +209,28 @@
   </section>
 </section>
 
+<!-- ================= UP 主主页 ================= -->
+<section class="view view-up">
+  <div class="up-head">
+    <span class="up-face" id="upFace"></span>
+    <div class="up-head-meta">
+      <h2 id="upName">加载中…</h2>
+      <p id="upSign"></p>
+      <span class="up-stat" id="upStat"></span>
+    </div>
+    <button type="button" class="fol up-fol" id="upFol">+ 关注</button>
+  </div>
+  <div class="up-tabs" id="upTabs">
+    <button type="button" class="on" data-utab="video">视频</button>
+    <button type="button" data-utab="dyn">动态</button>
+  </div>
+  <div class="vgrid" id="upVideos"></div>
+  <div class="up-dyns" id="upDyns" hidden></div>
+  <div class="sp-pager" id="upMoreWrap" hidden>
+    <button type="button" class="sp-btn" id="upMore">加载更多</button>
+  </div>
+</section>
+
 <!-- ================= 播放页 ================= -->
 <section class="view view-playing">
   <div class="np-left">
@@ -227,6 +249,10 @@
         <button type="button" class="np-src-split" id="btnDownload" title="下载原视频" aria-haspopup="true" aria-expanded="false">
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 5-5m-5 5-5-5M4 21h16"/></svg>
           <span>下载</span>
+        </button>
+        <button type="button" class="np-src-split" id="btnLyricMatch" title="手动匹配歌词 / 调整歌词时间">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V6l10-2v11"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="15" r="2.5"/></svg>
+          <span>歌词</span>
         </button>
       </div>
       <div class="np-actions" id="npActions">
@@ -335,16 +361,16 @@
     <div class="vinfo">
       <h3 id="vTitle">—</h3>
       <div class="vup">
-        <span class="ava" id="vUpAva"></span>
+        <span class="ava" id="vUpAva" role="button" title="进入 UP 主主页"></span>
         <span><b id="vUpName">—</b><small id="vUpFans"></small></span>
-        <span class="fol" onclick="toast('关注功能请前往 B 站')">+ 关注</span>
+        <button type="button" class="fol" id="vUpFol" data-fol="">+ 关注</button>
       </div>
       <div class="vstats">
         <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 5v14l11-7z"/></svg><i id="vsPlay" style="font-style:normal">—</i></span>
         <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h10M4 18h13"/></svg><i id="vsDm" style="font-style:normal">—</i> 弹幕</span>
-        <span><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M7 10v11H4a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1h3zm3.2 11V8.6l3.3-5.2c.7 1.9.4 3.7-.5 5.6h5.5a2 2 0 0 1 2 2.4l-1.6 8a2 2 0 0 1-2 1.6H10.2z"/></svg><i id="vsLike" style="font-style:normal">—</i></span>
-        <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>投币 <i id="vsCoin" style="font-style:normal">—</i></span>
-        <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 21C7 16.5 4 13.3 4 9.8 4 7.2 6 5 8.7 5c1.6 0 2.8.7 3.3 1.7C12.5 5.7 13.7 5 15.3 5 18 5 20 7.2 20 9.8c0 3.5-3 6.7-8 11.2z"/></svg>收藏 <i id="vsFav" style="font-style:normal">—</i></span>
+        <button type="button" class="vstat" id="vsLikeBtn"><svg width="15" height="14" viewBox="0 0 1143 1000" fill="currentColor" fill-rule="evenodd"><g transform="translate(0,1000) scale(1,-1)"><path d="M613 1000H619Q726 981 726 893Q720 740 720 720H1006Q1121 720 1143 619V595Q997 30 929 30Q880 0 792 0H339Q327 0 327 12V714Q496 934 566 988Q587 1000 613 1000ZM179 720H238Q250 718 250 708V12Q250 0 238 0H155Q0 19 0 137V565Q16 714 137 714Q137 720 179 720Z"/></g></svg><i id="vsLike" style="font-style:normal">—</i></button>
+        <button type="button" class="vstat" id="vsCoinBtn"><svg width="14" height="14" viewBox="0 0 1000 1000" fill="currentColor" fill-rule="evenodd"><g transform="translate(0,1000) scale(1,-1)"><path d="M505 1000Q812 1000 969 677Q1000 580 1000 495Q1000 188 677 31Q580 0 495 0Q188 0 31 323Q0 420 0 505Q0 812 323 969Q420 1000 505 1000ZM281 771V750Q281 743 307 724H453Q464 722 464 714V661Q456 653 370 630Q240 564 240 385V375Q240 333 281 333Q303 340 313 359V385Q313 522 411 568Q421 573 458 578L464 568V224Q474 198 500 198Q526 198 536 224V568Q538 578 547 578Q655 578 688 417V359Q701 333 729 333Q757 333 760 385Q760 585 599 641Q536 652 536 661V714Q538 724 547 724H677Q703 724 714 750V755Q714 797 646 797H333Q293 797 281 771Z"/></g></svg>投币 <i id="vsCoin" style="font-style:normal">—</i></button>
+        <button type="button" class="vstat" id="vsFavBtn" aria-haspopup="true" aria-expanded="false"><svg width="15" height="14" viewBox="0 0 1043 1000" fill="currentColor" fill-rule="evenodd"><g transform="translate(0,1000) scale(1,-1)"><path d="M532 1000Q554 1000 695 696Q1038 651 1038 630Q1043 621 1043 609Q1043 589 804 359Q858 49 858 27Q826 0 820 0Q731 42 522 152H516Q248 5 228 5H212Q185 21 185 38Q185 61 239 364Q3 581 0 603V614Q0 660 228 674Q353 691 353 707Q491 998 505 1000Z"/></g></svg>收藏 <i id="vsFav" style="font-style:normal">—</i></button>
       </div>
     </div>
   </div>
@@ -560,12 +586,12 @@
   <div class="split-panel" role="dialog" aria-modal="true">
     <h3>MixSplitR 分切</h3>
     <p id="splitHint">识别长视频中的每首歌曲；微调时间与歌名后自动联网匹配歌曲信息。</p>
+    <div class="split-wave-time" id="splitWaveTime" hidden></div>
     <div class="split-wave" id="splitWave" hidden>
       <canvas id="splitWaveCanvas"></canvas>
       <div class="split-wave-overlay" id="splitWaveOverlay"></div>
       <div class="split-wave-line" id="splitWaveHover" hidden><i></i></div>
       <div class="split-wave-tip" id="splitWaveTip" hidden></div>
-      <div class="split-wave-time" id="splitWaveTime"></div>
     </div>
     <div class="split-list" id="splitList"></div>
     <div class="split-log" id="splitLog" hidden></div>
@@ -584,6 +610,30 @@
       <button class="btn-primary" id="splitCreate" type="button">创建歌单</button>
     </div>
     <input type="file" id="splitFile" accept=".txt,.csv,.cue,.log,text/plain" hidden>
+  </div>
+</div>
+
+<!-- ============ 手动匹配歌词 / 歌词偏移面板 ============ -->
+<div class="pl-dialog-mask" id="lyricMask" hidden>
+  <div class="split-panel lyric-panel" role="dialog" aria-modal="true">
+    <h3>匹配歌词</h3>
+    <p id="lyricMatchHint">输入歌名（可带歌手）搜索 QQ 音乐 / 网易云，点选正确的歌曲替换当前歌词。</p>
+    <div class="lyric-match-row">
+      <input id="lyricMatchInput" class="pl-edit-input" placeholder="歌名 + 歌手" autocomplete="off">
+      <button class="btn-ghost" id="lyricMatchGo" type="button">搜索</button>
+    </div>
+    <div class="lyric-cands" id="lyricCands"></div>
+    <div class="lyric-off-row">
+      <span class="lyric-off-label">歌词偏移</span>
+      <button class="btn-ghost" id="lyricOffDown" type="button">− 0.5s</button>
+      <b class="num" id="lyricOffVal">0.0s</b>
+      <button class="btn-ghost" id="lyricOffUp" type="button">+ 0.5s</button>
+      <button class="btn-ghost" id="lyricOffReset" type="button">重置</button>
+    </div>
+    <div class="pl-dialog-actions">
+      <button class="btn-ghost" id="lyricAuto" type="button">恢复自动歌词</button>
+      <button class="btn-primary" id="lyricClose" type="button">完成</button>
+    </div>
   </div>
 </div>
 
