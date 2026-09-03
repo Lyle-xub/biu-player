@@ -175,6 +175,7 @@ export async function get(url, opts = {}) {
 
 // 表单 POST（与 mobile/server.js /api/req 的 post 分支一致：有 bili_jct 时自动补 csrf）
 export async function post(url, params = {}, opts = {}) {
+  await initClient();
   const body = new URLSearchParams();
   Object.entries(params).forEach(([k, v]) => {
     if (v !== undefined && v !== null) body.set(k, String(v));

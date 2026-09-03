@@ -9,9 +9,11 @@ import '../../renderer/api.js';
 import '../../renderer/hot-comment-motion.js';
 import '../../renderer/player-sheet-motion.js';
 import BiuPlaybackSession from '../../renderer/playback-session.js';
+import BiuLibrarySync from '../../renderer/library-sync.js';
 import '../../renderer/split-decode.js';
 
 window.BiuPlaybackSession = BiuPlaybackSession;
+window.BiuLibrarySync = BiuLibrarySync;
 
 export const api = window.api;
 export const coverSVG = window.coverSVG;

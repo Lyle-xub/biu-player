@@ -14,9 +14,8 @@
     "android": {
       "package": "com.biuplayer.mobile",
       "adaptiveIcon": {
-        "backgroundColor": "#0b0d09",
+        "backgroundColor": "#ffffff",
         "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       }
     },
@@ -38,7 +37,10 @@
           "supportsPictureInPicture": false
         }
       ],
-      "expo-image"
+      "expo-image",
+      "expo-sharing",
+      "./plugins/withLanSync",
+      "expo-asset"
     ]
   }
 }

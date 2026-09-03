@@ -1,127 +1,44 @@
-/* Biu Player RN · AMLL 风格歌词轨道（连续滚动 + 行级模糊 + 逐词白色光头）
- * 对照 github.com/amll-dev/applemusic-like-lyrics 视觉重做：
- * - 连续滚动：小数锚点 fracAnchor = 活跃行号 + 行内进度（line.from → 下一行.from，
- *   easeInOutQuad 缓动）；每次 position tick（PlayerContext ~250ms）重算全部可见行
- *   target，tx/ty/scale/opacity 用 300ms 线性 timing 追踪（native driver）——
- *   视觉上是歌词随播放缓缓上移，绝不一行行跳；seek/切行（漂移 >0.75s）用 200ms 快速就位。
- * - 行级模糊/明暗是 fracAnchor 距离 d = |i − fracAnchor| 的连续函数（不是离散档）：
- *   blur = d<0.15 ? 0 : min(6, d×2.2)（RN 0.86 新架构 View filter:[{blur}]，JS 线程按 tick
- *   直接写 style，仅可见 ~9 行参与）；opacity = max(.18, 1−d×.28)，|d|>4 为 0；
- *   scale = max(.85, 1−d×.04)。行间间距 14px，接近锚点平滑过渡到 18px。
- * - 活跃行逐词光头（整页单色白灰系，无粉色）：双层文本——底层整行 rgba(255,255,255,.45)
- *   + filter blur 1.2（未唱词的「灰+微糊」），前景层逐词 opacity 0→1 在词起唱 200ms 内
- *   crossfade 到纯白 #fff + 白色光晕（textShadowColor rgba(255,255,255,.9)、
- *   radius = 字号×.5、offset 0）；唱完的词保持白+光晕，整行唱完（position ≥ line.to）
- *   光晕 1s 内线性收敛到一半。词级时间轴沿用 buildLineTokens（Intl.Segmenter word
- *   粒度，回退字素均摊）；间奏 6 圆点复用同一套 token 机制，逐点点亮同为白色系。
- * - 保留：MaskedView 上下 alpha 渐隐遮罩（在 PlayerScreen）、左对齐、点行 seek、
- *   46% 焦点锚点、间奏行插入逻辑、非活跃行 numberOfLines={2}。
+/* Monet-style lyric rail: measured glyph sweep, independent lingering word glow.
+ * Reference: chthollyphile/folia-major MonetWordSweep + monetLyricsModel.
+ * One native clock drives static glyph masks; simple mode uses one fill per wrapped text row.
  */
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, Easing, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  Animated, AppState, Easing, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View,
+} from 'react-native';
+import MaskedView from '@react-native-masked-view/masked-view';
+import { LinearGradient } from 'expo-linear-gradient';
+import { buildLineTokens, splitLyricGraphemes, sweepFrames, glowFrames, LYRIC_CLOCK_AHEAD, shouldResetLyricClock } from '../player/lyricMotion';
+export { buildLineTokens, attachLyricInterludes } from '../player/lyricMotion';
 
 const FOCUS_RATIO = 0.46;       // 活跃行垂直中心在容器高 ×0.46
 const GAP_FAR = 14;             // 常规行距
-const GAP_NEAR = 18;            // 锚点附近行距（连续过渡）
+const GAP_NEAR = 18;            // 锚点附近行距
 const WINDOW = 4;               // |d| > 4 完全透明
-const TICK_MS = 300;            // 每 tick 连续追踪时长（线性）
-const JUMP_MS = 200;            // seek/切行快速就位时长
-const DRIFT_TOLERANCE = 0.75;   // position 跳变阈值（秒）
-const WORD_FADE_MS = 200;       // 词 crossfade：灰+微糊 → 白+光晕
-const GLOW_SETTLE_MS = 1000;    // 整行唱完光晕收敛时长
-const GLOW_SETTLE_TO = 0.5;     // 收敛到一半
+const SCROLL_MS = 420;          // 切行滚动时长（spotify-lyrics 式：仅活跃行变化时滚一次）
 const UNSUNG_BLUR = 1.2;        // 活跃行未唱词微糊（px）
-const GLOW_COLOR = 'rgba(255,255,255,0.9)';
-const GLOW_RADIUS_SCALE = 0.5;  // 光晕半径 = 字号 × .5
 const TOKEN_BASE = 'rgba(255,255,255,0.45)'; // 活跃行未唱词基色
 const INACTIVE_COLOR = 'rgba(255,255,255,0.72)'; // 非活跃行灰白（再乘 tone.opacity 压暗）
 
-const INTERLUDE_MIN_GAP = 3;
-const INTERLUDE_TEXT = '......';
+/* folia-major MonetWordSweep 光晕常量（glowShadow 公式；渲染改为词级模糊副本层） */
+const GLOW_BLUR_SCALE = 0.3;          // 柔光层模糊半径 ≈ 字号 × 0.3（folia 双层 0.28/0.65 的折中）
+
+/* folia 光带前沿：edgeSoftness = clamp(font×0.45, 6, 16)px 柔边（resolveMonetSweepEdgeSoftness） */
+const sweepEdge = (font) => clamp(font * 0.45, 6, 16);
+// 字素宽度估算（onLayout 实测值就绪前的兜底）：全角 ≈ 字号，半角 ≈ 0.56×字号
+const estimateCharWidth = (ch, font) => {
+  if (/^\s$/.test(ch)) return font * 0.33;
+  return (/[⺀-鿿豈-﫿　-￯]/).test(ch) ? font : font * 0.56;
+};
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
-const easeInOutQuad = (p) => (p < 0.5 ? 2 * p * p : 1 - ((-2 * p + 2) ** 2) / 2);
-const EASE_JUMP = Easing.bezier(0.22, 0.61, 0.36, 1);
+const EASE_SCROLL = Easing.bezier(0.22, 0.61, 0.36, 1);
 
-/* ---------- 词级时间轴合成（沿用 buildLineTokens） ---------- */
-// Hermes 可能没有 Intl.Segmenter，回退 Array.from 字素
-const lyricGraphemeSegmenter = typeof Intl !== 'undefined' && Intl.Segmenter
-  ? new Intl.Segmenter('zh', { granularity: 'grapheme' }) : null;
-const lyricWordSegmenter = typeof Intl !== 'undefined' && Intl.Segmenter
-  ? new Intl.Segmenter('zh', { granularity: 'word' }) : null;
-
-function splitLyricGraphemes(text) {
-  if (!text) return [];
-  if (lyricGraphemeSegmenter) return Array.from(lyricGraphemeSegmenter.segment(text), (s) => s.segment);
-  return Array.from(text);
-}
-
-export function buildLineTokens(text, from, to) {
-  const segments = lyricWordSegmenter
-    ? Array.from(lyricWordSegmenter.segment(text))
-    : splitLyricGraphemes(text).map((ch) => ({
-      segment: ch,
-      isWordLike: !/^\s$/.test(ch) && !/^\p{P}$/u.test(ch),
-    }));
-  const timedGraphemes = segments.reduce(
-    (sum, seg) => sum + (seg.isWordLike ? splitLyricGraphemes(seg.segment).length : 0), 0);
-  const unit = timedGraphemes > 0 ? Math.max(0, to - from) / timedGraphemes : 0;
-  let cursor = from;
-  return segments.map((seg, index) => {
-    const tokenText = seg.segment;
-    if (!seg.isWordLike || unit <= 0) {
-      return { text: tokenText, t0: null, t1: null, timed: false };
-    }
-    const count = splitLyricGraphemes(tokenText).length;
-    const t0 = cursor;
-    const t1 = index === segments.length - 1 ? to : cursor + unit * count;
-    cursor = t1;
-    return { text: tokenText, t0, t1, timed: true };
-  }).filter((token) => token.text);
-}
-
-/* 间奏圆点：间隔 > 3s 插入 '......'，6 个圆点均分时长 */
-export function attachLyricInterludes(lines) {
-  const result = [];
-  const createInterlude = (start, end) => {
-    const duration = Math.max(0, end - start);
-    const wordDuration = duration / 6;
-    return {
-      from: start, to: end, text: INTERLUDE_TEXT, interlude: true,
-      tokens: Array.from({ length: 6 }, (_, index) => ({
-        text: '.', timed: true,
-        t0: start + index * wordDuration,
-        t1: start + (index + 1) * wordDuration,
-      })),
-    };
-  };
-  if (lines.length && lines[0].from > INTERLUDE_MIN_GAP) {
-    result.push(createInterlude(0.5, lines[0].from - 0.5));
-  }
-  lines.forEach((line, index) => {
-    result.push(line);
-    const next = lines[index + 1];
-    if (next && next.from - line.to > INTERLUDE_MIN_GAP) {
-      result.push(createInterlude(line.to + 0.05, next.from - 0.05));
-    }
-  });
-  return result;
-}
-
-/* ---------- 连续锚点与行级连续函数 ---------- */
-// fracAnchor：活跃行号 + 行内进度（easeInOutQuad 让起步/收尾更柔）
-function computeFracAnchor(lines, activeIndex, position) {
-  const n = lines.length;
-  if (!n || activeIndex < 0) return 0;
-  const line = lines[activeIndex];
-  const next = lines[activeIndex + 1];
-  if (!next || next.from <= line.from) return activeIndex;
-  const p = clamp((position - line.from) / (next.from - line.from), 0, 1);
-  return activeIndex + easeInOutQuad(p);
-}
-
-// d = |i − fracAnchor|（小数）的连续函数
-function lineTone(d) {
+/* ---------- 整数锚点与行级函数（切行才滚动，参考 react-native-spotify-lyrics） ---------- */
+// d = |i − anchor|（anchor = activeIndex 整数）的函数
+function lineTone(d, simple, active) {
+  if (simple) return { scale: active ? 1.05 : Math.max(0.88, 0.96 - d * 0.02),
+    opacity: d > WINDOW ? 0 : active ? 1 : Math.max(0.22, 0.76 - d * 0.12), blur: active ? 0 : Math.min(6, d * 2.2) };
   if (d > WINDOW) return { scale: 0.85, opacity: 0, blur: 6 };
   return {
     scale: Math.max(0.85, 1 - d * 0.04),
@@ -130,46 +47,40 @@ function lineTone(d) {
   };
 }
 
-// 行距：离锚点越近越接近 18px，越远越接近 14px（连续）
+// 行距：离锚点越近越接近 18px，越远越接近 14px
 function gapBetween(a, b, f) {
   const closeness = clamp(1 - Math.min(Math.abs(a - f), Math.abs(b - f)), 0, 1);
   return GAP_FAR + (GAP_NEAR - GAP_FAR) * closeness;
 }
 
-function useLyricFont() {
-  const { width } = useWindowDimensions();
-  return clamp(width * 0.034, 30, 48);
+// One clock for the entire rail. Small native sample jitter adjusts speed, never rewinds
+// the visual position; explicit seeks and pause/buffering reset immediately.
+function useLyricClock(position, playing, revision) {
+  const time = useRef(new Animated.Value(position)).current;
+  const previous = useRef(null);
+  const [foreground, setForeground] = useState(AppState.currentState !== 'background' && AppState.currentState !== 'inactive');
+  useEffect(() => {
+    const listener = AppState.addEventListener('change', (state) => setForeground(state === 'active'));
+    return () => listener.remove();
+  }, []);
+  const running = playing && foreground;
+  useLayoutEffect(() => {
+    const sample = { pos: position, ts: performance.now(), playing: running, revision };
+    time.stopAnimation();
+    if (shouldResetLyricClock(previous.current, sample)) time.setValue(position);
+    previous.current = sample;
+    if (running) {
+      Animated.timing(time, { toValue: position + LYRIC_CLOCK_AHEAD, duration: LYRIC_CLOCK_AHEAD * 1000,
+        easing: Easing.linear, useNativeDriver: true, isInteraction: false }).start();
+    }
+    return () => time.stopAnimation();
+  }, [position, running, revision, time]);
+  return time;
 }
 
-/* ---------- 前景层逐词 span：v=透明度（crossfade），g=白色光晕 ---------- */
-function TokenSpan({ token, vals, font }) {
-  if (!vals) return <Text style={{ color: '#fff' }}>{token.text}</Text>;
-  const shadowColor = vals.g.interpolate({
-    inputRange: [0, 1],
-    outputRange: ['rgba(255,255,255,0)', GLOW_COLOR],
-  });
-  const shadowRadius = vals.g.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0, font * GLOW_RADIUS_SCALE],
-  });
-  return (
-    <Animated.Text
-      style={{
-        opacity: vals.v,
-        color: '#fff',
-        textShadowColor: shadowColor,
-        textShadowRadius: shadowRadius,
-        textShadowOffset: { width: 0, height: 0 },
-      }}
-    >
-      {token.text}
-    </Animated.Text>
-  );
-}
-
-/* ---------- 单行：target 每 tick 连续变化，300ms 线性追踪 ---------- */
+/* ---------- 单行：target 仅在切行（或行高测出）时变化，420ms 平滑滚动一次 ---------- */
 const RailLine = React.memo(function RailLine({
-  line, target, font, state, jump, onPress, onMeasure, position, playing,
+  line, target, font, state, onPress, onMeasure, time, simple, measureGlyphs, layoutReady,
 }) {
   const anims = useRef({
     tx: new Animated.Value(target.tx),
@@ -177,124 +88,24 @@ const RailLine = React.memo(function RailLine({
     sc: new Animated.Value(target.scale),
     op: new Animated.Value(target.opacity),
   }).current;
+  const positioned = useRef(false);
 
-  useEffect(() => {
-    const duration = jump ? JUMP_MS : TICK_MS;
-    const easing = jump ? EASE_JUMP : Easing.linear;
-    Animated.parallel([
-      Animated.timing(anims.tx, { toValue: target.tx, duration, easing, useNativeDriver: true }),
-      Animated.timing(anims.ty, { toValue: target.ty, duration, easing, useNativeDriver: true }),
-      Animated.timing(anims.sc, { toValue: target.scale, duration, easing, useNativeDriver: true }),
-      Animated.timing(anims.op, { toValue: target.opacity, duration, easing, useNativeDriver: true }),
-    ]).start();
-  }, [target.tx, target.ty, target.scale, target.opacity, jump]); // eslint-disable-line react-hooks/exhaustive-deps
+  useLayoutEffect(() => {
+    // First layout is measurement, not a lyric transition. Reveal all rows at their
+    // measured positions together instead of animating out of overlapping estimates.
+    const values = [[anims.tx, target.tx], [anims.ty, target.ty], [anims.sc, target.scale], [anims.op, target.opacity]];
+    if (!positioned.current || !layoutReady) {
+      values.forEach(([value, toValue]) => value.setValue(toValue));
+    } else {
+      Animated.parallel(values.map(([value, toValue]) => Animated.timing(value, {
+        toValue, duration: SCROLL_MS, easing: EASE_SCROLL, useNativeDriver: true,
+      }))).start();
+    }
+    positioned.current = layoutReady;
+    return () => values.forEach(([value]) => value.stopAnimation());
+  }, [target.tx, target.ty, target.scale, target.opacity, layoutReady, anims]);
 
-  /* ----- 活跃行逐词光头调度 ----- */
   const tokens = line.tokens || [];
-  const tokenVals = useMemo(
-    () => tokens.map((tok) => (tok.timed ? { v: new Animated.Value(0), g: new Animated.Value(0) } : null)),
-    [tokens],
-  );
-  const running = useRef([]);
-  const baseRef = useRef({ pos: 0, ts: 0 });
-  const settleDoneRef = useRef(false);
-
-  const stopTokens = () => {
-    running.current.forEach((a) => a.stop());
-    running.current = [];
-  };
-
-  // 按 now 重排程：已唱词直接驻留（白+光晕），未唱词 delay 到 t0 后 200ms crossfade
-  const reschedule = (now) => {
-    stopTokens();
-    baseRef.current = { pos: now, ts: Date.now() };
-    settleDoneRef.current = false;
-    tokens.forEach((tok, i) => {
-      if (!tok.timed) return;
-      const vals = tokenVals[i];
-      const sung = now >= tok.t0;
-      vals.v.setValue(sung ? 1 : 0);
-      vals.g.setValue(sung ? 1 : 0);
-      if (sung) return;
-      const anim = Animated.sequence([
-        Animated.delay(Math.max(0, (tok.t0 - now) * 1000)),
-        Animated.parallel([
-          Animated.timing(vals.v, {
-            toValue: 1, duration: WORD_FADE_MS, easing: Easing.linear, useNativeDriver: false,
-          }),
-          Animated.timing(vals.g, {
-            toValue: 1, duration: WORD_FADE_MS, easing: Easing.linear, useNativeDriver: false,
-          }),
-        ]),
-      ]);
-      running.current.push(anim);
-      anim.start();
-    });
-  };
-
-  const setTokensFinal = (v, g) => {
-    tokens.forEach((tok, i) => {
-      if (!tok.timed) return;
-      tokenVals[i].v.setValue(v);
-      tokenVals[i].g.setValue(g);
-    });
-  };
-
-  // 整行唱完：光晕 1s 内收敛一半（别骤降）
-  const settleGlow = () => {
-    const settles = [];
-    tokens.forEach((tok, i) => {
-      if (!tok.timed) return;
-      tokenVals[i].v.setValue(1);
-      settles.push(Animated.timing(tokenVals[i].g, {
-        toValue: GLOW_SETTLE_TO, duration: GLOW_SETTLE_MS, easing: Easing.linear, useNativeDriver: false,
-      }));
-    });
-    if (settles.length) {
-      const anim = Animated.parallel(settles);
-      running.current.push(anim);
-      anim.start();
-    }
-  };
-
-  // 行状态切换：active 排程 / passed 全部驻留（光晕半收敛）/ waiting 全部复位
-  useEffect(() => {
-    if (state === 'active') reschedule(position);
-    else {
-      stopTokens();
-      if (state === 'passed') setTokensFinal(1, GLOW_SETTLE_TO);
-      else setTokensFinal(0, 0);
-    }
-    return stopTokens;
-  }, [state]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // 暂停冻结，恢复时按新 now 重排程
-  useEffect(() => {
-    if (state !== 'active') return;
-    if (playing) reschedule(position);
-    else {
-      stopTokens();
-      baseRef.current = { pos: position, ts: Date.now() };
-    }
-  }, [playing]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // seek 漂移检测 + 行唱完光晕收敛
-  useEffect(() => {
-    if (state !== 'active' || !playing) return;
-    const { pos, ts } = baseRef.current;
-    const expected = pos + (Date.now() - ts) / 1000;
-    if (Math.abs(position - expected) > 0.3) {
-      reschedule(position);
-      return;
-    }
-    if (!settleDoneRef.current && position >= line.to) {
-      settleDoneRef.current = true;
-      stopTokens();
-      settleGlow();
-    }
-  }, [position]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const hasTokens = state === 'active' && tokens.length > 0;
   const padH = font * 0.72;
   const padT = font * 0.16;
   const padB = font * 0.34;
@@ -303,12 +114,12 @@ const RailLine = React.memo(function RailLine({
     {
       fontSize: font,
       lineHeight: font * 1.18,
-      fontWeight: state === 'active' ? '700' : '600',
+      fontWeight: '700',
     },
     line.interlude && { letterSpacing: font * 0.32 },
   ];
 
-  // 行级模糊：filter 是 View style prop（Text 不支持），包一层 View；JS 线程按 tick 写
+  // 行级模糊：filter 是 View style prop（Text 不支持），包一层 View；切行时随滚动一起过渡
   const lineBlur = target.blur >= 0.15 ? { filter: [{ blur: Math.round(target.blur * 10) / 10 }] } : null;
 
   return (
@@ -326,57 +137,25 @@ const RailLine = React.memo(function RailLine({
         },
       ]}
     >
-      {hasTokens ? (
-        <>
-          {/* 底层：整行灰白 + 微糊（未唱词透出的部分）；绝对定位，与前景同 padding 对齐 */}
-          <View
-            pointerEvents="none"
-            style={[styles.underlay, { paddingHorizontal: padH, paddingTop: padT, paddingBottom: padB }, { filter: [{ blur: UNSUNG_BLUR }] }]}
-          >
-            <Text style={[textStyle, { color: TOKEN_BASE }]}>{line.text}</Text>
-          </View>
-          {/* 前景层（在流内，定义行高）：逐词 200ms crossfade 到纯白 + 白色光晕；
-              无定时 token（空格/标点）跟随前一个词的 v/g */}
-          <Text
-            style={textStyle}
-            onPress={line.interlude ? undefined : onPress}
-          >
-            {(() => {
-              let lastTimed = -1;
-              return tokens.map((tok, i) => {
-                if (tok.timed) lastTimed = i;
-                return (
-                  <TokenSpan
-                    key={i}
-                    token={tok}
-                    vals={lastTimed >= 0 ? tokenVals[lastTimed] : null}
-                    font={font}
-                  />
-                );
-              });
-            })()}
-          </Text>
-        </>
-      ) : (
-        <View style={lineBlur}>
-          <Text
-            style={[textStyle, { color: INACTIVE_COLOR }]}
-            numberOfLines={2}
-            onPress={line.interlude ? undefined : onPress}
-          >
-            {line.text}
-          </Text>
-        </View>
-      )}
+      <TouchableOpacity activeOpacity={1} onPress={onPress} disabled={!!line.interlude}>
+        {simple ? <SimpleLine line={line} state={state} time={time} textStyle={textStyle} blur={lineBlur} />
+        : <View style={[styles.wordRow, lineBlur]}>
+          {tokens.map((token, i) => (
+            <SweepWord key={`${i}:${token.text}:${font}`} token={token} font={font} textStyle={textStyle}
+              state={state} lineEnd={line.to} time={time} measureGlyphs={measureGlyphs} />
+          ))}
+        </View>}
+      </TouchableOpacity>
     </Animated.View>
   );
 }, (prev, next) => (
   prev.line === next.line
   && prev.state === next.state
   && prev.font === next.font
-  && prev.jump === next.jump
-  && prev.position === next.position
-  && prev.playing === next.playing
+  && prev.time === next.time
+  && prev.simple === next.simple
+  && prev.measureGlyphs === next.measureGlyphs
+  && prev.layoutReady === next.layoutReady
   && prev.target.tx === next.target.tx
   && prev.target.ty === next.target.ty
   && prev.target.scale === next.target.scale
@@ -384,82 +163,202 @@ const RailLine = React.memo(function RailLine({
   && prev.target.blur === next.target.blur
 ));
 
-export default function LyricsRail({ lines, activeIndex, onSeek, height, width, position, playing }) {
-  const lyricFont = useLyricFont();
-  const [heights, setHeights] = useState({}); // index -> 未缩放布局高（含 padding）
-  const lastPosRef = useRef(position);
+// Native text layout supplies visual rows, so a wrapped lyric finishes the first
+// row before filling the next. Only the active lyric has a single static mask.
+function SimpleLine({ line, state, time, textStyle, blur }) {
+  const [rows, setRows] = useState([]);
+  const fills = useMemo(() => {
+    const total = rows.reduce((sum, row) => sum + row.width, 0);
+    let before = 0;
+    const duration = Math.max(0.001, line.to - line.from);
+    return rows.map((row) => {
+      const from = line.from + duration * before / total;
+      before += row.width;
+      const to = line.from + duration * before / total;
+      return { ...row, fill: time.interpolate({ inputRange: [from, to], outputRange: [-row.width, 0], extrapolate: 'clamp' }) };
+    });
+  }, [rows, time, line.from, line.to]);
+  return <View style={blur}>
+    <Text style={[textStyle, { color: state === 'passed' ? '#fff' : TOKEN_BASE }]}
+      onTextLayout={(e) => {
+        const next = e.nativeEvent.lines.filter((row) => row.width > 0).map(({ x, y, width, height }) => ({ x, y, width, height }));
+        setRows((prev) => JSON.stringify(prev) === JSON.stringify(next) ? prev : next);
+      }}>{line.text}</Text>
+    {state === 'active' && rows.length > 0 ? <MaskedView pointerEvents="none" androidRenderingMode="hardware"
+      accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={StyleSheet.absoluteFill}
+      maskElement={<Text style={[textStyle, { color: '#fff' }]}>{line.text}</Text>}>
+      {fills.map((row, i) => <View key={i} style={{ position: 'absolute', left: row.x, top: row.y,
+        width: row.width, height: row.height, overflow: 'hidden' }}>
+        <Animated.View style={{ flex: 1, backgroundColor: '#fff', transform: [{ translateX: row.fill }] }} />
+      </View>)}
+    </MaskedView> : null}
+  </View>;
+}
+
+// Prefix measurements retain kerning/shaping, unlike separate per-character Text nodes.
+// The same whole-word Text supplies the base, mask content and glow, preventing drift.
+const SweepWord = React.memo(function SweepWord({ token, font, textStyle, state, lineEnd, time, measureGlyphs }) {
+  const grapes = useMemo(() => splitLyricGraphemes(token.text), [token.text]);
+  const [width, setWidth] = useState(0);
+  const [offsets, setOffsets] = useState([]);
+  const edge = sweepEdge(font);
+  const timed = token.timed && Number.isFinite(token.t0) && Number.isFinite(token.t1) && token.t1 > token.t0;
+  const active = state === 'active' && timed;
+  const padding = font * 0.5;
+  const full = width || grapes.reduce((sum, ch) => sum + estimateCharWidth(ch, font), 0);
+
+  const xs = useMemo(() => {
+    const measured = [0];
+    grapes.forEach((ch, i) => measured.push(Math.min(full, Math.max(measured[i],
+      offsets[i + 1] ?? measured[i] + estimateCharWidth(ch, font)))));
+    measured[measured.length - 1] = full;
+    return measured;
+  }, [grapes, offsets, full, font]);
+  const front = useMemo(() => timed ? time.interpolate(sweepFrames(token, xs, edge)) : 0,
+    [timed, time, token, xs, edge]);
+  const glow = useMemo(() => timed ? time.interpolate(glowFrames(token, lineEnd)) : 0,
+    [timed, time, token, lineEnd]);
+
+  if (/^\s+$/.test(token.text)) return <View style={{ width: font * 0.3 * grapes.length }} />;
+
+  return (
+    <View style={styles.wordBlock}>
+      <View style={active ? { filter: [{ blur: UNSUNG_BLUR }] } : undefined}>
+        <Text onLayout={(e) => setWidth(e.nativeEvent.layout.width)}
+          style={[textStyle, { color: state === 'passed' ? '#fff' : TOKEN_BASE }]}>{token.text}</Text>
+      </View>
+      {timed && measureGlyphs ? <View pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants"
+          style={[StyleSheet.absoluteFill, { opacity: 0 }]}>
+          {grapes.slice(0, -1).map((_, i) => (
+            <Text key={i} numberOfLines={1}
+              onLayout={(e) => {
+                const measured = e.nativeEvent.layout.width;
+                setOffsets((prev) => {
+                  if (prev[i + 1] === measured) return prev;
+                  const next = [...prev]; next[i + 1] = measured; return next;
+                });
+              }}
+              style={[textStyle, { position: 'absolute' }]}>{grapes.slice(0, i + 1).join('')}</Text>
+          ))}
+        </View> : null}
+      {active ? <>
+        <Animated.View pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants"
+          style={{ position: 'absolute', top: -padding, bottom: -padding, left: -padding, right: -padding,
+            padding, opacity: glow, filter: [{ blur: font * GLOW_BLUR_SCALE }] }}>
+          <Text style={[textStyle, { color: '#fff' }]}>{token.text}</Text>
+        </Animated.View>
+        <MaskedView pointerEvents="none" androidRenderingMode="hardware"
+          accessibilityElementsHidden importantForAccessibility="no-hide-descendants"
+          style={{ position: 'absolute', left: 0, right: 0, top: -padding, bottom: -padding }}
+          maskElement={<Text style={[textStyle, { color: '#fff', paddingVertical: padding }]}>{token.text}</Text>}>
+          {/* The glyph bitmap stays fixed; only gradient content moves on the UI thread. */}
+          <Animated.View style={{ position: 'absolute', top: 0, bottom: 0,
+            left: -full - edge, width: full + edge, transform: [{ translateX: front }] }}>
+            <LinearGradient colors={['#fff', '#fff', 'rgba(255,255,255,0.92)', 'transparent']}
+              locations={[0, full / (full + edge), (full + edge * 0.45) / (full + edge), 1]}
+              start={{ x: 0, y: 0.5 }} end={{ x: 1, y: 0.5 }} style={{ flex: 1 }} />
+          </Animated.View>
+        </MaskedView>
+      </> : null}
+    </View>
+  );
+});
+
+export default function LyricsRail({ lines, activeIndex, onSeek, height, width, position, playing, effect = 'simple', clockRevision = 0 }) {
+  const simple = effect !== 'monet';
+  const time = useLyricClock(position, playing, clockRevision);
+  const { width: windowWidth, fontScale } = useWindowDimensions();
+  const lyricFont = clamp(windowWidth * 0.034, 30, 48);
+  const [layout, setLayout] = useState({ lines, width, lyricFont, fontScale, simple, revision: 0, heights: {} });
+  // Reset before committing rows, not in a passive effect that can erase onLayout
+  // results. Remount the rows so even unchanged heights are reported for this layout.
+  if (layout.lines !== lines || layout.width !== width || layout.lyricFont !== lyricFont
+    || layout.fontScale !== fontScale || layout.simple !== simple) {
+    setLayout({ lines, width, lyricFont, fontScale, simple, revision: layout.revision + 1, heights: {} });
+  }
+  const { heights } = layout; // index -> 未缩放布局高（含 padding）
+  const seekRef = useRef(onSeek);
+  useLayoutEffect(() => { seekRef.current = onSeek; }, [onSeek]);
 
   // 行级时间 → 词级时间轴（间奏行的圆点 token 在 attachLyricInterludes 已合成）
   const linesWithTokens = useMemo(
-    () => lines.map((l) => (l.tokens ? l : { ...l, tokens: buildLineTokens(l.text, l.from, l.to) })),
-    [lines],
+    () => simple ? lines : lines.map((l) => (l.tokens ? l : { ...l, tokens: buildLineTokens(l.text, l.from, l.to) })),
+    [lines, simple],
   );
 
   // 行高未测时的估算值（单行：行高 + 上下 padding）
   const estH = lyricFont * 1.18 + lyricFont * 0.5;
 
   const n = linesWithTokens.length;
-  const fracAnchor = computeFracAnchor(linesWithTokens, activeIndex, position);
-  // position 跳变（seek / 切歌）→ 快速就位；否则连续追踪
-  const jump = Math.abs(position - lastPosRef.current) > DRIFT_TOLERANCE;
-  useEffect(() => { lastPosRef.current = position; }, [position]);
+  // 整数锚点：一行唱的过程中不变 → 各行 target 不变 → 列表静止；
+  // 只有切行时 anchor 变 → RailLine 以 420ms EASE_SCROLL 平滑滚动一次
+  const anchor = clamp(activeIndex, 0, Math.max(0, n - 1));
+  const layoutReady = linesWithTokens.every((_, i) => Math.abs(i - anchor) > WINDOW || heights[i] > 0);
 
   const targets = useMemo(() => {
     if (!n || !height || !width) return [];
     const h = linesWithTokens.map((_, i) => heights[i] || estH);
-    const tones = linesWithTokens.map((_, i) => lineTone(Math.abs(i - fracAnchor)));
+    const tones = linesWithTokens.map((_, i) => lineTone(Math.abs(i - anchor), simple, i === activeIndex));
     const hs = h.map((v, i) => v * tones[i].scale);
 
-    // 从第 0 行顺序累加（行距是 fracAnchor 的连续函数），再把 fracAnchor
-    // 处（相邻两行中心的 lerp）对齐到容器高 ×0.46
+    // 从第 0 行顺序累加行高，再把锚点行中心对齐到容器高 ×0.46
     const top = new Array(n).fill(0);
     for (let i = 1; i < n; i += 1) {
-      top[i] = top[i - 1] + hs[i - 1] + gapBetween(i - 1, i, fracAnchor);
+      top[i] = top[i - 1] + hs[i - 1] + gapBetween(i - 1, i, anchor);
     }
-    const fi = clamp(Math.floor(fracAnchor), 0, n - 1);
-    const ci = clamp(fi + 1, 0, n - 1);
-    const frac = clamp(fracAnchor - fi, 0, 1);
-    const centerAt = (top[fi] + hs[fi] / 2)
-      + ((top[ci] + hs[ci] / 2) - (top[fi] + hs[fi] / 2)) * frac;
-    const offset = height * FOCUS_RATIO - centerAt;
+    const offset = height * FOCUS_RATIO - (top[anchor] + hs[anchor] / 2);
 
     // RN 中心缩放 → left-top 原点补偿：视觉左缘 = tx + W(1−s)/2，视觉顶缘 = ty + h(1−s)/2
     return linesWithTokens.map((_, i) => {
       const s = tones[i].scale;
+      const visualTop = top[i] + offset;
+      // 简单模式没有整层渐隐 mask，提前淡出越过上边缘的行，避免被顶栏硬截断。
+      const topVisibility = simple ? clamp(visualTop / (lyricFont * 1.5), 0, 1) : 1;
       return {
         scale: s,
-        opacity: tones[i].opacity,
+        opacity: tones[i].opacity * topVisibility,
         blur: tones[i].blur,
         tx: -width * (1 - s) / 2,
         ty: top[i] + offset - h[i] * (1 - s) / 2,
       };
     });
-  }, [linesWithTokens, fracAnchor, heights, height, width, n, estH]);
+  }, [linesWithTokens, anchor, activeIndex, heights, height, width, n, estH, simple]);
 
-  return (
-    <View style={{ flex: 1 }}>
+  if (!(height > 0 && width > 0)) return <View style={{ flex: 1 }} />;
+
+  const rows = (
+    <View style={{ flex: 1, opacity: layoutReady ? 1 : 0 }} pointerEvents={layoutReady ? 'auto' : 'none'}>
       {linesWithTokens.map((line, i) => {
+        if (Math.abs(i - anchor) > WINDOW + 2) return null;
         const state = i === activeIndex ? 'active' : i < activeIndex ? 'passed' : 'waiting';
         return (
           <RailLine
-            key={`${i}-${line.from}`}
+            key={`${layout.revision}:${i}-${line.from}`}
             line={line}
             target={targets[i] || { tx: 0, ty: -200, scale: 0.85, opacity: 0, blur: 6 }}
             font={lyricFont}
             state={state}
-            jump={jump}
-            position={state === 'active' ? position : 0}
-            playing={state === 'active' ? playing : false}
-            onPress={() => onSeek && onSeek(line)}
+            time={time}
+            simple={simple}
+            layoutReady={layoutReady}
+            measureGlyphs={!simple && (state === 'active' || i === activeIndex + 1)}
+            onPress={() => seekRef.current?.(line)}
             onMeasure={(e) => {
               const h = e.nativeEvent.layout.height;
-              setHeights((prev) => (Math.abs((prev[i] || 0) - h) > 0.5 ? { ...prev, [i]: h } : prev));
+              if (!Number.isFinite(h) || h <= 0) return;
+              setLayout((prev) => (prev.revision === layout.revision && Math.abs((prev.heights[i] || 0) - h) > 0.5
+                ? { ...prev, heights: { ...prev.heights, [i]: h } } : prev));
             }}
           />
         );
       })}
     </View>
   );
+  return simple ? rows : <MaskedView style={{ flex: 1 }} androidRenderingMode="hardware"
+    maskElement={<LinearGradient colors={['transparent', '#000', '#000', 'transparent']}
+      locations={[0, 0.13, 0.76, 1]} style={{ flex: 1 }} />}>
+    {rows}
+  </MaskedView>;
 }
 
 const styles = StyleSheet.create({
@@ -469,7 +368,10 @@ const styles = StyleSheet.create({
   lineText: {
     color: INACTIVE_COLOR,
   },
-  underlay: {
-    position: 'absolute', left: 0, top: 0, right: 0,
+  wordRow: {
+    flexDirection: 'row', flexWrap: 'wrap', alignItems: 'flex-start',
+  },
+  wordBlock: {
+    position: 'relative', overflow: 'visible', // 柔光层必须能溢出词块，Android 不裁剪
   },
 });

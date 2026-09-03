@@ -3,26 +3,24 @@
  */
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  ActivityIndicator, FlatList, Image, RefreshControl, StyleSheet, Text, TouchableOpacity, View,
+  ActivityIndicator, FlatList, RefreshControl, StyleSheet, Text, TouchableOpacity, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors, fmtCount } from '../theme';
 import * as bili from '../api/bili';
-import { imageHeaders, initClient } from '../api/client';
+import { initClient } from '../api/client';
 import { usePlayer } from '../player/PlayerContext';
 import { IconRadio } from '../components/icons';
+import RemoteImage from '../components/RemoteImage';
 
 function RoomCard({ room, active, onPress }) {
   return (
     <TouchableOpacity style={[styles.card, active && styles.cardActive]} activeOpacity={0.85} onPress={onPress}>
       <View>
-        {room.pic ? (
-          <Image source={{ uri: room.pic, headers: imageHeaders() }} style={styles.cover} resizeMode="cover" />
-        ) : (
-          <View style={[styles.cover, styles.coverFallback]}>
+        <RemoteImage uri={room.pic} width={720} height={450} style={styles.cover}
+          fallback={<View style={[StyleSheet.absoluteFill, styles.coverFallback]}>
             <IconRadio size={26} color={colors.accent} />
-          </View>
-        )}
+          </View>} />
         <View style={styles.livePill}>
           <View style={styles.liveDot} />
           <Text style={styles.liveText}>LIVE</Text>
@@ -119,7 +117,7 @@ export default function RadioScreen() {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.bg },
+  safe: { flex: 1, backgroundColor: 'transparent' },
   header: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
     paddingHorizontal: 16, paddingTop: 10, paddingBottom: 12,

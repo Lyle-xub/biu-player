@@ -1,25 +1,42 @@
-/* Biu Player RN · 我的：账号（手机号 + 短信验证码登录）+ 本地喜欢歌单
- * 登录流程与桌面端一致（controller.js sendSmsCode/submitSmsLogin）：
- * 极验滑块（GeetestModal）→ sms/send 拿 captcha_key → login/sms 登录。
- * 扫码登录逻辑仍保留在 client.js（qrStart/qrPoll）备用。
+/* Biu Player RN · 我的：资料卡 + 圆形图标菜单 + 最近播放横滑卡 + 歌单/收藏夹卡片网格
+ * 布局参考 QQ 音乐我的页（深色主题化）：
+ * - 顶部资料卡（头像 + 昵称；登录流程不变：手机号 + 短信验证码 + 极验滑块）
+ * - 圆形图标菜单行：我喜欢 / 歌单 / 收藏夹 / 历史 / 设置（图标 + 名称 + 数量，5 项均分）
+ * - 最近播放：横向滑动卡片行，首张「已播歌曲」汇总卡 → HistoryScreen，后面是具体曲目卡
+ * - 歌单卡片区：「自建歌单 N / 收藏夹 N」双标题分段 + 右侧「+」新建本地歌单（弹输入框），
+ *   双列卡片网格：自建歌单 = 本地数据层（src/store/playlists.js，封面按歌单固定），
+ *   收藏夹 = B 站 favFolders（需登录，未登录引导登录）
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  Image, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View,
+  Alert, Image, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors } from '../theme';
 import {
   authStatus, imageHeaders, logout, smsCaptcha, smsLogin, smsSend,
 } from '../api/client';
+import * as bili from '../api/bili';
 import { usePlayer } from '../player/PlayerContext';
-import TrackRow from '../components/TrackRow';
+import { trackKeyOf } from '../player/track';
+import { createPlaylist, deletePlaylist, usePlaylists } from '../store/playlists';
+import { stabilizeFavoriteCovers } from '../store/favoriteCovers';
 import GeetestModal from '../components/GeetestModal';
-import { IconHeart, IconUser } from '../components/icons';
+import DefaultCover, { defaultCoverSeed } from '../components/DefaultCover';
+import RemoteImage from '../components/RemoteImage';
+import {
+  IconClock, IconHeart, IconNote, IconPlaylist, IconPlus, IconSettings, IconStar, IconUser,
+} from '../components/icons';
 
 export default function MineScreen({ navigation }) {
-  const { likes, playQueue, current, history } = usePlayer();
-  const [auth, setAuth] = useState(null);
+  const { likes, playQueue, history, account: auth, switchAccount } = usePlayer();
+  const playlists = usePlaylists();
+  const [gridTab, setGridTab] = useState('local'); // local 自建歌单 | fav 收藏夹
+  const [favs, setFavs] = useState([]);
+  const [favLoading, setFavLoading] = useState(false);
+  const [favError, setFavError] = useState(null);
+  const [createVisible, setCreateVisible] = useState(false);
+  const [newPlName, setNewPlName] = useState('');
   const [loginVisible, setLoginVisible] = useState(false);
   const [tel, setTel] = useState('');
   const [code, setCode] = useState('');
@@ -30,11 +47,23 @@ export default function MineScreen({ navigation }) {
   const [gtParams, setGtParams] = useState(null); // { gt, challenge, token }
   const timerRef = useRef(null);
 
-  const refreshAuth = useCallback(async () => {
-    setAuth(await authStatus());
+  /* ---------- 收藏夹（B 站同步，需登录） ---------- */
+  const loadFavs = useCallback(async (a) => {
+    if (!a || !a.isLogin) { setFavs([]); return; }
+    setFavLoading(true);
+    setFavError(null);
+    try {
+      const folders = await bili.favFolders(a.mid);
+      setFavs(await stabilizeFavoriteCovers(a.mid, folders));
+    } catch (e) {
+      console.warn('[MineScreen] 收藏夹加载失败：', String(e.message || e));
+      setFavError(String(e.message || e));
+    } finally {
+      setFavLoading(false);
+    }
   }, []);
 
-  useEffect(() => { refreshAuth(); }, [refreshAuth]);
+  useEffect(() => { if (auth) loadFavs(auth); }, [auth, loadFavs]);
   useEffect(() => () => clearInterval(timerRef.current), []);
 
   const setMsg = (text, ok = false) => setStatus({ text, ok });
@@ -107,7 +136,8 @@ export default function MineScreen({ navigation }) {
       const r = await smsLogin({ tel: tel.replace(/\D/g, ''), code: digits, captchaKey });
       if (!r.ok) { setMsg(r.message || '登录失败'); return; }
       setMsg('登录成功', true);
-      setAuth(r.auth && r.auth.isLogin ? r.auth : await authStatus());
+      const a = r.auth && r.auth.isLogin ? r.auth : await authStatus();
+      await switchAccount(a);
       setTimeout(() => closeLogin(), 700);
     } catch (e) {
       setMsg(String(e.message || e));
@@ -125,13 +155,75 @@ export default function MineScreen({ navigation }) {
 
   const doLogout = async () => {
     await logout();
-    setAuth({ isLogin: false });
+    await switchAccount({ isLogin: false });
+    setFavs([]);
   };
+
+  /* ---------- 菜单与卡片行为 ---------- */
+  const needLoginAlert = () => {
+    Alert.alert('未登录', '收藏夹是你的 B 站数据，登录后可查看', [
+      { text: '取消', style: 'cancel' },
+      { text: '去登录', onPress: () => setLoginVisible(true) },
+    ]);
+  };
+
+  const menuItems = [
+    {
+      key: 'likes', label: '我喜欢', count: likes.length, Icon: IconHeart,
+      onPress: () => navigation.navigate('Likes'),
+    },
+    {
+      key: 'local', label: '歌单', count: playlists.length, Icon: IconPlaylist,
+      onPress: () => setGridTab('local'),
+    },
+    {
+      key: 'fav', label: '收藏夹', count: favs.length || '', Icon: IconStar,
+      onPress: () => (auth && auth.isLogin ? setGridTab('fav') : needLoginAlert()),
+    },
+    {
+      key: 'history', label: '历史', count: history.length, Icon: IconClock,
+      onPress: () => navigation.navigate('History'),
+    },
+    {
+      key: 'settings', label: '设置', count: '', Icon: IconSettings,
+      onPress: () => navigation.navigate('Settings'),
+    },
+  ];
+
+  const submitCreate = async () => {
+    const pl = await createPlaylist(newPlName);
+    if (!pl) return;
+    setNewPlName('');
+    setCreateVisible(false);
+  };
+
+  const confirmDeletePl = (pl) => {
+    Alert.alert('删除歌单', `确定删除歌单「${pl.title}」吗？此操作不可恢复。`, [
+      { text: '取消', style: 'cancel' },
+      { text: '删除', style: 'destructive', onPress: () => deletePlaylist(pl.id) },
+    ]);
+  };
+
+  const renderGridCard = ({ key, pic, seed, title, meta, onPress, onLongPress }) => (
+    <TouchableOpacity
+      key={key}
+      style={styles.gridCard}
+      activeOpacity={0.8}
+      onPress={onPress}
+      onLongPress={onLongPress}
+      delayLongPress={420}
+    >
+      <RemoteImage uri={pic} width={640} height={640} style={styles.gridCover}
+        fallback={<DefaultCover seed={seed} style={StyleSheet.absoluteFill} />} />
+      <Text style={styles.gridTitle} numberOfLines={1}>{title}</Text>
+      <Text style={styles.gridMeta} numberOfLines={1}>{meta}</Text>
+    </TouchableOpacity>
+  );
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       <ScrollView contentContainerStyle={styles.content}>
-        {/* 账号卡 */}
+        {/* 资料卡 */}
         <View style={styles.accountCard}>
           {auth && auth.isLogin ? (
             <>
@@ -157,7 +249,7 @@ export default function MineScreen({ navigation }) {
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={styles.uname}>未登录</Text>
-                <Text style={styles.uid}>登录后可获取高码率音频与个性化推荐</Text>
+                <Text style={styles.uid}>登录后可获取高码率音频与收藏夹</Text>
               </View>
               <TouchableOpacity style={styles.loginBtn} onPress={() => setLoginVisible(true)}>
                 <Text style={styles.loginBtnText}>登录</Text>
@@ -166,37 +258,146 @@ export default function MineScreen({ navigation }) {
           )}
         </View>
 
-        {/* 喜欢 */}
-        <View style={styles.sectionHead}>
-          <IconHeart size={15} color={colors.accent} filled />
-          <Text style={styles.sectionTitle}>我的喜欢（{likes.length}）</Text>
+        {/* 圆形图标菜单 */}
+        <View style={styles.menuRow}>
+          {menuItems.map(({ key, label, count, Icon, onPress }) => (
+            <TouchableOpacity key={key} style={styles.menuItem} activeOpacity={0.7} onPress={onPress}>
+              <View style={styles.menuCircle}>
+                <Icon size={20} color={colors.text} />
+              </View>
+              <Text style={styles.menuLabel}>{label}</Text>
+              <Text style={styles.menuCount}>{count === '' ? ' ' : count}</Text>
+            </TouchableOpacity>
+          ))}
         </View>
-        {likes.length ? (
-          likes.map((t, i) => (
-            <TrackRow
-              key={t.bvid || t.aid || i}
-              track={t}
-              active={!!current && current.bvid === t.bvid}
-              onPress={() => playQueue(likes, i)}
-              onPressUp={t.mid ? () => navigation.navigate('Up', { mid: t.mid }) : undefined}
-            />
-          ))
-        ) : (
-          <Text style={styles.empty}>播放页点小心心，歌就会收进来</Text>
-        )}
 
-        {/* 最近播放 */}
-        <Text style={[styles.sectionTitle, styles.historyHead]}>最近播放（{history.length}）</Text>
-        {history.slice(0, 20).map((t, i) => (
-          <TrackRow
-            key={`h-${t.bvid || t.aid || i}`}
-            track={t}
-            active={!!current && current.bvid === t.bvid}
-            onPress={() => playQueue(history.slice(0, 20), i)}
-            onPressUp={t.mid ? () => navigation.navigate('Up', { mid: t.mid }) : undefined}
-          />
-        ))}
+        {/* 最近播放：横滑卡片行 */}
+        <View style={styles.sectionHead}>
+          <Text style={styles.sectionTitle}>最近播放</Text>
+          <TouchableOpacity onPress={() => navigation.navigate('History')} hitSlop={8}>
+            <Text style={styles.sectionMore}>全部 ›</Text>
+          </TouchableOpacity>
+        </View>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.hRow}
+        >
+          <TouchableOpacity
+            style={styles.hSummaryCard}
+            activeOpacity={0.8}
+            onPress={() => navigation.navigate('History')}
+          >
+            <IconClock size={24} color={colors.accent} />
+            <Text style={styles.hSummaryText}>已播歌曲</Text>
+            <Text style={styles.hSummaryCount}>{history.length} 首</Text>
+          </TouchableOpacity>
+          {history.slice(0, 15).map((t, i) => (
+            <TouchableOpacity
+              key={trackKeyOf(t) || i}
+              style={styles.hCard}
+              activeOpacity={0.8}
+              onPress={() => playQueue(history, i)}
+            >
+              <RemoteImage uri={t.pic} width={240} height={240} style={styles.hCover}
+                fallback={<View style={[StyleSheet.absoluteFill, styles.hCoverFallback]}>
+                  <IconNote size={22} color={colors.accent} />
+                </View>} />
+              <Text style={styles.hTitle} numberOfLines={2}>{t.title}</Text>
+              <Text style={styles.hUp} numberOfLines={1}>{t.up}</Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+
+        {/* 歌单卡片区：分段标题 + 新建 */}
+        <View style={styles.sectionHead}>
+          <TouchableOpacity onPress={() => setGridTab('local')} hitSlop={6}>
+            <Text style={[styles.segTitle, gridTab === 'local' && styles.segTitleOn]}>
+              自建歌单 {playlists.length}
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={() => (auth && auth.isLogin ? setGridTab('fav') : needLoginAlert())}
+            hitSlop={6}
+          >
+            <Text style={[styles.segTitle, gridTab === 'fav' && styles.segTitleOn]}>
+              收藏夹 {auth && auth.isLogin ? favs.length : ''}
+            </Text>
+          </TouchableOpacity>
+          <View style={{ flex: 1 }} />
+          {gridTab === 'local' ? (
+            <TouchableOpacity style={styles.plusBtn} onPress={() => setCreateVisible(true)} hitSlop={8}>
+              <IconPlus size={16} color={colors.accent} />
+            </TouchableOpacity>
+          ) : null}
+        </View>
+
+        {gridTab === 'local' ? (
+          playlists.length ? (
+            <View style={styles.grid}>
+              {playlists.map((pl) => renderGridCard({
+                key: pl.id,
+                pic: pl.cover,
+                seed: defaultCoverSeed(pl.id),
+                title: pl.title,
+                meta: `${pl.tracks.length} 首`,
+                onPress: () => navigation.navigate('LocalPlaylist', { id: pl.id }),
+                onLongPress: () => confirmDeletePl(pl),
+              }))}
+            </View>
+          ) : (
+            <Text style={styles.gridHint}>还没有自建歌单，点右上角 + 新建一个</Text>
+          )
+        ) : favLoading ? (
+          <Text style={styles.gridHint}>收藏夹加载中…</Text>
+        ) : favError ? (
+          <View style={styles.gridMsgBox}>
+            <Text style={styles.gridHint}>{favError}</Text>
+            <TouchableOpacity style={styles.actionBtn} onPress={() => loadFavs(auth)}>
+              <Text style={styles.actionText}>重试</Text>
+            </TouchableOpacity>
+          </View>
+        ) : favs.length ? (
+          <View style={styles.grid}>
+            {favs.map((f) => renderGridCard({
+              key: f.id,
+              pic: f.pic,
+              seed: f.seed,
+              title: f.title,
+              meta: `${f.count} 首`,
+              onPress: () => navigation.navigate('PlaylistDetail', { mediaId: f.id, title: f.title }),
+            }))}
+          </View>
+        ) : (
+          <Text style={styles.gridHint}>还没有收藏夹，去 B 站创建一个吧</Text>
+        )}
       </ScrollView>
+
+      {/* 新建歌单弹窗 */}
+      <Modal visible={createVisible} transparent animationType="fade" onRequestClose={() => setCreateVisible(false)}>
+        <View style={styles.modalMask}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>新建歌单</Text>
+            <View style={styles.field}>
+              <TextInput
+                style={styles.fieldInput}
+                placeholder="歌单名"
+                placeholderTextColor={colors.text3}
+                maxLength={24}
+                value={newPlName}
+                onChangeText={setNewPlName}
+                autoFocus
+              />
+            </View>
+            <TouchableOpacity style={styles.submitBtn} onPress={submitCreate}>
+              <Text style={styles.submitText}>创建</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => setCreateVisible(false)} hitSlop={8}>
+              <Text style={styles.closeText}>取消</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
 
       {/* 验证码登录弹窗 */}
       <Modal visible={loginVisible} transparent animationType="fade" onRequestClose={closeLogin}>
@@ -269,11 +470,11 @@ export default function MineScreen({ navigation }) {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.bg },
+  safe: { flex: 1, backgroundColor: 'transparent' },
   content: { paddingBottom: 140 },
   accountCard: {
     flexDirection: 'row', alignItems: 'center', gap: 12,
-    margin: 14, padding: 16,
+    margin: 14, marginBottom: 6, padding: 16,
     backgroundColor: colors.card, borderWidth: 1, borderColor: colors.cardBorder,
     borderRadius: 20,
   },
@@ -294,13 +495,74 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16, height: 34, justifyContent: 'center',
   },
   ghostBtnText: { color: colors.text2, fontSize: 12 },
-  sectionHead: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    paddingHorizontal: 16, marginTop: 8, marginBottom: 6,
+
+  /* 圆形图标菜单 */
+  menuRow: {
+    flexDirection: 'row', paddingHorizontal: 10, marginTop: 8, marginBottom: 4,
   },
-  sectionTitle: { color: colors.text, fontSize: 14, fontWeight: '600' },
-  historyHead: { paddingHorizontal: 16, marginTop: 20, marginBottom: 6 },
-  empty: { color: colors.text3, fontSize: 12, paddingHorizontal: 18, marginTop: 4 },
+  menuItem: { flex: 1, alignItems: 'center', gap: 5 },
+  menuCircle: {
+    width: 46, height: 46, borderRadius: 23,
+    backgroundColor: colors.card, borderWidth: 1, borderColor: colors.cardBorder,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  menuLabel: { color: colors.text2, fontSize: 11 },
+  menuCount: { color: colors.text3, fontSize: 10, marginTop: -3 },
+
+  /* 区块标题 */
+  sectionHead: {
+    flexDirection: 'row', alignItems: 'center', gap: 16,
+    paddingHorizontal: 16, marginTop: 18, marginBottom: 10,
+  },
+  sectionTitle: { color: colors.text, fontSize: 14, fontWeight: '600', flex: 1 },
+  sectionMore: { color: colors.text3, fontSize: 12 },
+  segTitle: { color: colors.text3, fontSize: 14, fontWeight: '500' },
+  segTitleOn: { color: colors.text, fontWeight: '700' },
+  plusBtn: {
+    width: 28, height: 28, borderRadius: 14,
+    backgroundColor: colors.accentSoft, borderWidth: 1, borderColor: 'rgba(251,114,153,0.45)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+
+  /* 最近播放横滑 */
+  hRow: { paddingHorizontal: 14, gap: 10 },
+  hSummaryCard: {
+    width: 104, height: 150, borderRadius: 16, padding: 12,
+    backgroundColor: colors.card, borderWidth: 1, borderColor: colors.cardBorder,
+    justifyContent: 'center', gap: 6,
+  },
+  hSummaryText: { color: colors.text, fontSize: 13, fontWeight: '600' },
+  hSummaryCount: { color: colors.text3, fontSize: 11 },
+  hCard: { width: 104 },
+  hCover: {
+    width: 104, height: 104, borderRadius: 14, backgroundColor: '#1a1e14',
+    borderWidth: 1, borderColor: colors.cardBorder,
+  },
+  hCoverFallback: { alignItems: 'center', justifyContent: 'center' },
+  hTitle: { color: colors.text, fontSize: 11, lineHeight: 15, marginTop: 6 },
+  hUp: { color: colors.text3, fontSize: 10, marginTop: 2 },
+
+  /* 双列卡片网格 */
+  grid: {
+    flexDirection: 'row', flexWrap: 'wrap', gap: 12, paddingHorizontal: 14,
+  },
+  gridCard: { width: '47.6%' },
+  gridCover: {
+    width: '100%', aspectRatio: 1, borderRadius: 16, backgroundColor: '#1a1e14',
+    borderWidth: 1, borderColor: colors.cardBorder,
+  },
+  gridCoverFallback: { alignItems: 'center', justifyContent: 'center' },
+  gridTitle: { color: colors.text, fontSize: 13, fontWeight: '500', marginTop: 7 },
+  gridMeta: { color: colors.text3, fontSize: 11, marginTop: 2 },
+  gridHint: { color: colors.text3, fontSize: 12, textAlign: 'center', marginTop: 26 },
+  gridMsgBox: { alignItems: 'center', gap: 12 },
+  actionBtn: {
+    paddingHorizontal: 22, height: 36, borderRadius: 999,
+    backgroundColor: colors.accentSoft, justifyContent: 'center',
+  },
+  actionText: { color: colors.accent, fontSize: 13, fontWeight: '600' },
+
+  /* 弹窗 */
   modalMask: {
     flex: 1, backgroundColor: 'rgba(0,0,0,0.62)',
     alignItems: 'center', justifyContent: 'center',

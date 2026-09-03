@@ -1831,6 +1831,8 @@ body.panel-queue .drawer { transform: translateX(0); }
 body.panel-settings .modal-mask { display: grid; }
 .modal {
   width: 520px; border-radius: 28px; background: var(--glass-deep);
+  max-height: calc(100dvh - 40px); overflow-y: auto;
+  scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.22) transparent;
   border: 1px solid var(--glass-line); backdrop-filter: blur(36px);
   padding: var(--sp-6); box-shadow: 0 60px 120px rgba(0,0,0,.5);
 }
@@ -1841,6 +1843,12 @@ body.panel-settings .modal-mask { display: grid; }
 .mrow .ml b { display: block; font-size: var(--fs-body); font-weight: 500; letter-spacing: .04em; }
 .mrow .ml small { font-size: var(--fs-micro); color: var(--text-3); letter-spacing: .06em; }
 .mrow .mr { margin-left: auto; display: flex; gap: var(--sp-2); align-items: center; }
+.lan-sync-row { align-items: flex-start; gap: 12px; }
+.lan-sync-row .ml { flex: 1; min-width: 0; }
+.lan-sync-row small { display: block; margin-top: 6px; line-height: 1.5; }
+.lan-sync-row .mr { flex-direction: column; flex-shrink: 0; }
+.lan-sync-row [hidden] { display: none; }
+.lan-sync-row .lan-sync-pair { white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; color: var(--accent); }
 .mseg { display: flex; gap: 2px; padding: 3px; border-radius: var(--r-pill);
   background: rgba(255,255,255,.07); }
 .mtext { width: 170px; border: 1px solid transparent; border-radius: 9px;

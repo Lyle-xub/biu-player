@@ -554,6 +554,14 @@
       <div class="ml"><b>桌面歌词</b><small>在屏幕上悬浮显示歌词</small></div>
       <div class="mr"><span class="switch off" id="swLyric"></span></div>
     </div>
+    <div class="mrow lan-sync-row">
+      <div class="ml"><b>局域网同步</b><small>合并两端的我喜欢和自建歌单，自动去重，保留两端内容。</small>
+        <small id="lanSyncStatus" role="status">手机与电脑连接同一 Wi-Fi，点击手动同步开始配对。</small>
+        <small id="lanSyncPair" class="lan-sync-pair"></small>
+      </div>
+      <div class="mr"><button class="btn-ghost" id="lanSyncStart" type="button">手动同步</button>
+        <button class="btn-ghost" id="lanSyncStop" type="button" hidden>关闭同步</button></div>
+    </div>
     <div class="mfoot">BIU PLAYER · v0.5.0 · 基于 BILIBILI 公开接口</div>
   </div>
 </div>
@@ -681,6 +689,7 @@
 <script src="vendor/hls.min.js"></script>
 <script src="api.js"></script>
 <script src="playback-session.js"></script>
+<script src="library-sync.js"></script>
 <script src="hot-comment-motion.js"></script>
 <script src="player-sheet-motion.js"></script>
 <script src="app.js"></script>

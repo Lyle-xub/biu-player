@@ -68,41 +68,54 @@ async function jget(url, opts) {
 
 // 音乐区排行（首页推荐流不可用时的兜底列表）
 export async function ranking() {
-  const data = await jget('https://api.bilibili.com/x/web-interface/ranking/v2?rid=3&ps=20');
+  const data = await jget('https://api.bilibili.com/x/web-interface/ranking/v2?rid=3&ps=100');
   return (data.list || []).map(toTrack).filter((t) => t.duration > 30);
 }
 
-// 首页真实推荐信息流：WBI Web 推荐参数，再以视频详情严格筛选音乐分区
-export async function recommendMusic(freshIdx = 0, limit = 12) {
-  const result = [];
+// B 站首页的真实个性推荐。该接口依赖当前账号 Cookie，并直接保留服务端推荐顺序。
+export async function personalizedRecommendations(freshIdx = 0, limit = 12) {
+  const index = Math.max(0, Number(freshIdx) || 0);
+  const query = new URLSearchParams({
+    version: '1', feed_version: 'V8', homepage_ver: '1', ps: String(Math.min(30, Math.max(1, limit))),
+    fresh_idx: String(index), brush: String(index), fresh_type: '4',
+  });
+  const data = await jget(
+    'https://api.bilibili.com/x/web-interface/wbi/index/top/feed/rcmd?' + query,
+    { wbi: true },
+  );
   const seen = new Set();
-  for (let page = 0; page < 3 && result.length < limit; page += 1) {
-    const index = freshIdx + page;
-    const query = new URLSearchParams({
-      version: '1', feed_version: 'V8', homepage_ver: '1', ps: '20',
-      fresh_idx: String(index), brush: String(index), fresh_type: '4',
-    });
-    const data = await jget(
-      'https://api.bilibili.com/x/web-interface/wbi/index/top/feed/rcmd?' + query,
-      { wbi: true },
-    );
-    const candidates = (data.item || []).filter((item) =>
-      item.goto === 'av' && item.bvid && item.owner && !seen.has(item.bvid));
-    candidates.forEach((item) => seen.add(item.bvid));
+  return (data.item || [])
+    .filter((item) => {
+      if (item.goto !== 'av' || !item.bvid || !item.owner
+        || Number(item.duration || 0) <= 30 || seen.has(item.bvid)) return false;
+      seen.add(item.bvid);
+      return true;
+    })
+    .slice(0, Math.max(1, limit))
+    .map((item) => recommendationToTrack(item, item));
+}
 
-    // 小批量补取分区字段，既保持推荐顺序，也避免同时发出大量详情请求
-    for (let offset = 0; offset < candidates.length && result.length < limit; offset += 5) {
-      const batch = candidates.slice(offset, offset + 5);
-      const details = await Promise.all(batch.map((item) => view(item.bvid).catch(() => null)));
-      batch.forEach((item, i) => {
-        const detail = details[i];
-        if (detail && isMusicPartition(detail) && Number(item.duration || detail.duration || 0) > 30) {
-          result.push(recommendationToTrack(item, detail));
-        }
+// 保留个性推荐顺序，只补取当前页的视频详情并筛出音乐分区；不跨页补足数量。
+export async function personalizedMusicRecommendations(freshIdx = 0, limit = 20) {
+  const candidates = await personalizedRecommendations(freshIdx, limit);
+  const music = [];
+  for (let offset = 0; offset < candidates.length; offset += 5) {
+    const batch = candidates.slice(offset, offset + 5);
+    const details = await Promise.all(batch.map((item) => view(item.bvid).catch(() => null)));
+    batch.forEach((item, index) => {
+      const detail = details[index];
+      if (!detail || !isMusicPartition(detail)) return;
+      music.push({
+        ...item,
+        aid: detail.aid || item.aid,
+        cid: detail.cid || item.cid,
+        mid: detail.owner?.mid || item.mid,
+        tid: detail.tid,
+        tname: detail.tname || '音乐',
       });
-    }
+    });
   }
-  return result.slice(0, limit);
+  return music;
 }
 
 // 视频搜索（筛掉 60 秒以内的短视频），返回 { list, numPages, page }
@@ -238,6 +251,204 @@ export async function upVideos(mid, page = 1, ps = 30) {
         duration, pic: absImg(v.pic),
       };
     }),
+  };
+}
+
+/* ---------- 视频页互动（移植自 renderer/api.js：arcRelation / likeVideo / coinVideo /
+ * favFoldersWithState / favDeal；POST 的 csrf 由 client.post 从 Cookie 罐 bili_jct 自动补） ----------
+ * 点赞/投币/收藏需登录；未登录接口返回 -101，由调用方降级提示。 */
+// 稿件与当前用户的关系：{ like, coin, favorite }（0/1）；未登录/失败返回 null
+export async function arcRelation(bvid) {
+  if (!bvid) return null;
+  try {
+    return await jget(
+      `https://api.bilibili.com/x/web-interface/archive/relation?bvid=${encodeURIComponent(bvid)}`,
+      { wbi: true });
+  } catch (e) { return null; }
+}
+
+// 点赞 / 取消点赞：like 1 点赞 3 取消
+export async function likeVideo(aid, like) {
+  if (!aid) throw new Error('缺少稿件 aid');
+  const r = await client.post('https://api.bilibili.com/x/web-interface/archive/like', { aid, like: like ? 1 : 3 });
+  if (r.status !== 200) throw new Error(r.status === -1 ? (r.body || '网络请求失败') : ('HTTP ' + r.status));
+  const d = JSON.parse(r.body);
+  if (d.code !== 0) throw new Error(d.code === -101 ? '请先登录 B 站账号' : (d.message || ('code ' + d.code)));
+  return true;
+}
+
+// 投币：n = 1/2 枚
+export async function coinVideo(aid, n = 1) {
+  if (!aid) throw new Error('缺少稿件 aid');
+  const r = await client.post('https://api.bilibili.com/x/web-interface/coin/add', { aid, multiply: n, select_like: 0 });
+  if (r.status !== 200) throw new Error(r.status === -1 ? (r.body || '网络请求失败') : ('HTTP ' + r.status));
+  const d = JSON.parse(r.body);
+  if (d.code !== 0) throw new Error(d.code === -101 ? '请先登录 B 站账号' : (d.message || ('code ' + d.code)));
+  return true;
+}
+
+// 我创建的收藏夹 + 当前稿件在各夹中的收藏状态（fav_state）；未登录返回 null
+export async function favFoldersWithState(aid) {
+  if (!aid) return null;
+  const auth = await client.authStatus();
+  if (!auth || !auth.isLogin) return null;
+  const data = await jget(
+    `https://api.bilibili.com/x/v3/fav/folder/created/list-all?up_mid=${auth.mid}&type=2&rid=${aid}`);
+  return (data.list || []).map((f) => ({
+    id: f.id, title: f.title, count: f.media_count,
+    favored: Number(f.fav_state) === 1,
+  }));
+}
+
+// 收藏 / 取消收藏：rid=aid, type=2（视频），add/del 为收藏夹 id 数组
+export async function favDeal(aid, addIds = [], delIds = []) {
+  if (!aid) throw new Error('缺少稿件 aid');
+  const r = await client.post('https://api.bilibili.com/x/v3/fav/resource/deal', {
+    rid: aid, type: 2,
+    add_media_ids: addIds.join(','),
+    del_media_ids: delIds.join(','),
+    platform: 'web',
+  });
+  if (r.status !== 200) throw new Error(r.status === -1 ? (r.body || '网络请求失败') : ('HTTP ' + r.status));
+  const d = JSON.parse(r.body);
+  if (d.code !== 0) throw new Error(d.code === -101 ? '请先登录 B 站账号' : (d.message || ('code ' + d.code)));
+  return true;
+}
+
+/* ---------- 评论（桌面端热评预览用 x/v2/reply sort=2；RN 端做完整列表 + 翻页） ---------- */
+export async function replies(aid, page = 1, ps = 12) {
+  const data = await jget(
+    `https://api.bilibili.com/x/v2/reply?type=1&oid=${aid}&sort=2&pn=${page}&ps=${ps}`);
+  const list = (data.replies || []).map((r) => ({
+    rpid: r.rpid,
+    name: (r.member && r.member.uname) || '',
+    avatar: r.member && r.member.avatar ? absImg(r.member.avatar) : null,
+    message: (r.content && r.content.message) || '',
+    like: r.like || 0,
+    ctime: r.ctime || 0,
+  }));
+  return {
+    list,
+    total: (data.page && data.page.count) || 0,
+    // page.num × ps 未到 count 则还有下一页
+    hasMore: !!data.page && (data.page.num || page) * (data.page.size || ps) < (data.page.count || 0),
+  };
+}
+
+/* ---------- 下载（移植自 renderer/api.js videoDownloadInfo：type=mp4 整文件流 +
+ * accept_quality 档位列表；实际下载由调用方走 expo-file-system） ---------- */
+export async function videoDownloadInfo(bvid, cid, quality) {
+  const data = await progressiveVideoInfo(bvid, cid, quality);
+  if (quality && Number(data.quality) !== Number(quality)) {
+    throw new Error('当前账号或整文件流不支持所选清晰度，请选择其他档位');
+  }
+  const qualities = (data.accept_quality || []).map((qn, i) => ({
+    quality: qn,
+    label: (data.accept_description || [])[i] || `${qn}P`,
+  }));
+  return {
+    url: data.durl[0].url,
+    quality: data.quality,
+    label: (qualities.find((item) => item.quality === data.quality) || {}).label || `${data.quality}P`,
+    format: /flv/.test(data.format || '') ? 'flv' : 'mp4',
+    qualities: qualities.length ? qualities : [{ quality: data.quality, label: '默认清晰度' }],
+  };
+}
+
+/* ---------- 分切（移植自 renderer/api.js mixSplitDetect：B 站章节 view_points 优先，
+ * 其次简介时间轴文本；纯接口 + 文本解析，无需音频解码。
+ * 桌面端另有基于 Web Audio 的本地音频分析分切（splitAnalyzeAudio）——
+ * Expo 环境拿不到 PCM，RN 端未移植。） ---------- */
+export function parseTimestampLines(text, totalDuration) {
+  const segs = [];
+  String(text || '').split(/\r?\n/).forEach((raw) => {
+    const line = raw.trim();
+    const m = line.match(/(\d{1,3})[:：](\d{1,2})(?:[:：](\d{1,2}))?/);
+    if (!m) return;
+    const sec = m[3] !== undefined
+      ? (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3])
+      : (+m[1]) * 60 + (+m[2]);
+    if (+m[2] >= 60 || (m[3] !== undefined && +m[3] >= 60)) return;
+    if (totalDuration && sec >= totalDuration) return;
+    const name = line.replace(m[0], ' ')
+      .replace(/^(?:[Pp]\d{1,2}\s*|\d{1,2}[.、)）]\s*)/, '')
+      .replace(/^[\s\-—–·:：|丨]+/, '')
+      .replace(/[\s\-—–|丨]+$/, '')
+      .trim();
+    if (!name || name.length > 60) return;
+    segs.push({ from: sec, name });
+  });
+  segs.sort((a, b) => a.from - b.from);
+  const dedup = segs.filter((s, i) => i === 0 || s.from !== segs[i - 1].from);
+  return dedup.map((s, i) => ({
+    from: s.from,
+    to: i + 1 < dedup.length ? dedup[i + 1].from : (totalDuration || s.from + 180),
+    name: s.name,
+  })).filter((s) => s.to > s.from);
+}
+
+export async function mixSplitDetect(bvid, cid, duration) {
+  if (!bvid) return [];
+  // 1. 视频章节
+  try {
+    const q = `bvid=${encodeURIComponent(bvid)}&cid=${cid || 0}`;
+    let data = null;
+    try { data = await jget('https://api.bilibili.com/x/player/wbi/v2?' + q, { wbi: true }); }
+    catch (e) { data = await jget('https://api.bilibili.com/x/player/v2?' + q); }
+    const pts = ((data && data.view_points) || [])
+      .filter((p) => p && p.content && isFinite(+p.from) && +p.from >= 0 && (!duration || +p.from < duration))
+      .map((p) => ({ from: +p.from, name: String(p.content).trim() }))
+      .sort((a, b) => a.from - b.from)
+      .filter((p, i, list) => !i || p.from !== list[i - 1].from);
+    if (pts.length) {
+      return pts.map((s, i) => ({
+        from: s.from,
+        to: i + 1 < pts.length ? pts[i + 1].from : (duration || s.from + 180),
+        name: s.name,
+      })).filter((s) => s.to > s.from);
+    }
+  } catch (e) { /* 无章节则走简介解析 */ }
+  // 2. 简介时间轴
+  try {
+    const d = await view(bvid);
+    return parseTimestampLines(d && d.desc, duration);
+  } catch (e) {
+    return [];
+  }
+}
+
+/* ---------- 收藏夹（移植自 renderer/api.js favFolders / favItems，无需 WBI，靠登录 Cookie） ----------
+ * 未登录调用时接口返回 -101，由调用方做降级提示；与桌面端一致不做匿名兜底。 */
+// 我创建的收藏夹列表
+export async function favFolders(mid) {
+  if (!mid) throw new Error('缺少用户 mid');
+  const data = await jget(`https://api.bilibili.com/x/v3/fav/folder/created/list-all?up_mid=${mid}`);
+  return (data.list || []).map((f) => ({
+    id: f.id,
+    title: f.title,
+    count: f.media_count || 0,
+    intro: f.intro || '',
+    pic: f.cover ? absImg(f.cover) : null,
+  }));
+}
+
+// 收藏夹内容（分页），稿件映射为 track；已失效视频（attr=1）直接过滤
+export async function favItems(mediaId, page = 1, ps = 40) {
+  const data = await jget(
+    `https://api.bilibili.com/x/v3/fav/resource/list?media_id=${mediaId}&pn=${page}&ps=${ps}`);
+  const list = (data.medias || [])
+    .filter((m) => m && m.bvid && Number(m.attr) !== 1)
+    .map((m) => ({
+      bvid: m.bvid, aid: m.id, cid: 0,
+      title: m.title, up: (m.upper && m.upper.name) || '',
+      mid: (m.upper && m.upper.mid) || 0,
+      duration: m.duration || 0,
+      pic: m.cover ? absImg(m.cover) : null,
+    }));
+  return {
+    list,
+    hasMore: !!data.has_more,
+    total: (data.info && data.info.media_count) || 0,
   };
 }
 
@@ -470,18 +681,36 @@ export async function livePlayUrl(roomid) {
 
 /* ---------- 原视频播放（简化自 renderer/api.js videoDownloadInfo：progressive 单文件流） ----------
  * RN 端 expo-video 只能播单 URI，桌面端 DASH 双轨（视频轨 + 独立音轨）不适用；
- * 用 platform=html5 的 mp4 整文件流（含音轨），1080P 需登录，未登录 360P/480P。
+ * 用 type=mp4 的整文件流（含音轨），1080P 需登录，未登录 360P/480P。
+ * 注意：wbi 版 playurl 在登录态/风控下可能返回 code=0 但 durl 为空——
+ * 因此「durl 为空」也视为失败，继续换下一个接口（未签名 html5 → wbi html5 → fnval=1）。
  */
-export async function videoUrl(bvid, cid, quality) {
+async function progressiveVideoInfo(bvid, cid, quality) {
   if (!bvid || !cid) throw new Error('缺少视频参数');
-  const q = `bvid=${encodeURIComponent(bvid)}&cid=${cid}&type=mp4&platform=html5&high_quality=1`
+  const base = `bvid=${encodeURIComponent(bvid)}&cid=${cid}`;
+  const html5 = `${base}&type=mp4&platform=html5&high_quality=1`
     + (quality ? `&qn=${quality}` : '');
-  let data;
-  try {
-    data = await jget('https://api.bilibili.com/x/player/wbi/playurl?' + q, { wbi: true });
-  } catch (e) {
-    data = await jget('https://api.bilibili.com/x/player/playurl?' + q);
+  const attempts = [
+    { url: 'https://api.bilibili.com/x/player/playurl?' + html5 },
+    { url: 'https://api.bilibili.com/x/player/wbi/playurl?' + html5, wbi: true },
+    { url: 'https://api.bilibili.com/x/player/playurl?' + base + '&type=mp4&fnval=1&fourk=1' + (quality ? `&qn=${quality}` : '') },
+  ];
+  let lastErr = new Error('无可用视频地址');
+  for (const att of attempts) {
+    try {
+      const data = await jget(att.url, att.wbi ? { wbi: true } : undefined); // eslint-disable-line no-await-in-loop
+      if (data?.durl?.length === 1 && data.durl[0].url) return data;
+      if (data?.durl?.length > 1) throw new Error('该视频返回多段媒体，暂不支持整文件播放或下载');
+      lastErr = new Error('接口未返回整文件流（可能触发风控）');
+    } catch (e) {
+      lastErr = e;
+    }
+    console.warn('[bili.videoUrl] 取流尝试失败：', String((lastErr && lastErr.message) || lastErr));
   }
-  if (data.durl && data.durl.length) return data.durl[0].url;
-  throw new Error('无可用视频地址');
+  throw lastErr;
+}
+
+export async function videoUrl(bvid, cid, quality) {
+  const info = await progressiveVideoInfo(bvid, cid, quality);
+  return info.durl[0].url;
 }

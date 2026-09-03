@@ -1,23 +1,23 @@
-/* Biu Player RN · 瀑布流卡片：封面 + 标题 + UP 主 + 播放量/时长 */
+/* Biu Player RN · 瀑布流卡片：封面 + 标题 + UP 主 + 播放量/时长；按下 scale 0.97 反馈 */
 import React from 'react';
-import { Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Pressable, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { colors } from '../theme';
 import { fmtCount, fmtDur } from '../theme';
-import { imageHeaders } from '../api/client';
 import { IconNote } from './icons';
+import RemoteImage from './RemoteImage';
 
 export default function TrackCard({ track, onPress, onPressUp }) {
   const play = track.stat && track.stat.view;
   return (
-    <TouchableOpacity style={styles.card} activeOpacity={0.85} onPress={onPress}>
+    <Pressable
+      style={({ pressed }) => [styles.card, pressed && styles.cardPressed]}
+      onPress={onPress}
+    >
       <View>
-        {track.pic ? (
-          <Image source={{ uri: track.pic, headers: imageHeaders() }} style={styles.cover} resizeMode="cover" />
-        ) : (
-          <View style={[styles.cover, styles.coverFallback]}>
+        <RemoteImage uri={track.pic} width={720} height={450} style={styles.cover}
+          fallback={<View style={[StyleSheet.absoluteFill, styles.coverFallback]}>
             <IconNote size={28} color={colors.accent} />
-          </View>
-        )}
+          </View>} />
         <View style={styles.durPill}>
           <Text style={styles.durText}>{fmtDur(track.duration)}</Text>
         </View>
@@ -36,7 +36,7 @@ export default function TrackCard({ track, onPress, onPressUp }) {
       {track.recommendationReason ? (
         <Text style={styles.reason} numberOfLines={1}>{track.recommendationReason}</Text>
       ) : null}
-    </TouchableOpacity>
+    </Pressable>
   );
 }
 
@@ -49,6 +49,7 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     overflow: 'hidden',
   },
+  cardPressed: { opacity: 0.88, transform: [{ scale: 0.97 }] },
   cover: { width: '100%', aspectRatio: 16 / 10, backgroundColor: '#1a1e14' },
   coverFallback: { alignItems: 'center', justifyContent: 'center' },
   durPill: {

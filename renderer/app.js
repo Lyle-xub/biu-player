@@ -523,6 +523,7 @@ async function loadBuckets() {
 
 async function switchDataNs(ns) {
   if (ns === dataNs) return;
+  await window.bili?.lanSyncStop?.();
   const prev = dataNs;
   dataNs = ns;
   if (ns && !prev) {
@@ -4928,7 +4929,39 @@ function initUpPage() {
 }
 
 /* ---------- 设置项接线（全部真实生效） ---------- */
+function renderLanSync(status = { active: false }) {
+  $('lanSyncStop').hidden = !status.active;
+  $('lanSyncPair').textContent = status.active
+    ? `${status.addresses.join(' / ') || '未检测到局域网，请连接 Wi-Fi 后重试'}\n配对码：${status.code}（10 分钟内有效）` : '';
+  $('lanSyncStatus').textContent = status.active
+    ? status.pending ? '已发起同步，等待手机响应。请保持手机同步设置页打开。'
+      : status.lastSync ? `已同步 · ${status.counts.likes} 首喜欢 · ${status.counts.playlists} 个歌单。手机保持同步设置页打开，可再次发起。`
+      : '在手机设置中输入地址和配对码，然后点击手动同步。'
+    : '手机与电脑连接同一 Wi-Fi，点击手动同步开始配对。';
+}
+function initLanSync() {
+  $('lanSyncStart').addEventListener('click', async () => {
+    const button = $('lanSyncStart');
+    if (!window.bili?.lanSync) { toast('请在桌面客户端使用局域网同步'); return; }
+    button.disabled = true;
+    try { renderLanSync(await window.bili.lanSync(dataNs)); }
+    catch (e) { $('lanSyncStatus').textContent = e.message || '同步启动失败'; }
+    finally { button.disabled = false; }
+  });
+  $('lanSyncStop').addEventListener('click', () => window.bili?.lanSyncStop().catch((e) => toast(e.message)));
+  window.bili?.onLanSyncStatus?.(renderLanSync);
+  window.bili?.onLanSyncLibrary?.(({ scope, library }) => {
+    if (scope !== dataNs) return;
+    const merged = BiuLibrarySync.merge({ version: 1, likes, playlists: customPlaylists }, library);
+    likes = merged.likes; customPlaylists = merged.playlists;
+    saveLikes(); saveCustomPlaylists(); refreshLikeUI(); renderMyPlaylists(); renderFavButtons();
+    const current = customPlaylists.find((p) => p.id === state.playlist?.customId);
+    if (current && document.body.dataset.view === 'playlist') openPlaylist(customPlaylistDetail(current));
+  });
+  window.bili?.lanSyncStatus?.().then(renderLanSync).catch(() => {});
+}
 function initSettings() {
+  initLanSync();
   // 在线音质：立即作用于当前曲目（断点续播）
   const segQ = $('segQuality');
   [...segQ.children].forEach((b) => {

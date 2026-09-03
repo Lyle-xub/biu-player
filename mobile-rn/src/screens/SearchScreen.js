@@ -183,7 +183,7 @@ export default function SearchScreen({ navigation }) {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.bg },
+  safe: { flex: 1, backgroundColor: 'transparent' },
   header: { paddingHorizontal: 14, paddingTop: 6, paddingBottom: 10 },
   inputPill: {
     flexDirection: 'row', alignItems: 'center', gap: 8,

@@ -132,6 +132,19 @@ export const IconQueue = ({ size = 20, color }) => (
   </I>
 );
 
+export const IconRepeat = ({ size = 20, color, single = false }) => (
+  <I size={size} color={color}>
+    <Path d="m17 3 3 3-3 3M4 11V9a3 3 0 0 1 3-3h13M7 21l-3-3 3-3M20 13v2a3 3 0 0 1-3 3H4" {...stroke(color)} />
+    {single ? <Path d="m10.5 11 1.5-1v5M10.5 15h3" {...stroke(color, { strokeWidth: 1.5 })} /> : null}
+  </I>
+);
+
+export const IconShuffle = ({ size = 20, color }) => (
+  <I size={size} color={color}>
+    <Path d="M4 6h2c4 0 8 12 12 12h2M4 18h2c1.5 0 3-1.7 4.5-4M13.5 10C15 7.7 16.5 6 18 6h2M17 3l3 3-3 3M17 15l3 3-3 3" {...stroke(color)} />
+  </I>
+);
+
 export const IconVideo = ({ size = 20, color }) => (
   <I size={size} color={color}>
     <Rect x={3.5} y={6} width={12.5} height={12} rx={3} {...stroke(color)} />
@@ -142,6 +155,80 @@ export const IconVideo = ({ size = 20, color }) => (
 export const IconChevronDown = ({ size = 22, color }) => (
   <I size={size} color={color}>
     <Path d="m5.5 9 6.5 6.5L18.5 9" {...stroke(color, { strokeWidth: 2 })} />
+  </I>
+);
+
+export const IconChevronRight = ({ size = 18, color }) => (
+  <I size={size} color={color}>
+    <Path d="m9.5 5.5 6.5 6.5-6.5 6.5" {...stroke(color, { strokeWidth: 2 })} />
+  </I>
+);
+
+export const IconPlus = ({ size = 20, color }) => (
+  <I size={size} color={color}>
+    <Path d="M12 5v14M5 12h14" {...stroke(color, { strokeWidth: 2 })} />
+  </I>
+);
+
+export const IconThumbUp = ({ size = 20, color, filled = false }) => (
+  <I size={size} color={color}>
+    <Path
+      d="M7 10.5v9.8H4.4a1 1 0 0 1-1-1v-7.8a1 1 0 0 1 1-1H7Zm0 .2 4.1-6.4c.5-.7 1.6-.6 2 .2.3.6.4 1.4.2 2.1l-.8 2.9h6.3a1.6 1.6 0 0 1 1.6 1.9l-1.4 7a2 2 0 0 1-2 1.6H7"
+      {...(filled ? { fill: color } : stroke(color))}
+    />
+  </I>
+);
+
+export const IconCoin = ({ size = 20, color }) => (
+  <I size={size} color={color}>
+    <Circle cx={12} cy={12} r={8.5} {...stroke(color)} />
+    <Circle cx={12} cy={12} r={4} {...stroke(color, { strokeWidth: 1.5 })} />
+  </I>
+);
+
+export const IconComment = ({ size = 20, color }) => (
+  <I size={size} color={color}>
+    <Path
+      d="M20 11.5c0 4.1-3.6 7.5-8 7.5-1 0-2-.15-2.9-.44L4.5 20l1.1-3.2A7.3 7.3 0 0 1 4 11.5C4 7.4 7.6 4 12 4s8 3.4 8 7.5Z"
+      {...stroke(color)}
+    />
+  </I>
+);
+
+export const IconDownload = ({ size = 20, color }) => (
+  <I size={size} color={color}>
+    <Path d="M12 3.5v10M8.5 10 12 13.5 15.5 10" {...stroke(color)} />
+    <Path d="M4.5 15.5v3a1.5 1.5 0 0 0 1.5 1.5h12a1.5 1.5 0 0 0 1.5-1.5v-3" {...stroke(color)} />
+  </I>
+);
+
+export const IconSplit = ({ size = 20, color }) => (
+  <I size={size} color={color}>
+    <Path d="M4 7.5h4l3 4.5M4 16.5h4l8-9h4" {...stroke(color)} />
+    <Path d="m17.5 5 2.5 2.5-2.5 2.5M17.5 14l2.5 2.5-2.5 2.5" {...stroke(color, { strokeWidth: 1.6 })} />
+  </I>
+);
+
+export const IconClock = ({ size = 20, color }) => (
+  <I size={size} color={color}>
+    <Circle cx={12} cy={12} r={8.5} {...stroke(color)} />
+    <Path d="M12 7v5.2l3.4 2" {...stroke(color)} />
+  </I>
+);
+
+export const IconSettings = ({ size = 20, color }) => (
+  <I size={size} color={color}>
+    <Path d="M4 7h9.6M18.4 7H20M4 12h1.6M10.4 12H20M4 17h7.6M16.4 17H20" {...stroke(color)} />
+    <Circle cx={16} cy={7} r={2.4} {...stroke(color)} />
+    <Circle cx={8} cy={12} r={2.4} {...stroke(color)} />
+    <Circle cx={14} cy={17} r={2.4} {...stroke(color)} />
+  </I>
+);
+
+export const IconPlaylist = ({ size = 20, color }) => (
+  <I size={size} color={color}>
+    <Path d="M4 6.5h12M4 11h12M4 15.5h7" {...stroke(color, { strokeWidth: 1.9 })} />
+    <Path d="M14.5 13.8v6.4a.8.8 0 0 0 1.22.68l4.6-3.2a.8.8 0 0 0 0-1.36l-4.6-3.2a.8.8 0 0 0-1.22.68Z" fill={color} />
   </I>
 );
 

@@ -527,6 +527,7 @@ async function loadBuckets() {
 
 async function switchDataNs(ns) {
   if (ns === dataNs) return;
+  await window.bili?.lanSyncStop?.();
   const prev = dataNs;
   dataNs = ns;
   if (ns && !prev) {
@@ -4595,6 +4596,33 @@ function initUpPage() {
 }
 
 /* ---------- 设置项（状态发布到 'settings' slice，交互由 SettingsView 组件回调） ---------- */
+let lanSyncBusy = false;
+async function manualLanSync() {
+  if (lanSyncBusy) return;
+  if (!window.bili?.lanSync) { toast('请在桌面客户端使用局域网同步'); return; }
+  lanSyncBusy = true;
+  patchSlice('lanSync', { busy: true, error: '' });
+  try { publish('lanSync', await window.bili.lanSync(dataNs)); }
+  catch (e) { patchSlice('lanSync', { error: e.message || '同步启动失败' }); }
+  finally { lanSyncBusy = false; patchSlice('lanSync', { busy: false }); }
+}
+async function stopLanSync() {
+  try { await window.bili?.lanSyncStop?.(); }
+  catch (e) { patchSlice('lanSync', { error: e.message }); }
+}
+function initLanSync() {
+  window.bili?.onLanSyncStatus?.((status) => publish('lanSync', status));
+  window.bili?.onLanSyncLibrary?.(({ scope, library }) => {
+    if (scope !== dataNs) return;
+    const merged = BiuLibrarySync.merge({ version: 1, likes, playlists: customPlaylists }, library);
+    likes = merged.likes; customPlaylists = merged.playlists;
+    saveLikes(); saveCustomPlaylists(); refreshLikeUI(); renderMyPlaylists(); renderFavButtons();
+    publish('likes', likes.slice());
+    const current = customPlaylists.find((p) => p.id === state.playlist?.customId);
+    if (current && document.body.dataset.view === 'playlist') openPlaylist(customPlaylistDetail(current));
+  });
+  window.bili?.lanSyncStatus?.().then((status) => publish('lanSync', status)).catch(() => {});
+}
 function publishSettings() {
   publish('settings', {
     quality: settings.quality,
@@ -4687,6 +4715,7 @@ function toggleDeskLyric() {
 }
 
 function initSettings() {
+  initLanSync();
   publishSettings();
   document.documentElement.style.setProperty('--bg-blur', settings.blur + 'px');
   $('danmakuLayer').classList.toggle('off', !settings.danmaku);
@@ -5239,6 +5268,7 @@ window.biuUi = { go, openPanel, closePanel };
 window.biuActions = { openPlaylist, likesPlaylist, rankingPlaylist, customPlaylistDetail, openPlDialog, setQueue, openFavFolder, showLogin, isLiked, toggleLike, plDeleteTrack, plReorder, togglePlEditing, pickInlineCover, openUpPage, toggleFollow, playDynVideo, playIndex, toggleFavFolder, toggleTrackInPlaylist,
   // 设置面板（SettingsView）
   setQuality, setVQuality, toggleDanmaku, toggleSyncHistory, setBlurPx, toggleDeskLyric,
+  manualLanSync, stopLanSync,
   // 登录弹窗（LoginView）
   switchLoginTab, refreshQrLogin, sendSmsCode, submitSmsLogin, hideQrLogin, logout,
   // 歌单新建/删除对话框（PlDialogView）

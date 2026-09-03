@@ -4,6 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const QRCode = require('qrcode');
+const { createLanSync } = require('./lan-sync');
 
 // 桌面 Chrome UA + B 站页面 Referer（CDN 无 Referer 会 403）
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
@@ -450,6 +451,28 @@ app.whenReady().then(() => {
     readBiuStore()[String(key)] = val;
     scheduleBiuStoreWrite();
   });
+
+  const lanSync = createLanSync({
+    readLibrary: (scope) => {
+      const suffix = scope ? `@${scope}` : '';
+      const saved = readBiuStore();
+      return { version: 1, likes: saved[`biu-likes${suffix}`] || [], playlists: saved[`biu-playlists${suffix}`] || [] };
+    },
+    writeLibrary: (scope, library) => {
+      const suffix = scope ? `@${scope}` : '';
+      const before = readBiuStore();
+      biuStoreCache = { ...before, [`biu-likes${suffix}`]: library.likes, [`biu-playlists${suffix}`]: library.playlists };
+      if (!flushBiuStore()) { biuStoreCache = before; throw new Error('电脑保存失败，请检查磁盘空间后重试'); }
+      mainWin?.webContents.send('lan-sync:library', { scope, library });
+    },
+    onStatus: (status) => {
+      if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('lan-sync:status', status);
+    },
+  });
+  ipcMain.handle('lan-sync:manual', (_e, scope) => lanSync.manual(scope));
+  ipcMain.handle('lan-sync:status', () => lanSync.status());
+  ipcMain.handle('lan-sync:stop', () => lanSync.stop());
+  app.on('before-quit', () => lanSync.stop());
 
   // 网易云听歌识曲：vendored afp WASM 指纹 → interface.music.163.com 匹配
   // payload: { pcm: ArrayBuffer（Float32 单声道 @48000Hz）, from, len }（from/len 单位：秒）

@@ -18,6 +18,7 @@
     "productName": "Biu Player",
     "files": [
       "main.js",
+      "lan-sync.js",
       "preload.js",
       "lyric-preload.js",
       "lyric.html",
@@ -26,6 +27,9 @@
     ],
     "mac": {
       "category": "public.app-category.music",
+      "extendInfo": {
+        "NSLocalNetworkUsageDescription": "连接同一局域网内的 Biu Player 手机端，手动同步我喜欢和歌单。"
+      },
       "target": [
         "dmg",
         "zip"

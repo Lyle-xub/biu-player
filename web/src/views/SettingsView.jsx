@@ -12,6 +12,7 @@ const VQUALITY_OPTIONS = [[64, '720P'], [80, '1080P'], [120, '4K']];
 export function SettingsModal() {
   const s = { ...DEFAULT_SETTINGS, ...(useSlice('settings') || {}) };
   const auth = { ...DEFAULT_AUTH, ...(useSlice('auth') || {}) };
+  const lan = useSlice('lanSync') || {};
   const A = () => window.biuActions;
   const dragging = useRef(false);
   const setFromEvent = (e) => {
@@ -76,6 +77,19 @@ export function SettingsModal() {
         <div className="mrow">
           <div className="ml"><b>桌面歌词</b><small>在屏幕上悬浮显示歌词</small></div>
           <div className="mr"><span className={`switch${s.deskLyric ? '' : ' off'}`} id="swLyric" onClick={() => A().toggleDeskLyric()}></span></div>
+        </div>
+        <div className="mrow lan-sync-row">
+          <div className="ml"><b>局域网同步</b><small>合并两端的我喜欢和自建歌单，自动去重，保留两端内容。</small>
+            <small role="status">{lan.error || (lan.active
+              ? lan.pending ? '已发起同步，等待手机响应。请保持手机同步设置页打开。'
+                : lan.lastSync ? `已同步 · ${lan.counts.likes} 首喜欢 · ${lan.counts.playlists} 个歌单。手机保持同步设置页打开，可再次发起。`
+                : '在手机设置中输入地址和配对码，然后点击手动同步。'
+              : '手机与电脑连接同一 Wi-Fi，点击手动同步开始配对。')}</small>
+            {lan.active && <small className="lan-sync-pair">{(lan.addresses || []).join(' / ') || '未检测到局域网，请连接 Wi-Fi 后重试'}
+              {'\n'}配对码：{lan.code}（10 分钟内有效）</small>}
+          </div>
+          <div className="mr"><button className="btn-ghost" disabled={lan.busy} onClick={() => A().manualLanSync()}>手动同步</button>
+            {lan.active && <button className="btn-ghost" onClick={() => A().stopLanSync()}>关闭同步</button>}</div>
         </div>
         <div className="mfoot">BIU PLAYER · v0.5.0 · 基于 BILIBILI 公开接口</div>
       </div>

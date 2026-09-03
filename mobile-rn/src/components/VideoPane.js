@@ -1,78 +1,58 @@
 /* Biu Player RN · 可复用视频面板（PlayerScreen 内嵌 / VideoScreen 路由共用）
- * useVideoSource(track, enabled)：按曲目懒取 progressive mp4 流地址（bili.videoUrl），
- *   enabled=false 时不请求；换曲目自动重置。
- * VideoPane({player, buffering, error})：16:9 圆角黑底 VideoView + loading / error 遮罩。
- *   不持有 player——由调用方 useVideoPlayer 创建，便于绑定自绘控制。
+ * 固定 16:9 完整显示画面；封面图的模糊副本形成同色系边框与柔光。
+ * 不持有 player——单 player 架构下 player 来自 PlayerContext，两个屏只是显示同一画面。
  */
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 import { VideoView } from 'expo-video';
+import { Image as ExpoImage } from 'expo-image';
 import { colors } from '../theme';
-import * as bili from '../api/bili';
+import { imageHeaders } from '../api/client';
+import { optimizedImageUri } from './RemoteImage';
 
-export function useVideoSource(track, enabled) {
-  const [source, setSource] = useState(null);
-  const [error, setError] = useState(null);
-  const bvid = track && track.bvid;
-
-  // 换曲目重置
-  useEffect(() => {
-    setSource(null);
-    setError(null);
-  }, [bvid]);
-
-  useEffect(() => {
-    if (!enabled || !bvid || source || error) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        let cid = track.cid;
-        if (!cid) {
-          const v = await bili.view(bvid);
-          cid = v && v.cid;
-        }
-        if (!cid) throw new Error('无法获取视频分 P 信息');
-        const url = await bili.videoUrl(bvid, cid);
-        if (!cancelled) setSource(url);
-      } catch (e) {
-        if (!cancelled) setError(String(e.message || e));
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [enabled, bvid, source, error]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  return { source, error };
-}
-
-export default function VideoPane({ player, buffering, error, style }) {
+export default function VideoPane({ player, buffering, error, cover, style, visible = true }) {
   return (
     <View style={[styles.videoWrap, style]}>
-      <VideoView
-        player={player}
-        style={styles.video}
-        contentFit="contain"
-        nativeControls={false}
-      />
-      {buffering && !error ? (
-        <View style={styles.videoOverlay}>
-          <ActivityIndicator color={colors.accent} size="large" />
-        </View>
-      ) : null}
-      {error ? (
-        <View style={styles.videoOverlay}>
-          <Text style={styles.errorText}>{error}</Text>
-          <Text style={styles.errorHint}>（原视频流需要登录才有高清晰度）</Text>
-        </View>
-      ) : null}
+      {cover ? <ExpoImage pointerEvents="none" source={{ uri: optimizedImageUri(cover, 1280, 720), headers: imageHeaders() }}
+        style={styles.coverGlow} contentFit="cover" blurRadius={28} /> : null}
+      <View style={styles.surface}>
+        {cover ? <ExpoImage pointerEvents="none" source={{ uri: optimizedImageUri(cover, 1280, 720), headers: imageHeaders() }}
+          style={StyleSheet.absoluteFill} contentFit="cover" blurRadius={18} /> : null}
+        {visible ? <VideoView
+          player={player}
+          surfaceType="textureView"
+          style={styles.video}
+          contentFit="contain"
+          nativeControls={false}
+          useExoShutter
+        /> : null}
+        {buffering && !error ? (
+          <View style={styles.videoOverlay}>
+            <ActivityIndicator color={colors.accent} size="large" />
+          </View>
+        ) : null}
+        {error ? (
+          <View style={styles.videoOverlay}>
+            <Text style={styles.errorText}>{error}</Text>
+            <Text style={styles.errorHint}>（原视频流需要登录才有高清晰度；点播放键可重试）</Text>
+          </View>
+        ) : null}
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   videoWrap: {
-    aspectRatio: 16 / 9, borderRadius: 14, overflow: 'hidden',
-    backgroundColor: '#000',
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)',
+    aspectRatio: 16 / 9, borderRadius: 16,
+  },
+  coverGlow: {
+    position: 'absolute', left: -8, right: -8, top: -8, bottom: -8,
+    borderRadius: 22, opacity: 0.42,
+  },
+  surface: {
+    flex: 1, margin: 2, borderRadius: 14, overflow: 'hidden',
+    backgroundColor: '#080908',
   },
   video: { flex: 1 },
   videoOverlay: {

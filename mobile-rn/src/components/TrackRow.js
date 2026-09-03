@@ -1,20 +1,17 @@
 /* Biu Player RN · 列表行（搜索结果 / 喜欢 / 历史）：方形小封面 + 标题 + UP 主 + 时长 */
 import React from 'react';
-import { Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { colors, fmtDur } from '../theme';
-import { imageHeaders } from '../api/client';
 import { IconNote } from './icons';
+import RemoteImage from './RemoteImage';
 
-export default function TrackRow({ track, onPress, onPressUp, active = false }) {
+export default function TrackRow({ track, onPress, onPressUp, onLongPress, active = false }) {
   return (
-    <TouchableOpacity style={styles.row} activeOpacity={0.75} onPress={onPress}>
-      {track.pic ? (
-        <Image source={{ uri: track.pic, headers: imageHeaders() }} style={styles.cover} resizeMode="cover" />
-      ) : (
-        <View style={[styles.cover, styles.coverFallback]}>
+    <TouchableOpacity style={styles.row} activeOpacity={0.75} onPress={onPress} onLongPress={onLongPress} delayLongPress={380}>
+      <RemoteImage uri={track.pic} width={180} height={180} style={styles.cover}
+        fallback={<View style={[StyleSheet.absoluteFill, styles.coverFallback]}>
           <IconNote size={18} color={colors.accent} />
-        </View>
-      )}
+        </View>} />
       <View style={styles.body}>
         <Text style={[styles.title, active && { color: colors.accent }]} numberOfLines={1}>
           {track.title}
