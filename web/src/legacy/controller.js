@@ -2,18 +2,17 @@
  * 依赖全局（api / coverSVG / BiuPlaybackSession / splitDecodeAacStream / Hls）由 vendor.js 与 index.html 的 hls 脚本提供。
  */
 import '../vendor.js';
+import { publish, peek } from '../store.js';
+import { esc, covHTML, fmt, fmtNum, fmtFans } from './html.js';
 
 /* Biu Player · 渲染逻辑：视图切换 / 数据渲染 / 播放器状态 */
 
 const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
-  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-// 秒 → mm:ss
-const fmt = (sec) => {
-  sec = Math.max(0, Math.round(sec || 0));
-  return String(Math.floor(sec / 60)).padStart(2, '0') + ':' + String(sec % 60).padStart(2, '0');
-};
-const fmtNum = (n) => (n >= 10000 ? (n / 10000).toFixed(1).replace(/\.0$/, '') + ' 万' : String(n ?? 0));
+
+// 重发布某个 slice 的部分字段（保持其余字段不变）
+function patchSlice(key, patch) {
+  publish(key, { ...(peek(key) || {}), ...patch });
+}
 
 /* ---------- 本地持久化 ---------- */
 const store = {
@@ -445,7 +444,7 @@ const dataKey = (base) => (dataNs ? `${base}@${dataNs}` : base);
 
 async function loadBuckets() {
   const adopt = {
-    'biu-likes': (v) => { likes = v; },
+    'biu-likes': (v) => { likes = v; publish('likes', likes.slice()); },
     'biu-playlists': (v) => { customPlaylists = v; },
     'biu-history': (v) => { playHistory = v; },
   };
@@ -498,14 +497,13 @@ async function switchDataNs(ns) {
 
 function renderAuth(auth = authState) {
   authState = auth || { isLogin: false };
-  if (!$('authLoggedOut')) return;
-  $('authLoggedOut').hidden = !!authState.isLogin;
-  $('authLoggedIn').hidden = !authState.isLogin;
-  $('authSubtitle').textContent = authState.isLogin ? `UID ${authState.mid} · 已同步收藏夹` : '扫码或手机验证码安全登录';
-  if (authState.isLogin) {
-    $('authName').textContent = authState.uname || '已登录';
-    $('authFace').src = authState.face || '';
-  }
+  // 账号区 UI 由 SettingsView 组件按 'auth' slice 渲染
+  publish('auth', {
+    isLogin: !!authState.isLogin,
+    mid: authState.mid,
+    uname: authState.uname,
+    face: authState.face,
+  });
   // 喜欢 / 自建歌单 / 历史随账号切换（游客 ↔ mid 命名空间）
   const ns = authState.isLogin && authState.mid ? String(authState.mid) : '';
   if (ns !== dataNs) switchDataNs(ns).catch(() => {});
@@ -523,7 +521,7 @@ async function ensureAuth(force = false) {
 }
 
 function hideQrLogin() {
-  $('qrLoginMask').classList.remove('show');
+  patchSlice('login', { show: false });
   clearTimeout(qrPollTimer);
   qrPollTimer = null;
   qrKey = '';
@@ -532,12 +530,7 @@ function hideQrLogin() {
 
 // 登录弹窗 Tab：扫码 / 验证码。切到扫码时重新生成二维码，离开时停轮询
 function switchLoginTab(tab) {
-  $('tabQrLogin').classList.toggle('on', tab === 'qr');
-  $('tabSmsLogin').classList.toggle('on', tab === 'sms');
-  $('tabQrLogin').setAttribute('aria-selected', String(tab === 'qr'));
-  $('tabSmsLogin').setAttribute('aria-selected', String(tab === 'sms'));
-  $('paneQr').hidden = tab !== 'qr';
-  $('paneSms').hidden = tab !== 'sms';
+  patchSlice('login', { tab });
   if (tab === 'qr') refreshQrLogin();
   else { clearTimeout(qrPollTimer); qrPollTimer = null; qrKey = ''; }
 }
@@ -546,36 +539,33 @@ async function refreshQrLogin() {
   if (!api.hasBridge) { toast('扫码登录仅在客户端中可用'); return; }
   clearTimeout(qrPollTimer);
   qrKey = '';
-  $('qrImage').removeAttribute('src');
-  $('qrState').classList.remove('hidden');
-  $('qrState').textContent = '正在生成二维码…';
-  $('qrStatus').className = 'login-status';
-  $('qrStatus').textContent = '请使用哔哩哔哩客户端扫码';
+  patchSlice('login', {
+    qrImage: null, qrStateHidden: false, qrStateText: '正在生成二维码…',
+    qrStatusCls: '', qrStatusText: '请使用哔哩哔哩客户端扫码',
+  });
   const result = await window.bili.authQrStart();
-  if (!$('qrLoginMask').classList.contains('show')) return;
+  if (!peek('login')?.show) return;
   if (!result.ok) {
-    $('qrState').textContent = result.message || '二维码生成失败';
+    patchSlice('login', { qrStateText: result.message || '二维码生成失败' });
     return;
   }
   qrKey = result.key;
-  $('qrImage').src = result.image;
-  $('qrState').classList.add('hidden');
+  patchSlice('login', { qrImage: result.image, qrStateHidden: true });
   qrPollTimer = setTimeout(pollQrLogin, 1000);
 }
 
 async function pollQrLogin() {
-  if (!qrKey || !$('qrLoginMask').classList.contains('show')) return;
+  if (!qrKey || !peek('login')?.show) return;
   const key = qrKey;
   const result = await window.bili.authQrPoll(key);
-  if (key !== qrKey || !$('qrLoginMask').classList.contains('show')) return;
+  if (key !== qrKey || !peek('login')?.show) return;
   if (!result.ok) {
-    $('qrStatus').textContent = result.message || '登录状态查询失败';
+    patchSlice('login', { qrStatusText: result.message || '登录状态查询失败' });
     qrPollTimer = setTimeout(pollQrLogin, 2500);
     return;
   }
   if (result.code === 0) {
-    $('qrStatus').className = 'login-status success';
-    $('qrStatus').textContent = '登录成功，正在同步账号…';
+    patchSlice('login', { qrStatusCls: 'success', qrStatusText: '登录成功，正在同步账号…' });
     renderAuth(result.auth && result.auth.isLogin ? result.auth : await ensureAuth(true));
     setTimeout(() => {
       hideQrLogin();
@@ -585,21 +575,23 @@ async function pollQrLogin() {
     return;
   }
   if (result.code === 86038) {
-    $('qrStatus').className = 'login-status';
-    $('qrStatus').textContent = '二维码已过期，请刷新';
-    $('qrState').classList.remove('hidden');
-    $('qrState').textContent = '二维码已过期';
+    patchSlice('login', {
+      qrStatusCls: '', qrStatusText: '二维码已过期，请刷新',
+      qrStateHidden: false, qrStateText: '二维码已过期',
+    });
     return;
   }
   const confirmed = result.code === 86090;
-  $('qrStatus').className = 'login-status' + (confirmed ? ' pending' : '');
-  $('qrStatus').textContent = confirmed ? '已扫码，请在手机上确认' : '等待扫码…';
+  patchSlice('login', {
+    qrStatusCls: confirmed ? 'pending' : '',
+    qrStatusText: confirmed ? '已扫码，请在手机上确认' : '等待扫码…',
+  });
   qrPollTimer = setTimeout(pollQrLogin, 1800);
 }
 
 function showLogin(tab = 'qr') {
   closePanel();
-  $('qrLoginMask').classList.add('show');
+  patchSlice('login', { show: true });
   switchLoginTab(tab);
 }
 
@@ -654,23 +646,19 @@ async function runGeetest() {
 }
 
 function setSmsStatus(text, cls = '') {
-  const el = $('smsStatus');
-  el.className = 'login-status' + (cls ? ' ' + cls : '');
-  el.textContent = text;
+  patchSlice('login', { smsStatusText: text, smsStatusCls: cls });
 }
 
 function startSmsCountdown() {
   smsCountdown = 60;
-  const btn = $('btnSmsSend');
-  btn.disabled = true;
+  patchSlice('login', { smsSendDisabled: true });
   clearInterval(smsCountdownTimer);
   smsCountdownTimer = setInterval(() => {
     smsCountdown -= 1;
     if (smsCountdown <= 0) {
       clearInterval(smsCountdownTimer);
-      btn.disabled = false;
-      btn.textContent = '获取验证码';
-    } else btn.textContent = `${smsCountdown}s 后重发`;
+      patchSlice('login', { smsSendDisabled: false, smsSendLabel: '获取验证码' });
+    } else patchSlice('login', { smsSendLabel: `${smsCountdown}s 后重发` });
   }, 1000);
 }
 
@@ -679,11 +667,12 @@ function resetSmsLogin() {
   smsCountdown = 0;
   smsCaptchaKey = '';
   smsBusy = false;
-  const btn = $('btnSmsSend');
-  if (btn) { btn.disabled = false; btn.textContent = '获取验证码'; }
+  patchSlice('login', {
+    smsSendDisabled: false, smsSendLabel: '获取验证码',
+    smsStatusText: '', smsStatusCls: '', smsLoginDisabled: false,
+  });
   const slot = $('geetestSlot');
   if (slot) slot.innerHTML = '';
-  if ($('smsStatus')) setSmsStatus('');
 }
 
 async function sendSmsCode() {
@@ -691,22 +680,21 @@ async function sendSmsCode() {
   const tel = $('smsPhone').value.replace(/\D/g, '');
   if (!/^1\d{10}$/.test(tel)) { setSmsStatus('请输入正确的 11 位手机号'); $('smsPhone').focus(); return; }
   smsBusy = true;
-  const btn = $('btnSmsSend');
-  btn.disabled = true;
+  patchSlice('login', { smsSendDisabled: true });
   setSmsStatus('请完成滑块验证…');
   try {
     const gt = await runGeetest();
-    if (!gt) { setSmsStatus('验证未完成，请重试'); btn.disabled = false; return; }
+    if (!gt) { setSmsStatus('验证未完成，请重试'); patchSlice('login', { smsSendDisabled: false }); return; }
     setSmsStatus('正在发送验证码…');
     const r = await window.bili.authSmsSend({ tel, ...gt });
-    if (!r.ok) { setSmsStatus(r.message || '验证码发送失败'); btn.disabled = false; return; }
+    if (!r.ok) { setSmsStatus(r.message || '验证码发送失败'); patchSlice('login', { smsSendDisabled: false }); return; }
     smsCaptchaKey = r.captchaKey || '';
     setSmsStatus('验证码已发送，请查收短信', 'success');
     startSmsCountdown();
     $('smsCode').focus();
   } catch (e) {
     setSmsStatus(e.message || '发送失败，稍后重试');
-    btn.disabled = false;
+    patchSlice('login', { smsSendDisabled: false });
   } finally { smsBusy = false; }
 }
 
@@ -718,7 +706,7 @@ async function submitSmsLogin() {
   if (!smsCaptchaKey) { setSmsStatus('请先获取验证码'); return; }
   if (!/^\d{6}$/.test(code)) { setSmsStatus('请输入 6 位数字验证码'); $('smsCode').focus(); return; }
   smsBusy = true;
-  $('btnSmsLogin').disabled = true;
+  patchSlice('login', { smsLoginDisabled: true });
   setSmsStatus('正在登录…');
   try {
     const r = await window.bili.authSmsLogin({ tel, code, captchaKey: smsCaptchaKey });
@@ -731,25 +719,17 @@ async function submitSmsLogin() {
       loadFav();
     }, 500);
   } catch (e) { setSmsStatus(e.message || '登录失败，稍后重试'); }
-  finally { smsBusy = false; $('btnSmsLogin').disabled = false; }
+  finally { smsBusy = false; patchSlice('login', { smsLoginDisabled: false }); }
+}
+
+async function logout() {
+  renderAuth(await window.bili.authLogout());
+  toast('已退出 B 站账号');
+  loadFav();
 }
 
 function initAuth() {
-  $('btnQrLogin').addEventListener('click', () => showLogin('qr'));
-  $('btnCodeLogin').addEventListener('click', () => showLogin('sms'));
-  $('tabQrLogin').addEventListener('click', () => switchLoginTab('qr'));
-  $('tabSmsLogin').addEventListener('click', () => switchLoginTab('sms'));
-  $('btnSmsSend').addEventListener('click', sendSmsCode);
-  $('btnSmsLogin').addEventListener('click', submitSmsLogin);
-  $('smsCode').addEventListener('keydown', (e) => { if (e.key === 'Enter') submitSmsLogin(); });
-  $('btnCloseQr').addEventListener('click', hideQrLogin);
-  $('btnRefreshQr').addEventListener('click', refreshQrLogin);
-  $('qrLoginMask').addEventListener('click', (e) => { if (e.target === $('qrLoginMask')) hideQrLogin(); });
-  $('btnLogout').addEventListener('click', async () => {
-    renderAuth(await window.bili.authLogout());
-    toast('已退出 B 站账号');
-    loadFav();
-  });
+  publish('login', { show: false, tab: 'qr' });
   if (api.hasBridge) {
     window.bili.onAuthChanged((auth) => {
       renderAuth(auth);
@@ -794,10 +774,7 @@ function syncVideoQualityUI(activeQuality = Number(video.dataset.actualQuality) 
   $('vQuality').innerHTML = `<b>${esc(main)}</b>` + (sub ? `<small>${esc(sub)}</small>` : '');
   $('vQuality').title = videoQualityOptions.length
     ? `可选：${videoQualityOptions.map((item) => item.label).join('、')}` : '正在获取可选清晰度';
-  // 设置页是全局默认档位，不随当前视频可用档位禁用
-  [...$('segVQuality').children].forEach((button) => {
-    button.classList.toggle('on', +button.dataset.vq === Number(settings.vq));
-  });
+  // 设置页的默认档位高亮由 SettingsView 按 'settings' slice 渲染，无需在此同步
 }
 
 async function getVideoQualityOptions(t, force = false) {
@@ -1214,21 +1191,10 @@ function favEligibleTrack() {
 }
 
 function renderFavButtons() {
-  const like = $('btnLike');
-  const fav = $('btnFav');
-  if (!like || !fav) return;
+  // 喜欢/收藏按钮的状态 class 由组件按 'npActions' slice 渲染（btnLike/btnFav/ppLike/vsFavBtn）
   const liked = isLiked(state.current); // 本地「我喜欢」，与列表页心形同源
   const favored = !!(favFoldersCache && favFoldersCache.some((f) => f.favored));
-  like.classList.toggle('on', liked);
-  like.setAttribute('aria-pressed', String(liked));
-  fav.classList.toggle('on', favored);
-  fav.setAttribute('aria-pressed', String(favored));
-  // 原视频页统计行的收藏状态同步
-  const vsFav = $('vsFavBtn');
-  if (vsFav) vsFav.classList.toggle('on', favored);
-  // 移动端迷你播放条的喜欢钮同步
-  const ppLike = $('ppLike');
-  if (ppLike) ppLike.classList.toggle('on', liked);
+  patchSlice('npActions', { liked, favored, vsFavOn: favored });
 }
 
 function closeFavPop() {
@@ -1259,35 +1225,14 @@ async function syncFavState(t) {
 }
 
 function renderFavPopList() {
-  const list = $('favPopList');
-  if (!list) return;
-  // 异步加载完成后会重绘列表，保留滚动位置避免跳回顶部
-  const keepScroll = list.scrollTop;
-  if (!authState.isLogin) {
-    list.innerHTML = '<div class="fav-pop-hint">登录 B 站后可收藏</div>';
-    positionFavPop();
-    return;
-  }
-  if (!favFoldersCache) {
-    list.innerHTML = '<div class="fav-pop-hint">加载中…</div>';
-    positionFavPop();
-    return;
-  }
-  if (!favFoldersCache.length) {
-    list.innerHTML = '<div class="fav-pop-hint">暂无收藏夹，请先在 B 站创建</div>';
-    positionFavPop();
-    return;
-  }
-  list.innerHTML = favFoldersCache.map((f, i) => `
-    <button type="button" class="fav-pop-item${f.favored ? ' on' : ''}" data-fi="${i}">
-      <span class="box"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#141610" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5 9.5 18 20 6.5"/></svg></span>
-      <span class="name">${esc(f.title)}</span>
-      <span class="count">${f.count}</span>
-    </button>`).join('');
-  list.scrollTop = keepScroll;
-  list.querySelectorAll('.fav-pop-item').forEach((el) =>
-    el.addEventListener('click', () => toggleFavFolder(+el.dataset.fi)));
-  positionFavPop(); // 列表高度变化后重新判断上/下展开
+  // React 组件（views/FavPopList.jsx）拥有 #favPopList 的 DOM 与事件，这里只发布数据。
+  // 组件容器常驻 + keyed children，滚动位置天然保留（旧版 keepScroll 逻辑不再需要）。
+  if (!authState.isLogin) publish('favpop', { state: 'signed-out', folders: null });
+  else if (!favFoldersCache) publish('favpop', { state: 'loading', folders: null });
+  else if (!favFoldersCache.length) publish('favpop', { state: 'empty', folders: favFoldersCache });
+  else publish('favpop', { state: 'ready', folders: favFoldersCache });
+  // React 重渲染后量高度才准（旧版渲染后同步 positionFavPop，用 rAF 等价）
+  requestAnimationFrame(positionFavPop);
 }
 
 let favPopAnchor = null; // 弹层锚点按钮（btnFav / vsFavBtn），重绘后需要重新定位
@@ -1377,8 +1322,8 @@ function setLyricOffset(t, v) {
   else lyricOffsets[k] = v;
   store.set('biu-lyric-offsets', lyricOffsets);
   if (api.hasBridge && window.bili.storeSet) window.bili.storeSet('biu-lyric-offsets', lyricOffsets);
-  const el = $('lyricOffVal');
-  if (el) el.textContent = fmtLyricOffset(lyricOffsetOf(t));
+  // 偏移值显示由 LyricMatchView 组件按 'lyricMatch' slice 渲染
+  patchSlice('lyricMatch', { offVal: fmtLyricOffset(lyricOffsetOf(t)) });
   syncLyric(true);
 }
 let plPopOpen = false;
@@ -1392,27 +1337,23 @@ function closePlPop() {
 }
 
 function renderPlPopList() {
-  const list = $('plPopList');
-  if (!list) return;
+  // React 组件（views/PlPopList.jsx）拥有 #plPopList 的 DOM 与事件，这里只发布数据
   const t = state.current;
   if (!t || t.isLive || !t.bvid) {
-    list.innerHTML = '<div class="fav-pop-hint">当前曲目不支持加入歌单</div>';
+    publish('plpop', { hint: '当前曲目不支持加入歌单', playlists: [] });
     return;
   }
   if (!customPlaylists.length) {
-    list.innerHTML = '<div class="fav-pop-hint">还没有本地歌单，去「歌单」页新建一个吧</div>';
+    publish('plpop', { hint: '还没有本地歌单，去「歌单」页新建一个吧', playlists: [] });
     return;
   }
-  list.innerHTML = customPlaylists.map((p, i) => {
-    const has = p.tracks.some((x) => trackKey(x) === trackKey(t));
-    return `<button type="button" class="fav-pop-item${has ? ' on' : ''}" data-pi="${i}">
-      <span class="box"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#141610" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5 9.5 18 20 6.5"/></svg></span>
-      <span class="name">${esc(p.title)}</span>
-      <span class="count">${p.tracks.length}</span>
-    </button>`;
-  }).join('');
-  list.querySelectorAll('.fav-pop-item').forEach((el) =>
-    el.addEventListener('click', () => toggleTrackInPlaylist(+el.dataset.pi)));
+  publish('plpop', {
+    hint: null,
+    playlists: customPlaylists.map((p, i) => ({
+      i, id: p.id, title: p.title, count: p.tracks.length,
+      has: p.tracks.some((x) => trackKey(x) === trackKey(t)),
+    })),
+  });
 }
 
 function toggleTrackInPlaylist(index) {
@@ -1948,6 +1889,7 @@ function toggleLike(t) {
   }
   saveLikes();
   refreshLikeUI();
+  publish('likes', likes.slice());
 }
 // 收藏数变化后刷新相关 UI
 function refreshLikeUI() {
@@ -1956,70 +1898,6 @@ function refreshLikeUI() {
   if (count) count.textContent = `${likes.length} 首歌曲`;
   if (state.playlist && state.playlist.isLikes
       && document.body.dataset.view === 'playlist') openPlaylist(likesPlaylist());
-}
-
-const likeSVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 21C7 16.5 4 13.3 4 9.8 4 7.2 6 5 8.7 5c1.6 0 2.8.7 3.3 1.7C12.5 5.7 13.7 5 15.3 5 18 5 20 7.2 20 9.8c0 3.5-3 6.7-8 11.2z"/></svg>';
-
-/* ---------- 封面 HTML：有真实封面用 img，否则占位渐变 SVG ---------- */
-function covHTML(t, size = 100) {
-  if (t && t.pic) {
-    // 保留稳定的资源地址，让浏览器复用缓存；显示后换成 blob 会再次加载/解码。
-    return `<img src="${esc(t.pic)}" loading="lazy" decoding="async" alt="">`;
-  }
-  return coverSVG((t && t.seed) || 1, size);
-}
-
-/* ---------- 列表行 / 卡片渲染（沿用设计稿类名） ---------- */
-function trowHTML(t, i, on, editable = false) {
-  const tag = t.isLive ? '<span class="tag-live">直播</span>' : '';
-  const editBtns = editable
-    ? `<span class="t-grip" role="button" aria-label="拖动排序" title="按住拖动排序">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg></span>
-       <span class="t-del" data-del="${i}" role="button" aria-label="从歌单删除" title="从歌单删除">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></span>`
-    : '';
-  return `<div class="trow${on ? ' on' : ''}${editable ? ' editable' : ''}" data-qi="${i}">
-    <span class="idx num"><i>${String(i + 1).padStart(2, '0')}</i><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></span>
-    <span class="tt"><span class="tcov">${covHTML(t)}</span>
-      <span style="min-width:0"><b>${esc(t.title)}${tag}</b><small>${esc(t.up)}</small></span></span>
-    <span class="up">${esc(t.up)}</span>
-    <span class="dur num">${t.isLive ? 'LIVE' : fmt(t.duration)}</span>
-    <span class="t-acts"><span class="like${isLiked(t) ? ' liked' : ''}" data-like="${i}">${likeSVG}</span>${editBtns}</span></div>`;
-}
-
-// 通用歌单卡片
-function gcardHTML(title, meta, cover, badge = '', extra = '') {
-  return `<div class="gcard" ${extra}>
-    <div class="cover">${cover}${badge}
-      <span class="count"><span class="count-play"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></span><span class="count-label">${esc(meta)}</span></span>
-      <span class="cover-loading" aria-hidden="true"></span>
-    </div><h4>${esc(title)}</h4><p>${esc(meta)}</p></div>`;
-}
-
-// 追加推荐时只绑定新卡片。完成后真正移除占位层，而不是留下透明的无限动画。
-const boundCoverCards = new WeakSet();
-function bindCoverLoading(scope) {
-  scope.querySelectorAll('.gcard:not(.cover-ready)').forEach((card) => {
-    if (boundCoverCards.has(card)) return;
-    boundCoverCards.add(card);
-    const img = card.querySelector('.cover img');
-    const reveal = () => {
-      card.classList.add('cover-ready');
-      card.querySelector('.cover-loading')?.remove();
-    };
-    if (!img) { reveal(); return; }
-    const decodeThenReveal = () => {
-      if (!img.decode) { reveal(); return; }
-      img.decode().then(reveal).catch(reveal);
-    };
-    if (img.complete) {
-      if (img.naturalWidth) decodeThenReveal();
-      else reveal(); // 缓存的失败图片可能已经触发过 error，不能永远保留加载层。
-      return;
-    }
-    img.addEventListener('load', decodeThenReveal, { once: true });
-    img.addEventListener('error', reveal, { once: true });
-  });
 }
 
 /* ---------- 播放队列 ---------- */
@@ -2032,14 +1910,8 @@ function setQueue(tracks, name, startIdx = 0) {
 function renderQueue() {
   $('queueCount').textContent = state.queue.length;
   $('qMeta').textContent = `${state.queue.length} 首${state.queueName ? ' · ' + state.queueName : ''}`;
-  $('qlist').innerHTML = state.queue.map((t, i) =>
-    `<div class="qrow${i === state.qi ? ' on' : ''}" data-qi="${i}">
-      <span class="qcov">${covHTML(t)}</span>
-      <span class="qt"><b>${esc(t.title)}</b><small>${esc(t.up)}</small></span>
-      <span class="qd num">${t.isLive ? 'LIVE' : fmt(t.duration)}</span></div>`).join('') ||
-    '<div class="list-hint">队列为空，去歌单里挑几首吧</div>';
-  $('qlist').querySelectorAll('.qrow').forEach((el) =>
-    el.addEventListener('click', () => playIndex(+el.dataset.qi)));
+  // React 组件（views/QueueList.jsx）拥有 #qlist 的 DOM 与点击事件，这里只发布数据
+  publish('queue', { qi: state.qi, tracks: state.queue.slice() });
   savePlaybackSession();
 }
 
@@ -2203,7 +2075,7 @@ async function playLive(t, { autoplay = true } = {}) {
     }
     applyArtColors(t.pic);
     setLyricHint('电台直播进行中 · ' + (t.area || '音乐电台'));
-    $('hotCommentText').textContent = `${fmtNum(t.online || 0)} 人在听`;
+    patchSlice('hotComment', { text: `${fmtNum(t.online || 0)} 人在听` });
     if (liveDmOn) startLiveDanmaku(t.roomid);
   } catch (e) {
     if (state.current !== t) return;
@@ -2330,17 +2202,8 @@ function syncToggleIcon() {
   }
 }
 
-/* 播放页基础信息（track 字段） */
-const DEFAULT_NP_COVER = $('npCover').innerHTML;
-const DEFAULT_PL_COVER = $('plCover').innerHTML;
+/* 播放页基础信息（track 字段）：np/vdetail/hotComment 走 store，组件渲染 */
 const DEFAULT_MC_ART = $('mcArtHolder').innerHTML;
-// 歌单详情封面右上角的内联编辑角标（常驻元素，openPlaylist 每次渲染后重新挂载）
-const plCoverEditBtn = document.createElement('span');
-plCoverEditBtn.className = 'pl-cover-edit';
-plCoverEditBtn.id = 'plCoverEdit';
-plCoverEditBtn.hidden = true;
-plCoverEditBtn.title = '更换封面';
-plCoverEditBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
 function syncPlayingHeaderLayout() {
   const left = document.querySelector('.np-left');
   const heading = $('npHeading');
@@ -2359,26 +2222,22 @@ window.addEventListener('resize', syncPlayingHeaderLayout, { passive: true });
 document.fonts?.ready.then(syncPlayingHeaderLayout).catch(() => {});
 
 function fillPlayingBase(t) {
-  $('npArtist').textContent = t.up || '—';
-  const title = t.title || '—';
-  const titleLength = Array.from(title).length;
-  $('npTitle').textContent = title;
-  $('npTitle').classList.toggle('title-long', titleLength > 28);
-  $('npTitle').classList.toggle('title-xlong', titleLength > 52);
-  $('npSrc').textContent = t.isLive
-    ? '直播 · ' + (t.area || '音乐电台')
-    : '来源 · ' + (t.bvid || '本地预览');
-  $('npSrc').title = $('npSrc').textContent;
+  publish('np', {
+    title: t.title || '—',
+    artist: t.up || '—',
+    src: t.isLive
+      ? '直播 · ' + (t.area || '音乐电台')
+      : '来源 · ' + (t.bvid || '本地预览'),
+    album: t.isLive ? 'LIVE' : (t.up || 'Bilibili 音乐'),
+    cover: t.pic ? { pic: t.pic } : null,
+  });
   if (t.pic) {
-    $('npCover').innerHTML = `<img src="${esc(t.pic)}" alt="">`;
     $('mcArtHolder').innerHTML = `<img class="art" src="${esc(t.pic)}" alt="">
       <svg class="ring" viewBox="0 0 48 48"><circle class="tr" cx="24" cy="24" r="21"/><circle class="pg" id="ringPg" cx="24" cy="24" r="21"/></svg>`;
   } else {
-    $('npCover').innerHTML = DEFAULT_NP_COVER;
     $('mcArtHolder').innerHTML = DEFAULT_MC_ART;
   }
   $('artBackdrop').style.backgroundImage = t.pic ? `url(${JSON.stringify(t.pic)})` : '';
-  $('npAlbum').textContent = t.isLive ? 'LIVE' : (t.up || 'Bilibili 音乐');
   requestAnimationFrame(syncPlayingHeaderLayout);
   $('ppTitle').textContent = t.title || '未在播放';
   // 移动端迷你播放条封面（桌面端隐藏）
@@ -2387,54 +2246,54 @@ function fillPlayingBase(t) {
     if (t.pic) { ppCover.src = t.pic; ppCover.hidden = false; }
     else { ppCover.removeAttribute('src'); ppCover.hidden = true; }
   }
-  $('vTitle').textContent = t.title || '—';
-  $('vUpName').textContent = t.up || '—';
-  $('vUpFans').textContent = '';
+  patchSlice('vdetail', { title: t.title || '—', upName: t.up || '—', upFans: '' });
   clearHotCommentRotation();
-  $('hotCommentAvatar').innerHTML = '<span class="cdot"></span>';
+  patchSlice('hotComment', { avatar: null, seed: null, uname: null });
   setHotCommentText('热评加载中…');
 }
 
-/* 播放页详情信息（view 接口数据） */
+/* 播放页详情信息（view 接口数据）：np/vdetail/follows/npActions 走 store，组件渲染 */
 function fillPlayingDetail(d) {
-  $('npSrc').textContent = `来源 · ${d.tname || (state.current && state.current.bvid) || 'Bilibili'}`;
-  $('npSrc').title = $('npSrc').textContent;
+  patchSlice('np', { src: `来源 · ${d.tname || (state.current && state.current.bvid) || 'Bilibili'}` });
   if (d.pic && state.current && !state.current.pic) {
     state.current.pic = d.pic.replace(/^http:/, 'https:');
-    $('npCover').innerHTML = `<img src="${esc(state.current.pic)}" alt="">`;
+    patchSlice('np', { cover: { pic: state.current.pic } });
     $('artBackdrop').style.backgroundImage = `url(${JSON.stringify(state.current.pic)})`;
     const ppCover = $('ppCover');
     if (ppCover && ppCover.hidden) { ppCover.src = state.current.pic; ppCover.hidden = false; }
   }
   if (d.owner) {
-    $('vUpName').textContent = d.owner.name || '—';
-    if (d.owner.face) $('vUpAva').innerHTML = `<img src="${esc(d.owner.face)}" alt="">`;
-    // 关注按钮挂上 mid 并回填关注状态
     const mid = d.owner.mid || 0;
-    const fol = $('vUpFol');
-    fol.dataset.fol = mid || '';
-    setFollowBtn(fol, false);
+    patchSlice('vdetail', {
+      upName: d.owner.name || '—',
+      ...(d.owner.face ? { upFace: d.owner.face } : {}),
+      mid,
+    });
+    // 回填关注状态（仅置 true，与旧版一致）
     if (mid) {
       api.upRelation(mid).then((attr) => {
-        if (fol.dataset.fol === String(mid) && (attr === 2 || attr === 6)) setFollowBtn(fol, true);
+        const vd = peek('vdetail') || {};
+        if (vd.mid === mid && (attr === 2 || attr === 6)) {
+          publish('follows', { ...(peek('follows') || {}), [mid]: true });
+        }
       }).catch(() => {});
     }
   }
   if (d.stat) {
-    $('vsPlay').textContent = fmtNum(d.stat.view);
-    $('vsDm').textContent = fmtNum(d.stat.danmaku);
-    $('vsLike').textContent = fmtNum(d.stat.like);
-    $('vsCoin').textContent = fmtNum(d.stat.coin);
-    $('vsFav').textContent = fmtNum(d.stat.favorite);
+    patchSlice('vdetail', {
+      vsPlay: fmtNum(d.stat.view),
+      vsDm: fmtNum(d.stat.danmaku),
+      vsLike: fmtNum(d.stat.like),
+      vsCoin: fmtNum(d.stat.coin),
+      vsFav: fmtNum(d.stat.favorite),
+    });
   }
   // 点赞 / 投币 / 收藏的状态回填（未登录接口失败则保持默认）
   if (d.bvid) {
-    ['vsLikeBtn', 'vsCoinBtn'].forEach((id) => $(id).classList.remove('on'));
+    patchSlice('npActions', { vsLikeOn: false, vsCoinOn: false });
     api.arcRelation(d.bvid).then((rel) => {
       if (!rel || !state.current || state.current.bvid !== d.bvid) return;
-      $('vsLikeBtn').classList.toggle('on', !!rel.like);
-      $('vsCoinBtn').classList.toggle('on', !!rel.coin);
-      $('vsFavBtn').classList.toggle('on', !!rel.favorite);
+      patchSlice('npActions', { vsLikeOn: !!rel.like, vsCoinOn: !!rel.coin, vsFavOn: !!rel.favorite });
     });
   }
 }
@@ -2455,13 +2314,14 @@ function clearHotCommentRotation() {
 }
 
 function setHotCommentText(message) {
-  const text = $('hotCommentText');
-  text.classList.remove('scrolling');
-  text.style.removeProperty('--marquee-distance');
-  text.style.removeProperty('--marquee-duration');
-  text.textContent = message || '暂无热评';
+  patchSlice('hotComment', { text: message || '暂无热评' });
   requestAnimationFrame(() => {
+    const text = $('hotCommentText');
     const viewport = $('hotCommentViewport');
+    if (!text || !viewport) return;
+    text.classList.remove('scrolling');
+    text.style.removeProperty('--marquee-distance');
+    text.style.removeProperty('--marquee-duration');
     const overflow = Math.ceil(text.scrollWidth - viewport.clientWidth);
     if (overflow > 6) {
       text.style.setProperty('--marquee-distance', `${-overflow}px`);
@@ -2473,15 +2333,17 @@ function setHotCommentText(message) {
 
 function renderHotComment(index = 0) {
   if (!hotComments.length) {
-    $('hotCommentAvatar').innerHTML = '<span class="cdot"></span>';
+    patchSlice('hotComment', { avatar: null, seed: null, uname: null });
     setHotCommentText('暂无热评');
     return;
   }
   hotCommentIndex = ((index % hotComments.length) + hotComments.length) % hotComments.length;
   const item = hotComments[hotCommentIndex];
-  $('hotCommentAvatar').innerHTML = item.avatar
-    ? `<img src="${esc(item.avatar)}" alt="${esc(item.uname || '评论用户')}">`
-    : coverSVG(item.seed || 94 + hotCommentIndex * 3);
+  patchSlice('hotComment', {
+    avatar: item.avatar || null,
+    seed: item.avatar ? null : (item.seed || 94 + hotCommentIndex * 3),
+    uname: item.uname || '评论用户',
+  });
   setHotCommentText(item.message);
   const pill = document.querySelector('.hot-comment');
   pill.classList.remove('hot-swap');
@@ -2511,10 +2373,7 @@ async function loadComments(t, { schedule = true, silent = false } = {}) {
     hotCommentIndex = 0;
     renderHotComment(0);
     if (schedule) scheduleHotCommentRotation(t);
-    $('cmt-list').innerHTML = replies.map((r) =>
-      `<div class="cmt"><span class="ava">${r.avatar ? `<img src="${esc(r.avatar)}" alt="">` : coverSVG(r.seed || 94)}</span>
-       <span class="cb"><b>${esc(r.uname)}</b><p>${esc(r.message)}</p>
-       <small><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 10v11H4a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1h3zm3.2 11V8.6l3.3-5.2c.7 1.9.4 3.7-.5 5.6h5.5a2 2 0 0 1 2 2.4l-1.6 8a2 2 0 0 1-2 1.6H10.2z"/></svg>${esc(String(r.like))}</small></span></div>`).join('');
+    publish('comments', { list: hotComments });
   } catch (e) {
     if (!silent) setHotCommentText('热评加载失败');
   }
@@ -3048,9 +2907,10 @@ function pushDeskLyric(line) {
 
 /* ---------- 手动匹配歌词：搜索 QQ/网易云候选 → 选曲换词；偏移见 lyricOffsets ---------- */
 let lyricMatchTrack = null; // 面板操作的曲目（通常即当前播放）
+let lyricCandList = []; // 最近一次搜索的完整候选（组件只拿到展示字段，按索引回调）
 
 function closeLyricMatch() {
-  $('lyricMask').hidden = true;
+  patchSlice('lyricMatch', { open: false });
   lyricMatchTrack = null;
 }
 
@@ -3058,11 +2918,14 @@ function openLyricMatch() {
   const t = state.current;
   if (!t || t.isLive || !t.bvid) { toast('当前曲目不支持匹配歌词'); return; }
   lyricMatchTrack = t;
-  $('lyricMask').hidden = false;
+  publish('lyricMatch', {
+    open: true,
+    offVal: fmtLyricOffset(lyricOffsetOf(t)),
+    cands: null,
+    candsHint: null,
+  });
+  // 非受控输入框：打开时预填「歌名 歌手」
   $('lyricMatchInput').value = `${t.title || ''} ${t.up || ''}`.trim();
-  $('lyricOffVal').textContent = fmtLyricOffset(lyricOffsetOf(t));
-  $('lyricMatchHint').textContent = '搜索 QQ 音乐 / 网易云，点选正确的歌曲替换当前歌词。';
-  $('lyricCands').innerHTML = '';
   runLyricMatchSearch();
 }
 
@@ -3070,27 +2933,28 @@ async function runLyricMatchSearch() {
   const t = lyricMatchTrack;
   const kw = $('lyricMatchInput').value.trim();
   if (!t) return;
-  if (!kw) { $('lyricCands').innerHTML = '<div class="list-hint">输入关键词后搜索</div>'; return; }
-  $('lyricCands').innerHTML = '<div class="list-hint">搜索中…</div>';
+  if (!kw) { patchSlice('lyricMatch', { cands: null, candsHint: '输入关键词后搜索' }); return; }
+  patchSlice('lyricMatch', { cands: null, candsHint: '搜索中…' });
   let list;
   try {
     list = await api.searchSongCandidates(kw);
   } catch (e) {
     list = [];
   }
-  if (lyricMatchTrack !== t || $('lyricMask').hidden) return;
+  if (lyricMatchTrack !== t || !peek('lyricMatch')?.open) return;
   if (!list.length) {
-    $('lyricCands').innerHTML = '<div class="list-hint">没有找到候选歌曲，换个关键词试试</div>';
+    patchSlice('lyricMatch', { cands: null, candsHint: '没有找到候选歌曲，换个关键词试试' });
     return;
   }
-  $('lyricCands').innerHTML = list.map((c, i) =>
-    `<div class="lyric-cand" data-ci="${i}">
-      <span class="lc-src ${c.source}">${c.source === 'qq' ? 'QQ 音乐' : '网易云'}</span>
-      <span class="lc-meta"><b>${esc(c.title)}</b><small>${esc(c.artist || '未知歌手')}</small></span>
-      <span class="lc-dur num">${c.duration > 0 ? fmt(c.duration) : ''}</span>
-    </div>`).join('');
-  $('lyricCands').querySelectorAll('.lyric-cand').forEach((el) =>
-    el.addEventListener('click', () => pickLyricCandidate(list[+el.dataset.ci])));
+  lyricCandList = list;
+  patchSlice('lyricMatch', {
+    candsHint: null,
+    cands: list.map((c) => ({
+      source: c.source, title: c.title, artist: c.artist,
+      id: c.id, songmid: c.songmid,
+      dur: c.duration > 0 ? fmt(c.duration) : '',
+    })),
+  });
 }
 
 async function pickLyricCandidate(c) {
@@ -3101,6 +2965,48 @@ async function pickLyricCandidate(c) {
   toast(`歌词已匹配：${c.title}${c.artist ? ' - ' + c.artist : ''}`);
   closeLyricMatch();
   if (state.current === t) loadLyrics(t);
+}
+
+function pickLyricCandidateByIndex(i) { pickLyricCandidate(lyricCandList[i]); }
+
+function lyricOffAdjust(delta) { setLyricOffset(lyricMatchTrack, lyricOffsetOf(lyricMatchTrack) + delta); }
+function lyricOffReset() { setLyricOffset(lyricMatchTrack, 0); }
+
+// 清掉手动匹配，恢复自动链路（搜词 / AI 字幕）
+function lyricAutoRestore() {
+  const t = lyricMatchTrack;
+  if (t) {
+    delete t.lyricRef;
+    if (state.current === t) loadLyrics(t);
+    toast('已恢复自动歌词');
+  }
+  closeLyricMatch();
+}
+
+/* ---------- 原视频下载：清晰度菜单状态在 'dlmenu' slice，组件回调 dlPick ---------- */
+let dlBusy = false;
+function closeDlMenu() { patchSlice('dlmenu', { open: false }); $('btnDownload').setAttribute('aria-expanded', 'false'); }
+
+// 选中某个清晰度开始下载：主进程保存对话框 + 流式下载
+async function dlPick(vq) {
+  if (dlBusy) return;
+  closeDlMenu();
+  const t = state.current;
+  if (!t || !t.bvid) return;
+  dlBusy = true;
+  toast('正在准备下载…');
+  try {
+    const info = await api.videoDownloadInfo(t.bvid, t.cid, vq);
+    const safeTitle = String(t.title || t.bvid).replace(/[\\/:*?"<>|]/g, '_').slice(0, 60);
+    const filename = `${safeTitle} - ${videoQualityLabel(info.quality)}.${info.format}`;
+    const r = await window.bili.downloadStart({ url: info.url, filename });
+    if (r && r.ok) toast('下载完成');
+    else if (r && !r.canceled) toast('下载失败：' + (r.message || '未知错误'));
+  } catch (error) {
+    toast('下载失败：' + (error.message || error));
+  } finally {
+    dlBusy = false;
+  }
 }
 
 /* 封面取色：dataURL → canvas 平均色，提亮/压暗生成三色驱动背景 */
@@ -3338,21 +3244,21 @@ function bindVideoControls() {
     const t = state.current;
     if (!t || !videoModeOn()) return;
     if (!qualityMenu.hidden) { closeQualityMenu(); return; }
-    qualityMenu.innerHTML = '<div class="vqual-hint">正在获取可选清晰度…</div>';
+    publish('vqual', { options: [], current: 0, hint: '正在获取可选清晰度…' });
     qualityMenu.hidden = false;
     try {
       const options = await getVideoQualityOptions(t);
       if (state.current !== t) { closeQualityMenu(); return; }
       if (!options.length) {
-        qualityMenu.innerHTML = '<div class="vqual-hint">暂无可选清晰度</div>';
+        publish('vqual', { options: [], current: 0, hint: '暂无可选清晰度' });
         return;
       }
       const current = Number(video.dataset.actualQuality) || settings.vq;
-      qualityMenu.innerHTML = options.map((item) => {
-        const { main, sub } = splitQualityLabel(item.label);
-        return `<button type="button" class="vqual-item${item.quality === current ? ' on' : ''}" data-vq="${item.quality}">`
-          + `<b>${esc(main)}</b>` + (sub ? `<small>${esc(sub)}</small>` : '') + '</button>';
-      }).join('');
+      publish('vqual', {
+        options: options.map((item) => ({ quality: item.quality, ...splitQualityLabel(item.label) })),
+        current,
+        hint: null,
+      });
     } catch (error) {
       closeQualityMenu();
       toast('获取清晰度失败：' + (error.message || error));
@@ -3669,133 +3575,58 @@ function rankingPlaylist() {
 function openPlaylist(pl) {
   state.playlist = pl;
   resetPlEditingUI();
-  $('plLabel').textContent = pl.label || '歌单';
-  $('plTitle').textContent = pl.title;
-  $('plDesc').textContent = pl.desc || '';
-  $('plMeta').textContent = pl.meta || '';
-  // 无封面时重置为默认占位，避免残留上一张歌单（如音乐区热榜）的封面
-  $('plCover').innerHTML = pl.cover ? covHTML(pl.cover, 400) : DEFAULT_PL_COVER;
-  // 封面编辑角标常驻（innerHTML 会清掉它，每次重新挂回）
-  $('plCover').appendChild(plCoverEditBtn);
-  // 自建歌单 / B 站收藏夹：详情页提供内联编辑入口
-  const actions = document.querySelector('.pl-actions');
-  actions.querySelectorAll('[data-custom-act]').forEach((el) => el.remove());
-  if (pl.customId || pl.favId) {
-    actions.insertAdjacentHTML('beforeend',
-      '<button class="btn-ghost" data-custom-act="edit">编辑</button>');
-    actions.querySelector('[data-custom-act="edit"]')
-      .addEventListener('click', togglePlEditing);
-  }
   // 自建歌单（含 MixSplitR 分切歌单）：行内排序 / 删除。
   // 分切曲目的 from/to/isSegment 都在 track 对象上，移动/删除只是数组操作，互不影响。
   const plEntry = pl.customId ? customPlaylists.find((p) => p.id === pl.customId) : null;
-  $('list-playlist').innerHTML = pl.tracks.length
-    ? pl.tracks.map((t, i) => trowHTML(t, i, state.current === t, !!plEntry)).join('')
-    : `<div class="list-hint">${esc(pl.emptyHint || '这里还空空如也，去点几个心形吧')}</div>`;
-  bindTrackList($('list-playlist'), pl.tracks);
-  if (plEntry) bindPlTrackEdit($('list-playlist'), plEntry);
+  // React 组件（views/PlaylistView.jsx + TrackList.jsx）拥有 .view-playlist 的 DOM 与事件，
+  // 这里只发布数据；editing:false 等价旧版 resetPlEditingUI 的 class/display/hidden 复位
+  publish('playlist', {
+    label: pl.label || '歌单',
+    title: pl.title,
+    desc: pl.desc || '',
+    meta: pl.meta || '',
+    cover: pl.cover || null,
+    customId: pl.customId ?? null,
+    favId: pl.favId ?? null,
+    isLikes: !!pl.isLikes,
+    tracks: pl.tracks,
+    current: state.current,
+    emptyHint: pl.emptyHint || null,
+    listHint: pl.tracks.length ? null : (pl.emptyHint || '这里还空空如也，去点几个心形吧'),
+    editable: !!plEntry,
+    editing: false,
+  });
   go('playlist');
 }
-// 绑定列表点击：行 → 播放；心形 → 收藏
-function bindTrackList(container, tracks) {
-  container.querySelectorAll('.trow').forEach((el) => {
-    el.addEventListener('click', () => setQueue(tracks, state.playlist ? state.playlist.title : '', +el.dataset.qi));
-  });
-  container.querySelectorAll('.like').forEach((el) => {
-    el.addEventListener('click', (e) => {
-      e.stopPropagation();
-      toggleLike(tracks[+el.dataset.like]);
-      el.classList.toggle('liked', isLiked(tracks[+el.dataset.like]));
-    });
-  });
+
+// 重发布 playlist slice 的部分字段（保持其余字段不变）
+function patchPlaylist(patch) {
+  const cur = peek('playlist');
+  if (cur) publish('playlist', { ...cur, ...patch });
 }
 
-// 自建歌单（含分切歌单）行内编辑：手柄拖拽排序 + 删除；改动直接落在 customPlaylists 并持久化
-function bindPlTrackEdit(container, plEntry) {
-  container.querySelectorAll('.t-del').forEach((el) => {
-    el.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const i = +el.dataset.del;
-      const t = plEntry.tracks[i];
-      if (!t) return;
-      // 删除动画：淡出 + 高度收拢，动画结束后再真正移除并重绘
-      const row = el.closest('.trow');
-      if (row && !row.classList.contains('t-removing')) {
-        row.classList.add('t-removing');
-        row.style.height = row.offsetHeight + 'px';
-        requestAnimationFrame(() => row.classList.add('t-gone'));
-        setTimeout(() => {
-          plEntry.tracks.splice(i, 1);
-          saveCustomPlaylists();
-          toast(`已从「${plEntry.title}」删除《${t.title}》`);
-          refreshCustomPlaylist(plEntry);
-        }, 280);
-        return;
-      }
-      plEntry.tracks.splice(i, 1);
-      saveCustomPlaylists();
-      refreshCustomPlaylist(plEntry);
-    });
-  });
-  // 只有按住手柄才允许拖起整行，避免点行播放时误触发拖拽
-  const rows = () => [...container.querySelectorAll('.trow')];
-  rows().forEach((row) => {
-    const grip = row.querySelector('.t-grip');
-    if (!grip) return;
-    grip.addEventListener('pointerdown', () => { row.draggable = true; });
-    grip.addEventListener('click', (e) => e.stopPropagation());
-    row.addEventListener('dragstart', (e) => {
-      if (!row.draggable) { e.preventDefault(); return; }
-      e.dataTransfer.effectAllowed = 'move';
-      e.dataTransfer.setData('text/plain', row.dataset.qi);
-      row.classList.add('dragging');
-    });
-    row.addEventListener('dragend', () => {
-      row.draggable = false;
-      row.classList.remove('dragging');
-      // 拖动中 DOM 已实时重排，松手时按 DOM 顺序（data-qi 为原下标）写回数据
-      const order = rows().map((x) => +x.dataset.qi);
-      if (order.some((v, i) => v !== i)) {
-        const old = plEntry.tracks;
-        plEntry.tracks = order.map((i) => old[i]);
-        saveCustomPlaylists();
-      }
-      refreshCustomPlaylist(plEntry);
-    });
-  });
-  // 实时重排：找到第一个中点在指针下方的行，把被拖行插到它前面；否则排到末尾。
-  // 直接移动 DOM 节点（不用 transform 位移做命中），天然没有振荡，也支持拖到最底部；
-  // 移动时对其余行做 FLIP 动画：先按旧视觉位置反向位移一帧，再平滑滑向新槽位。
-  // 一段滑动未落定（.fly）时跳过本次移动，等下一拍 dragover——避免在途位移污染命中测试
-  container.addEventListener('dragover', (e) => {
-    const dragging = container.querySelector('.dragging');
-    if (!dragging) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-    if (container.querySelector('.fly')) return;
-    const ref = rows().find((x) => {
-      if (x === dragging) return false;
-      const rect = x.getBoundingClientRect();
-      return e.clientY < rect.top + rect.height / 2;
-    });
-    if (ref ? dragging.nextElementSibling === ref : container.lastElementChild === dragging) return;
-    const before = new Map(rows().map((x) => [x, x.getBoundingClientRect().top]));
-    if (ref) container.insertBefore(dragging, ref);
-    else container.appendChild(dragging);
-    const movers = rows().filter((x) => x !== dragging)
-      .map((x) => [x, before.get(x) - x.getBoundingClientRect().top])
-      .filter(([, d]) => d);
-    movers.forEach(([x, d]) => {
-      x.classList.add('fly');
-      x.style.transition = 'none';
-      x.style.transform = `translateY(${d}px)`;
-    });
-    requestAnimationFrame(() => movers.forEach(([x]) => {
-      x.style.transition = 'transform .22s var(--ease)';
-      x.style.transform = '';
-      setTimeout(() => { x.classList.remove('fly'); x.style.transition = ''; }, 230);
-    }));
-  });
+// 自建歌单删除曲目：删除动画由 TrackList 组件播放，280ms 后调到这里真正移除
+function plDeleteTrack(i) {
+  const plEntry = currentCustomPlaylist();
+  if (!plEntry) return;
+  const t = plEntry.tracks[i];
+  if (!t) return;
+  plEntry.tracks.splice(i, 1);
+  saveCustomPlaylists();
+  toast(`已从「${plEntry.title}」删除《${t.title}》`);
+  refreshCustomPlaylist(plEntry);
+}
+
+// 自建歌单拖拽排序落盘：order 为拖动结束时的 DOM 顺序（data-qi 原下标序列）
+function plReorder(order) {
+  const plEntry = currentCustomPlaylist();
+  if (!plEntry) return;
+  if (order.some((v, i) => v !== i)) {
+    const old = plEntry.tracks;
+    plEntry.tracks = order.map((i) => old[i]);
+    saveCustomPlaylists();
+  }
+  refreshCustomPlaylist(plEntry);
 }
 
 /* ---------- 本地自定义歌单：新建 / 删除 / 详情页内联编辑 ---------- */
@@ -3808,40 +3639,22 @@ const saveCustomPlaylists = () => {
 
 let plDialogMode = 'create'; // 'create' | 'delete'
 let plDialogTarget = -1;
-let plDialogCover; // create 模式：undefined=未选封面，string=封面 dataURL
 let coverPickTarget = 'dialog'; // 文件选择去向：'dialog' 新建弹窗 / 'inline' 详情页内联
 
 function openPlDialog(mode, index = -1) {
   plDialogMode = mode;
   plDialogTarget = index;
-  plDialogCover = undefined;
-  const input = $('plDialogInput');
-  const msg = $('plDialogMsg');
-  const ok = $('plDialogOk');
   const pl = customPlaylists[index];
-  const isCreate = mode === 'create';
-
-  $('plDialogTitle').textContent = isCreate ? '新建歌单' : '删除歌单';
-  input.style.display = isCreate ? '' : 'none';
-  input.value = '';
-  msg.style.display = isCreate ? 'none' : '';
-  msg.textContent = isCreate ? '' : `确定删除歌单「${(pl || {}).title || ''}」吗？此操作不可恢复。`;
-  $('plDialogCoverCard').hidden = !isCreate;
-  renderPlDialogPreview();
-  ok.textContent = isCreate ? '创建' : '删除';
-  ok.classList.toggle('danger', !isCreate);
-  $('plDialogMask').hidden = false;
-  if (isCreate) setTimeout(() => input.focus(), 60);
+  // 对话框 UI 由 PlDialogView 组件渲染；打开时清空输入与封面
+  publish('plDialog', {
+    open: true,
+    mode,
+    targetTitle: (pl || {}).title || '',
+    inputValue: '',
+    cover: null,
+  });
 }
-function closePlDialog() { $('plDialogMask').hidden = true; }
-
-// 新建弹窗的封面卡片预览：封面图 + 实时联动的歌单名
-function renderPlDialogPreview() {
-  $('plDialogCoverImg').innerHTML = plDialogCover
-    ? `<img src="${esc(plDialogCover)}" alt="">`
-    : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="1.6"/><path d="M21 15l-4.5-4.5L6 21"/></svg>';
-  $('plDialogCoverName').textContent = $('plDialogInput').value.trim() || '歌单';
-}
+function closePlDialog() { patchSlice('plDialog', { open: false }); }
 
 // 图片文件 → 压缩到 320px JPEG dataURL，避免撑爆 localStorage
 function compressCoverFile(file, cb) {
@@ -3873,12 +3686,13 @@ function refreshCustomPlaylist(pl) {
 }
 
 function submitPlDialog() {
+  const dlg = peek('plDialog') || {};
   const pl = customPlaylists[plDialogTarget];
   if (plDialogMode === 'create') {
-    const title = $('plDialogInput').value.trim();
+    const title = (dlg.inputValue || '').trim();
     if (!title) { $('plDialogInput').focus(); return; }
     const next = { id: Date.now(), title, tracks: [] };
-    if (plDialogCover) next.cover = plDialogCover;
+    if (dlg.cover) next.cover = dlg.cover;
     customPlaylists.push(next);
     saveCustomPlaylists();
     closePlDialog();
@@ -3911,31 +3725,16 @@ function currentFavFolder() {
 
 function resetPlEditingUI() {
   plEditing = false;
-  document.querySelector('.pl-head').classList.remove('editing');
-  const tl = document.querySelector('.view-playlist .tlist');
-  if (tl) tl.classList.remove('editing');
-  plCoverEditBtn.hidden = true;
-  $('plTitle').style.display = '';
-  $('plDesc').style.display = '';
-  $('plTitleEdit').hidden = true;
-  $('plDescEdit').hidden = true;
+  // class/display/hidden 复位由 openPlaylist 发布的 editing:false 驱动组件完成
 }
 
 function setPlEditing(on, focus = true) {
   plEditing = on;
-  document.querySelector('.pl-head').classList.toggle('editing', on);
-  // 行内排序 / 删除控件仅本地歌单（含分切歌单）在编辑模式下出现
-  const tl = document.querySelector('.view-playlist .tlist');
-  if (tl) tl.classList.toggle('editing', on && !!(state.playlist && state.playlist.customId));
-  const btn = document.querySelector('[data-custom-act="edit"]');
-  if (btn) btn.textContent = on ? '完成' : '编辑';
-  // 封面角标仅本地歌单可用（B 站收藏夹封面不支持本地修改）
-  plCoverEditBtn.hidden = !on || !state.playlist.customId;
-  $('plTitle').style.display = on ? 'none' : '';
-  $('plDesc').style.display = on ? 'none' : '';
-  $('plTitleEdit').hidden = !on;
-  $('plDescEdit').hidden = !on;
-  if (on) {
+  // 编辑态开关发布给组件（.pl-head/.tlist 的 editing class、输入框 hidden、角标显隐）
+  patchPlaylist({ editing: on });
+  if (!on) return;
+  // 输入框显隐由组件按 editing 渲染；等 React 应用 hidden 后再回填值与聚焦
+  requestAnimationFrame(() => {
     const cp = currentCustomPlaylist();
     if (cp) {
       $('plTitleEdit').value = cp.title || '';
@@ -3956,7 +3755,7 @@ function setPlEditing(on, focus = true) {
       }
     }
     if (focus) $('plTitleEdit').focus();
-  }
+  });
 }
 
 function commitPlEditing() {
@@ -3991,12 +3790,10 @@ async function commitFavEditing() {
   if (state.playlist) {
     state.playlist.title = title;
     state.playlist.desc = intro || '来自 B 站收藏夹，与网页端实时同步。';
-    $('plTitle').textContent = title;
-    $('plDesc').textContent = state.playlist.desc;
+    patchPlaylist({ title, desc: state.playlist.desc });
   }
-  const grid = $('grid-fav');
-  grid.dataset.signature = '';
-  renderFavFolders(grid, favCache.mid, favCache.folders);
+  favPublished = null; // 清签名强制重发，等价于旧版清 grid.dataset.signature
+  renderFavFolders(favCache.mid, favCache.folders);
   toast('已同步到 B 站');
 }
 
@@ -4010,12 +3807,13 @@ async function togglePlEditing() {
   commitPlEditing();
 }
 
+// 详情页内联换封面入口（组件里 plCoverEdit 角标的点击桥）
+function pickInlineCover() {
+  coverPickTarget = 'inline';
+  $('plCoverFile').click();
+}
+
 function initPlaylistInlineEdit() {
-  plCoverEditBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    coverPickTarget = 'inline';
-    $('plCoverFile').click();
-  });
   const keyGuard = (e) => {
     // 中文输入法组词期间的回车只是选词，不触发提交
     if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); togglePlEditing(); }
@@ -4026,43 +3824,29 @@ function initPlaylistInlineEdit() {
   $('plDescEdit').addEventListener('keydown', keyGuard);
 }
 
-function initPlaylistDialog() {
-  $('plDialogOk').addEventListener('click', submitPlDialog);
-  $('plDialogCancel').addEventListener('click', closePlDialog);
-  $('plDialogMask').addEventListener('click', (e) => { if (e.target === e.currentTarget) closePlDialog(); });
-  $('plDialogInput').addEventListener('keydown', (e) => {
-    // 中文输入法组词期间的回车只是选词，不能当成确认创建
-    if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) submitPlDialog();
-    else if (e.key === 'Escape') closePlDialog();
-    e.stopPropagation();
+// 新建弹窗封面卡片点击 → 文件选择去向标记为 dialog（组件回调）
+function plDialogPickCover() {
+  coverPickTarget = 'dialog';
+  $('plCoverFile').click();
+}
+
+// 封面文件已选（弹窗 / 详情页内联共用，组件回调）
+function plCoverFilePicked(file) {
+  compressCoverFile(file, (dataUrl) => {
+    if (coverPickTarget === 'inline') {
+      const pl = currentCustomPlaylist();
+      if (!pl) return;
+      pl.cover = dataUrl;
+      saveCustomPlaylists();
+      // 原地更新封面，保留编辑态；网格卡片同步刷新
+      if (state.playlist) state.playlist.cover = { pic: dataUrl };
+      patchPlaylist({ cover: { pic: dataUrl } });
+      renderMyPlaylists();
+      toast('封面已更新');
+    } else {
+      patchSlice('plDialog', { cover: dataUrl });
+    }
   });
-  $('plDialogInput').addEventListener('input', renderPlDialogPreview);
-  $('plDialogCoverCard').addEventListener('click', () => {
-    coverPickTarget = 'dialog';
-    $('plCoverFile').click();
-  });
-  $('plCoverFile').addEventListener('change', (e) => {
-    const file = e.target.files[0];
-    e.target.value = '';
-    compressCoverFile(file, (dataUrl) => {
-      if (coverPickTarget === 'inline') {
-        const pl = currentCustomPlaylist();
-        if (!pl) return;
-        pl.cover = dataUrl;
-        saveCustomPlaylists();
-        // 原地更新封面，保留编辑态；网格卡片同步刷新
-        $('plCover').innerHTML = `<img src="${esc(dataUrl)}" alt="">`;
-        $('plCover').appendChild(plCoverEditBtn);
-        if (state.playlist) state.playlist.cover = { pic: dataUrl };
-        renderMyPlaylists();
-        toast('封面已更新');
-      } else {
-        plDialogCover = dataUrl;
-        renderPlDialogPreview();
-      }
-    });
-  });
-  initPlaylistInlineEdit();
 }
 
 function customPlaylistDetail(p) {
@@ -4080,36 +3864,15 @@ function customPlaylistDetail(p) {
 }
 
 function renderMyPlaylists() {
-  const grid = $('grid-my');
-  grid.innerHTML =
-    gcardHTML('我喜欢', `${likes.length} 首歌曲`,
-      `<svg viewBox="0 0 400 400"><defs><linearGradient id="lk3" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffa9c0"/><stop offset="1" stop-color="#fb7299"/></linearGradient></defs><rect width="400" height="400" fill="url(#lk3)"/><path d="M200 300 C 120 240 90 195 90 155 C 90 118 118 95 152 95 C 176 95 193 108 200 126 C 207 108 224 95 248 95 C 282 95 310 118 310 155 C 310 195 280 240 200 300Z" fill="#fff"/></svg>`,
-      '', 'id="gcardLike"') +
-    gcardHTML('音乐区热榜', 'B 站音乐区', coverSVG(5), '', 'id="gcardRank"') +
-    customPlaylists.map((p, i) => gcardHTML(
-      p.title, `${p.tracks.length} 首歌曲`,
-      p.cover ? `<img src="${esc(p.cover)}" alt="">`
-        : (p.tracks[0] ? covHTML(p.tracks[0], 400) : coverSVG(20 + (Number(p.id) % 12))),
-      `<span class="pl-del" data-cpd="${i}" role="button" aria-label="删除歌单" title="删除歌单"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></span>`,
-      `data-cpi="${i}"`)).join('') +
-    `<div class="gcard gcard-new" id="gcardNewPl">
-      <div class="cover"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></div>
-      <h4>新建歌单</h4><p>创建本地歌单</p></div>`;
-  bindCoverLoading(grid);
+  // React 组件（views/LibraryGrids.jsx GridMy）拥有 grid-my 的 DOM 与事件，这里只发布数据
+  publish('lib.my', {
+    likesCount: likes.length,
+    playlists: customPlaylists.map((p, i) => ({
+      i, id: p.id, title: p.title, count: p.tracks.length,
+      cover: p.cover || null, first: p.tracks[0] || null, raw: p,
+    })),
+  });
   $('gridMyCount').textContent = `${2 + customPlaylists.length} 个`;
-  $('gcardLike').addEventListener('click', () => openPlaylist(likesPlaylist()));
-  $('gcardRank').addEventListener('click', () => openPlaylist(rankingPlaylist()));
-  grid.querySelectorAll('[data-cpi]').forEach((el) =>
-    el.addEventListener('click', () => {
-      const p = customPlaylists[+el.dataset.cpi];
-      if (p) openPlaylist(customPlaylistDetail(p));
-    }));
-  grid.querySelectorAll('[data-cpd]').forEach((el) =>
-    el.addEventListener('click', (e) => {
-      e.stopPropagation();
-      openPlDialog('delete', +el.dataset.cpd);
-    }));
-  $('gcardNewPl').addEventListener('click', () => openPlDialog('create'));
 }
 
 /* ---------- 歌单库 ---------- */
@@ -4119,25 +3882,11 @@ let recommendationLoading = false;
 let recommendationUsesFeed = false;
 
 const recommendationKey = (track) => track.bvid || `${track.title}:${track.up}`;
-const recommendationMeta = (track) => track.recommendationReason || track.up || track.tname || '音乐';
 
-function bindRecommendationCards() {
-  $('grid-rec').querySelectorAll('.gcard:not([data-bound])').forEach((el) => {
-    el.dataset.bound = 'true';
-    el.addEventListener('click', () =>
-      setQueue(state.recommendations, '为你推荐 · Bilibili', +el.dataset.ri));
-  });
-}
-
-function renderRecommendationCards(reset = false, startIndex = 0) {
-  const tracks = state.recommendations.slice(startIndex);
-  const html = tracks.map((track, offset) =>
-    gcardHTML(track.title, recommendationMeta(track), covHTML(track, 400), '',
-      `data-ri="${startIndex + offset}"`)).join('');
-  if (reset) $('grid-rec').innerHTML = html;
-  else $('grid-rec').insertAdjacentHTML('beforeend', html);
-  bindCoverLoading($('grid-rec'));
-  bindRecommendationCards();
+function renderRecommendationCards() {
+  // React 组件（views/LibraryGrids.jsx GridRec）拥有 grid-rec 的 DOM 与事件，这里只发布数据。
+  // 必须 slice 出新数组，useSyncExternalStore 才能感知 push 后的变化。
+  publish('lib.rec', { tracks: state.recommendations.slice(), hint: null });
 }
 
 async function loadMoreRecommendations() {
@@ -4199,7 +3948,7 @@ async function loadLibrary() {
 
   $('recSource').textContent = 'B 站个性化音乐信息流';
   $('recLoader').textContent = '正在准备推荐流…';
-  $('grid-rec').innerHTML = '<div class="list-hint">正在获取你的音乐推荐…</div>';
+  publish('lib.rec', { tracks: [], hint: '正在获取你的音乐推荐…' });
   const freshIdx = state.recommendFreshIdx;
   state.recommendFreshIdx += 3;
   const [rankingResult, recommendationResult] = await Promise.allSettled([
@@ -4222,7 +3971,7 @@ async function loadLibrary() {
   recommendationUsesFeed = personalized.length > 0;
   const R = state.recommendations;
   if (!R.length) {
-    $('grid-rec').innerHTML = '<div class="list-hint">推荐加载失败，请检查网络后重试</div>';
+    publish('lib.rec', { tracks: [], hint: '推荐加载失败，请检查网络后重试' });
     $('recSource').textContent = '暂时无法连接 B 站';
     $('recLoader').textContent = '暂无更多内容';
     return;
@@ -4245,48 +3994,42 @@ let favLoadPromise = null;
 let favLoadingMid = null;
 let favLoadToken = 0;
 
-function renderFavSignedOut(grid) {
-  if (grid.dataset.state === 'signed-out') return;
-  grid.dataset.state = 'signed-out';
-  grid.removeAttribute('data-owner');
-  grid.innerHTML = `<div class="empty-guide">
-    <h3>同步你的 B 站收藏夹</h3>
-    <p>使用哔哩哔哩客户端扫码，或通过 B 站官方手机验证码登录，<br>
-    无需复制 Cookie，登录后会自动同步收藏夹。</p>
-    <button class="btn-primary" onclick="showLogin('qr')">扫码登录</button>
-  </div>`;
+// React 组件（views/FavGrid.jsx GridFav）拥有 grid-fav 的 DOM 与事件，这里只发布数据。
+// favPublished 记录上次发布的状态签名，等价于旧版 grid.dataset.state/owner/signature 的去重。
+let favPublished = null;
+
+function renderFavSignedOut() {
+  if (favPublished && favPublished.state === 'signed-out') return;
+  favPublished = { state: 'signed-out' };
+  publish('fav', { state: 'signed-out' });
 }
 
-function renderFavFolders(grid, mid, folders) {
+function renderFavFolders(mid, folders) {
   const signature = folders.map((folder) => `${folder.id}:${folder.count}:${folder.title}`).join('|');
-  if (grid.dataset.state === 'ready' && grid.dataset.owner === String(mid)
-      && grid.dataset.signature === signature) return;
-  grid.dataset.state = 'ready';
-  grid.dataset.owner = String(mid);
-  grid.dataset.signature = signature;
-  grid.innerHTML = folders.map((f, i) =>
-    gcardHTML(f.title, `${f.count} 个视频`, covHTML(f, 400), '', `data-fi="${i}"`)).join('');
-  bindCoverLoading(grid);
-  grid.querySelectorAll('.gcard').forEach((el) =>
-    el.addEventListener('click', () => openFavFolder(folders[+el.dataset.fi])));
+  if (favPublished && favPublished.state === 'ready'
+      && favPublished.owner === String(mid) && favPublished.signature === signature) return;
+  favPublished = { state: 'ready', owner: String(mid), signature };
+  publish('fav', { state: 'ready', folders });
 }
 
 async function loadFav() {
-  const grid = $('grid-fav');
   const auth = await ensureAuth();
   if (!auth.isLogin || !api.hasBridge) {
     favLoadToken += 1;
     favCache = { mid: null, folders: null };
-    renderFavSignedOut(grid);
+    renderFavSignedOut();
     return;
   }
   const mid = Number(auth.mid);
   if (favCache.mid === mid && favCache.folders) {
-    renderFavFolders(grid, mid, favCache.folders);
+    renderFavFolders(mid, favCache.folders);
     return;
   }
   // 已有页面内容时保持原样后台加载，避免“加载中”替换造成第二次闪烁。
-  if (!grid.childElementCount) grid.innerHTML = '<div class="list-hint">收藏夹加载中…</div>';
+  if (!favPublished) {
+    favPublished = { state: 'loading' };
+    publish('fav', { state: 'loading' });
+  }
   if (favLoadPromise && favLoadingMid === mid) return favLoadPromise;
   const token = ++favLoadToken;
   favLoadingMid = mid;
@@ -4297,15 +4040,12 @@ async function loadFav() {
       const folders = await api.favFolders(nav.mid);
       if (token !== favLoadToken) return;
       favCache = { mid: Number(nav.mid), folders };
-      renderFavFolders(grid, nav.mid, folders);
+      renderFavFolders(nav.mid, folders);
     } catch (e) {
       if (token !== favLoadToken) return;
       console.error(e);
-      grid.dataset.state = 'error';
-      grid.innerHTML = `<div class="empty-guide">
-        <h3>收藏夹加载失败</h3><p>${esc(e.message || e)}<br>请重新扫码或使用验证码登录。</p>
-        <button class="btn-primary" onclick="showLogin('qr')">重新登录</button>
-      </div>`;
+      favPublished = { state: 'error' };
+      publish('fav', { state: 'error', error: String(e.message || e) });
     }
   })();
   favLoadPromise = request;
@@ -4330,12 +4070,12 @@ async function openFavFolder(folder) {
     tracks: [],
   };
   openPlaylist(pl);
-  $('list-playlist').innerHTML = '<div class="list-hint">加载中…</div>';
+  patchPlaylist({ listHint: '加载中…' });
   try {
     pl.tracks = await api.favItems(folder.id);
     if (state.playlist === pl && document.body.dataset.view === 'playlist') openPlaylist(pl);
   } catch (e) {
-    $('list-playlist').innerHTML = '<div class="list-hint">加载失败：' + esc(e.message || e) + '</div>';
+    patchPlaylist({ listHint: '加载失败：' + String(e.message || e) });
   }
 }
 
@@ -4355,18 +4095,6 @@ const radioTrack = (room) => ({
   isLive: true,
 });
 
-function radioCardHTML(room, index) {
-  return gcardHTML(room.title, `${fmtNum(room.online)} 人在听`, covHTML(room, 400),
-    '<span class="badge"><span class="live-dot"></span>LIVE</span>', `data-station="${index}"`);
-}
-
-function bindRadioCards(grid) {
-  grid.querySelectorAll('.gcard:not([data-bound])').forEach((el) => {
-    el.dataset.bound = 'true';
-    el.addEventListener('click', () => setQueue(radioRooms, 'B 站直播电台', +el.dataset.station));
-  });
-}
-
 async function loadMoreRadio() {
   if (radioLoadingMore || !radioHasMore || !api.hasBridge || !radioRooms.length) return;
   radioLoadingMore = true;
@@ -4379,13 +4107,9 @@ async function loadMoreRadio() {
       return;
     }
     radioPage = page;
-    const start = radioRooms.length;
     radioRooms.push(...incoming);
-    const grid = $('grid-radio');
-    grid.insertAdjacentHTML('beforeend',
-      incoming.map((room, offset) => radioCardHTML(room, start + offset)).join(''));
-    bindCoverLoading(grid);
-    bindRadioCards(grid);
+    // slice 出新数组，useSyncExternalStore 才能感知 push 后的变化
+    publish('radio', { rooms: radioRooms.slice(), hint: null });
   } catch (e) {
     console.error('加载更多电台失败', e);
   } finally {
@@ -4395,35 +4119,30 @@ async function loadMoreRadio() {
 
 // 关注的主播 · 正在直播：头像行，点击进入直播间
 async function loadFollowedLives() {
-  const sec = $('liveFollowsSec');
-  if (!authState.isLogin || !api.hasBridge) { sec.hidden = true; return; }
+  if (!authState.isLogin || !api.hasBridge) {
+    publish('radio.follows', { hidden: true, rooms: [] });
+    return;
+  }
   try {
     const rooms = (await api.followedLives()).map(radioTrack);
-    if (!rooms.length) { sec.hidden = true; return; }
-    sec.hidden = false;
-    $('liveFollows').innerHTML = rooms.map((room, i) => `
-      <div class="lf-item" data-lfi="${i}" title="${esc(room.title)}">
-        <span class="lf-ava">${room.face
-          ? `<img src="${esc(room.face)}" alt="" loading="lazy">`
-          : coverSVG(30 + i * 2)}<i></i></span>
-        <span class="lf-name">${esc(room.up)}</span>
-      </div>`).join('');
-    $('liveFollows').querySelectorAll('.lf-item').forEach((el) =>
-      el.addEventListener('click', () => setQueue(rooms, '关注的主播 · 直播中', +el.dataset.lfi)));
+    if (!rooms.length) {
+      publish('radio.follows', { hidden: true, rooms: [] });
+      return;
+    }
+    publish('radio.follows', { hidden: false, rooms: rooms.slice() });
   } catch (e) {
     console.error('关注主播直播列表加载失败', e);
-    sec.hidden = true;
+    publish('radio.follows', { hidden: true, rooms: [] });
   }
 }
 
 async function loadRadio() {
-  const grid = $('grid-radio');
   // 60 秒内已加载过：保留现有列表与封面缓存，来回切换/滚动不再整表重拉
   if (radioRooms.length && Date.now() - radioLoadedAt < 60000) {
     loadFollowedLives();
     return;
   }
-  grid.innerHTML = '<div class="list-hint">正在连接 B 站直播电台…</div>';
+  publish('radio', { rooms: [], hint: '正在连接 B 站直播电台…' });
   radioPage = 1;
   radioRooms = [];
   radioHasMore = true;
@@ -4433,12 +4152,10 @@ async function loadRadio() {
     if (!rooms.length) throw new Error('当前电台分区暂无开播房间');
     radioRooms = rooms;
     radioLoadedAt = Date.now();
-    grid.innerHTML = rooms.map((room, i) => radioCardHTML(room, i)).join('');
-    bindCoverLoading(grid);
-    bindRadioCards(grid);
+    publish('radio', { rooms: radioRooms.slice(), hint: null });
   } catch (e) {
     console.error(e);
-    grid.innerHTML = `<div class="list-hint">电台加载失败：${esc(e.message || e)}</div>`;
+    publish('radio', { rooms: [], hint: `电台加载失败：${e.message || e}` });
   }
 }
 
@@ -4458,99 +4175,73 @@ let searchDuration = 0; // 0 全部 / 1 <10min / 2 10-30 / 3 30-60 / 4 60+
 let searchPage = 1;
 let searchNumPages = 1;
 
-function renderSearchPager() {
-  const pager = $('spPager');
-  const hasKw = Boolean(searchKw);
-  pager.hidden = !hasKw;
-  $('spPageLabel').textContent = `${searchPage} / ${searchNumPages}`;
-  $('spPrev').disabled = searchPage <= 1;
-  $('spNext').disabled = searchPage >= searchNumPages;
-}
-
 function scrollSearchTop() {
   const view = document.querySelector('.view-search');
   if (view) view.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
+// React 组件（views/SearchView.jsx）拥有 #ups/#vgrid/#spPager 的 DOM 与卡片事件，这里只发布数据
+const SEARCH_SLICE_EMPTY = { kw: '', videos: null, videosHint: null, page: 1, numPages: 1, ups: null, upsHint: null };
+function patchSearch(patch) {
+  publish('search', { ...(peek('search') || SEARCH_SLICE_EMPTY), ...patch });
+}
+
 async function doSearch(kw, page = 1) {
   if (kw !== undefined) searchKw = (kw || '').trim();
-  if (!searchKw) { $('spPager').hidden = true; return; }
+  if (!searchKw) { publish('search', { ...SEARCH_SLICE_EMPTY }); return; }
   searchPage = page;
-  $('vgrid').innerHTML = '<div class="list-hint">搜索中…</div>';
-  $('ups').innerHTML = '';
-  renderSearchPager();
+  // 旧版每次搜索都会清空 UP 主区并给视频区盖「搜索中…」；翻页（page>1）不重新拉 UP 主
+  publish('search', {
+    kw: searchKw, videos: [], videosHint: '搜索中…',
+    ups: [], upsHint: null, page: searchPage, numPages: searchNumPages,
+  });
   // UP 主按名字匹配（与视频搜索并行，不阻塞视频结果）
   if (page === 1) {
     api.searchUps(searchKw)
-      .then((r) => renderUps(r.list))
-      .catch(() => { $('ups').innerHTML = '<div class="list-hint">UP 主搜索失败</div>'; });
+      .then((r) => {
+        patchSearch({ ups: r.list, upsHint: r.list.length ? null : '没有匹配的 UP 主' });
+        // 已关注状态异步回填（未登录时全部为「+ 关注」）
+        r.list.forEach((u) => {
+          api.upRelation(u.mid).then((attr) => {
+            if (attr === 2 || attr === 6) publish('follows', { ...(peek('follows') || {}), [u.mid]: true });
+          }).catch(() => {});
+        });
+      })
+      .catch(() => patchSearch({ ups: [], upsHint: 'UP 主搜索失败' }));
   }
   try {
     const res = await api.search(searchKw, searchOrder, searchDuration, searchPage);
     const results = res.list;
     searchNumPages = Math.max(1, res.numPages || 1);
     if (res.page) searchPage = res.page;
-    // 相关视频卡片
-    $('vgrid').innerHTML = results.length ? results.map((t, i) =>
-      `<div class="vcard" data-vi="${i}"><div class="vth">${covHTML(t, 320)}<span class="dur-b num">${fmt(t.duration)}</span></div>
-       <h4>${esc(t.title)}</h4><p>${esc(t.up)}</p></div>`).join('')
-      : '<div class="list-hint">没有找到相关视频</div>';
-    $('vgrid').querySelectorAll('.vcard').forEach((el) =>
-      el.addEventListener('click', () => setQueue(results, '搜索 · ' + searchKw, +el.dataset.vi)));
-    renderSearchPager();
+    patchSearch({
+      videos: results,
+      videosHint: results.length ? null : '没有找到相关视频',
+      page: searchPage, numPages: searchNumPages,
+    });
   } catch (e) {
     console.error(e);
-    $('vgrid').innerHTML = '<div class="list-hint">搜索失败：' + esc(e.message || e) + '</div>';
-    renderSearchPager();
+    patchSearch({ videos: [], videosHint: '搜索失败：' + String(e.message || e) });
   }
 }
 
 /* ---------- UP 主：横向滚动列表 / 关注 / 主页 ---------- */
-function fmtFans(n) {
-  return n >= 10000 ? (n / 10000).toFixed(1).replace(/\.0$/, '') + ' 万' : String(n);
-}
+// 关注状态响应式：store 'follows' slice（{ [mid]: bool }），搜索页与 UP 主页按钮都订阅它
+const folPending = new Set(); // 防连点：请求在途的 mid
 
-function setFollowBtn(btn, on) {
-  btn.classList.toggle('on', on);
-  btn.textContent = on ? '已关注' : '+ 关注';
-}
-
-async function toggleFollow(mid, btn) {
-  const next = !btn.classList.contains('on');
-  btn.disabled = true;
+async function toggleFollow(mid) {
+  if (folPending.has(mid)) return;
+  const next = !((peek('follows') || {})[mid]);
+  folPending.add(mid);
   try {
     await api.followUp(mid, next);
-    // 同步搜索页与 UP 主页上所有指向该 mid 的关注按钮
-    document.querySelectorAll(`[data-fol="${mid}"]`).forEach((b) => setFollowBtn(b, next));
+    publish('follows', { ...(peek('follows') || {}), [mid]: next });
     toast(next ? '已关注' : '已取消关注');
   } catch (e) {
     toast(e.message || '关注操作失败');
   } finally {
-    btn.disabled = false;
+    folPending.delete(mid);
   }
-}
-
-// 搜索页 UP 主：按关键词直接匹配用户；横向滚动，点击进主页，按钮关注/取关
-function renderUps(list) {
-  const box = $('ups');
-  if (!list.length) { box.innerHTML = '<div class="list-hint">没有匹配的 UP 主</div>'; return; }
-  box.innerHTML = list.map((u, i) =>
-    `<div class="up-card" data-mid="${u.mid}">
-      <span class="ava">${u.pic ? `<img src="${esc(u.pic)}" loading="lazy" alt="">` : coverSVG(70 + i * 3)}</span>
-      <span class="up-meta"><b>${esc(u.name)}</b><small>${fmtFans(u.fans)} 粉丝 · ${u.videos} 视频</small></span>
-      <button type="button" class="fol" data-fol="${u.mid}">+ 关注</button>
-    </div>`).join('');
-  box.querySelectorAll('.up-card').forEach((el) =>
-    el.addEventListener('click', () => openUpPage(+el.dataset.mid)));
-  box.querySelectorAll('.fol').forEach((btn) =>
-    btn.addEventListener('click', (e) => { e.stopPropagation(); toggleFollow(+btn.dataset.fol, btn); }));
-  // 已关注状态异步回填（未登录时全部为「+ 关注」）
-  list.forEach((u) => {
-    api.upRelation(u.mid).then((attr) => {
-      const btn = box.querySelector(`[data-fol="${u.mid}"]`);
-      if (btn && (attr === 2 || attr === 6)) setFollowBtn(btn, true);
-    }).catch(() => {});
-  });
 }
 
 /* ---------- UP 主主页 ---------- */
@@ -4560,9 +4251,17 @@ let upTab = 'video';
 let upVideoPage = 1;
 let upVideoTotal = 0;
 let upVideoList = [];
+let upDynList = [];
 let upDynOffset = '';
 let upDynHasMore = false;
+let upDynLoaded = false; // 动态 tab 首次点击懒加载标记（旧版用 upDyns.children.length 判断）
 let upLoadingMore = false;
+
+// React 组件（views/UpView.jsx）拥有 .view-up 的 DOM 与卡片事件，这里只发布数据
+function patchUp(patch) {
+  const cur = peek('up');
+  if (cur) publish('up', { ...cur, ...patch });
+}
 
 async function openUpPage(mid) {
   if (!mid) return;
@@ -4571,37 +4270,31 @@ async function openUpPage(mid) {
   upVideoPage = 1;
   upVideoTotal = 0;
   upVideoList = [];
+  upDynList = [];
   upDynOffset = '';
   upDynHasMore = false;
+  upDynLoaded = false;
   go('up');
-  $('upName').textContent = '加载中…';
-  $('upSign').textContent = '';
-  $('upStat').textContent = '';
-  $('upFace').innerHTML = '';
-  $('upVideos').innerHTML = '<div class="list-hint">加载中…</div>';
-  $('upDyns').innerHTML = '';
-  $('upDyns').hidden = true;
-  $('upVideos').hidden = false;
-  $('upMoreWrap').hidden = true;
-  $('upTabs').querySelectorAll('button').forEach((b) =>
-    b.classList.toggle('on', b.dataset.utab === 'video'));
-  const folBtn = $('upFol');
-  folBtn.dataset.fol = mid;
-  setFollowBtn(folBtn, false);
+  publish('up', {
+    mid, name: '加载中…', sign: '', stat: '',
+    videos: [], videosHint: '加载中…', videoTotal: 0,
+    tab: 'video', dyns: [], dynsHint: null, dynHasMore: false,
+  });
   try {
     const [info, stat, attr] = await Promise.all([
       api.upInfo(mid), api.upStat(mid), api.upRelation(mid),
     ]);
     if (upPageMid !== mid) return;
     upPageName = (info && info.name) || `UID ${mid}`;
-    $('upName').textContent = upPageName;
-    $('upSign').textContent = (info && info.sign) || '';
-    $('upStat').textContent = `${fmtFans(stat.fans)} 粉丝 · ${stat.following} 关注`;
-    $('upFace').innerHTML = info && info.face
-      ? `<img src="${esc(info.face)}" alt="">` : coverSVG(70);
-    setFollowBtn(folBtn, attr === 2 || attr === 6);
+    patchUp({
+      name: upPageName,
+      sign: (info && info.sign) || '',
+      stat: `${fmtFans(stat.fans)} 粉丝 · ${stat.following} 关注`,
+      face: (info && info.face) || null,
+    });
+    publish('follows', { ...(peek('follows') || {}), [mid]: attr === 2 || attr === 6 });
   } catch (e) {
-    if (upPageMid === mid) $('upName').textContent = `UID ${mid}`;
+    if (upPageMid === mid) patchUp({ name: `UID ${mid}` });
   }
   loadUpVideos(mid, 1, false);
 }
@@ -4613,50 +4306,33 @@ async function loadUpVideos(mid, page, append) {
     upVideoList = append ? upVideoList.concat(r.list) : r.list;
     upVideoTotal = r.total;
     upVideoPage = page;
-    const box = $('upVideos');
-    box.innerHTML = upVideoList.length ? upVideoList.map((t, i) =>
-      `<div class="vcard" data-vi="${i}"><div class="vth">${covHTML(t, 320)}<span class="dur-b num">${fmt(t.duration)}</span></div>
-       <h4>${esc(t.title)}</h4><p>${esc(t.up)}</p></div>`).join('')
-      : '<div class="list-hint">TA 还没有投稿视频</div>';
-    box.querySelectorAll('.vcard').forEach((el) =>
-      el.addEventListener('click', () => setQueue(upVideoList, 'UP · ' + upPageName, +el.dataset.vi)));
-    $('upMoreWrap').hidden = upTab !== 'video' || upVideoList.length >= upVideoTotal;
+    patchUp({
+      videos: upVideoList,
+      videosHint: upVideoList.length ? null : 'TA 还没有投稿视频',
+      videoTotal: upVideoTotal,
+    });
   } catch (e) {
     if (!append && upPageMid === mid)
-      $('upVideos').innerHTML = '<div class="list-hint">视频加载失败：' + esc(e.message || e) + '</div>';
+      patchUp({ videos: [], videosHint: '视频加载失败：' + String(e.message || e) });
   }
 }
 
 function renderUpDyns(list, append) {
-  const box = $('upDyns');
-  const html = list.map((d) => {
-    const picHtml = d.kind === 'video' && d.pic
-      ? `<div class="dyn-th">${`<img src="${esc(d.pic)}" loading="lazy" alt="">`}<span class="dur-b num">视频</span></div>`
-      : (d.pic ? `<div class="dyn-pic"><img src="${esc(d.pic)}" loading="lazy" alt=""></div>` : '');
-    return `<div class="dyn-card${d.bvid ? ' dyn-video' : ''}"${d.bvid ? ` data-bvid="${esc(d.bvid)}"` : ''}>
-      <div class="dyn-body">
-        ${d.title ? `<b>${esc(d.title)}</b>` : ''}
-        ${d.text ? `<p>${esc(d.text)}</p>` : ''}
-        <small>${esc(d.time)}</small>
-      </div>${picHtml}</div>`;
-  }).join('');
-  if (append) box.insertAdjacentHTML('beforeend', html);
-  else box.innerHTML = html || '<div class="list-hint">暂无动态</div>';
-  // 视频动态：点击直接播放
-  box.querySelectorAll('.dyn-video:not([data-bound])').forEach((el) => {
-    el.dataset.bound = '1';
-    el.addEventListener('click', async () => {
-      try {
-        const v = await api.view(el.dataset.bvid);
-        if (!v) return;
-        setQueue([{
-          bvid: v.bvid, aid: v.aid, cid: v.cid, title: v.title,
-          up: (v.owner && v.owner.name) || '', duration: v.duration || 0,
-          pic: v.pic ? v.pic.replace(/^http:/, 'https:') : null,
-        }], 'UP 动态 · ' + upPageName, 0);
-      } catch (e) { toast('视频加载失败'); }
-    });
-  });
+  upDynList = append ? upDynList.concat(list) : list.slice();
+  patchUp({ dyns: upDynList, dynsHint: upDynList.length ? null : '暂无动态' });
+}
+
+// 视频动态：点击直接播放（先补拉 view 详情拿 cid）
+async function playDynVideo(bvid) {
+  try {
+    const v = await api.view(bvid);
+    if (!v) return;
+    setQueue([{
+      bvid: v.bvid, aid: v.aid, cid: v.cid, title: v.title,
+      up: (v.owner && v.owner.name) || '', duration: v.duration || 0,
+      pic: v.pic ? v.pic.replace(/^http:/, 'https:') : null,
+    }], 'UP 动态 · ' + upPageName, 0);
+  } catch (e) { toast('视频加载失败'); }
 }
 
 async function loadUpDyns(mid, append) {
@@ -4665,11 +4341,12 @@ async function loadUpDyns(mid, append) {
     if (upPageMid !== mid) return;
     upDynOffset = r.offset;
     upDynHasMore = r.hasMore;
+    upDynLoaded = true;
     renderUpDyns(r.list, append);
-    $('upMoreWrap').hidden = upTab !== 'dyn' || !upDynHasMore;
+    patchUp({ dynHasMore: upDynHasMore });
   } catch (e) {
     if (!append && upPageMid === mid)
-      $('upDyns').innerHTML = '<div class="list-hint">动态加载失败：' + esc(e.message || e) + '</div>';
+      patchUp({ dyns: [], dynsHint: '动态加载失败：' + String(e.message || e) });
   }
 }
 
@@ -4688,7 +4365,7 @@ function initVideoActions() {
   const fol = $('vUpFol');
   fol.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (fol.dataset.fol) toggleFollow(+fol.dataset.fol, fol);
+    if (fol.dataset.fol) toggleFollow(+fol.dataset.fol);
   });
   const gotoUp = () => {
     const mid = +(fol.dataset.fol || 0);
@@ -4705,11 +4382,11 @@ function initVideoActions() {
     try {
       const aid = await ensureAid(t);
       if (!aid) throw new Error('无法获取稿件信息');
-      const on = !btn.classList.contains('on');
+      const on = !((peek('npActions') || {}).vsLikeOn);
       await api.likeVideo(aid, on);
-      btn.classList.toggle('on', on);
-      const cur = $('vsLike').textContent;
-      if (/^\d+$/.test(cur)) $('vsLike').textContent = String(Math.max(0, +cur + (on ? 1 : -1)));
+      patchSlice('npActions', { vsLikeOn: on });
+      const cur = (peek('vdetail') || {}).vsLike;
+      if (/^\d+$/.test(cur)) patchSlice('vdetail', { vsLike: String(Math.max(0, +cur + (on ? 1 : -1))) });
       toast(on ? '已点赞' : '已取消点赞');
     } catch (e) { toast(e.message || '点赞失败'); }
     finally { btn.disabled = false; }
@@ -4734,15 +4411,15 @@ function initVideoActions() {
     const t = state.current;
     if (!t || t.isLive || !api.hasBridge) return;
     if (coinBtn.disabled) return;
-    if (coinBtn.classList.contains('on')) { toast('已投过币'); return; }
+    if ((peek('npActions') || {}).vsCoinOn) { toast('已投过币'); return; }
     coinBtn.disabled = true;
     try {
       const aid = await ensureAid(t);
       if (!aid) throw new Error('无法获取稿件信息');
       await api.coinVideo(aid, n);
-      coinBtn.classList.add('on');
-      const cur = $('vsCoin').textContent;
-      if (/^\d+$/.test(cur)) $('vsCoin').textContent = String(+cur + n);
+      patchSlice('npActions', { vsCoinOn: true });
+      const cur = (peek('vdetail') || {}).vsCoin;
+      if (/^\d+$/.test(cur)) patchSlice('vdetail', { vsCoin: String(+cur + n) });
       coinFly(n);
       toast(n > 1 ? '投币成功 +2' : '投币成功 +1');
     } catch (e) { toast(e.message || '投币失败'); }
@@ -4753,7 +4430,7 @@ function initVideoActions() {
     doCoin(1);
   });
   coinBtn.addEventListener('pointerdown', () => {
-    if (coinBtn.disabled || coinBtn.classList.contains('on')) return;
+    if (coinBtn.disabled || (peek('npActions') || {}).vsCoinOn) return;
     coinBtn.classList.add('holding');
     coinHoldTimer = setTimeout(() => { coinHeld = true; doCoin(2); }, 520);
   });
@@ -4772,21 +4449,15 @@ function initVideoActions() {
 function initUpPage() {
   $('upFol').addEventListener('click', (e) => {
     e.stopPropagation();
-    if (upPageMid) toggleFollow(upPageMid, $('upFol'));
+    if (upPageMid) toggleFollow(upPageMid);
   });
   $('upTabs').querySelectorAll('button').forEach((b) =>
     b.addEventListener('click', () => {
       if (b.dataset.utab === upTab) return;
       upTab = b.dataset.utab;
-      $('upTabs').querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
-      $('upVideos').hidden = upTab !== 'video';
-      $('upDyns').hidden = upTab !== 'dyn';
-      if (upTab === 'video') {
-        $('upMoreWrap').hidden = !upVideoList.length || upVideoList.length >= upVideoTotal;
-      } else {
-        if (!$('upDyns').children.length) loadUpDyns(upPageMid, false);
-        else $('upMoreWrap').hidden = !upDynHasMore;
-      }
+      // on class / upVideos / upDyns / upMoreWrap 的显隐由组件按 slice.tab 渲染
+      patchUp({ tab: upTab });
+      if (upTab === 'dyn' && !upDynLoaded) loadUpDyns(upPageMid, false);
     }));
   $('upMore').addEventListener('click', async () => {
     if (upLoadingMore) return;
@@ -4798,116 +4469,110 @@ function initUpPage() {
   });
 }
 
-/* ---------- 设置项接线（全部真实生效） ---------- */
-function initSettings() {
-  // 在线音质：立即作用于当前曲目（断点续播）
-  const segQ = $('segQuality');
-  [...segQ.children].forEach((b) => {
-    b.classList.toggle('on', +b.dataset.q === settings.quality);
-    b.addEventListener('click', async () => {
-      settings.quality = +b.dataset.q;
-      store.set('biu-quality', settings.quality);
-      [...segQ.children].forEach((x) => x.classList.toggle('on', x === b));
-      toast('在线音质 · ' + b.textContent);
-      const t = state.current;
-      if (t && !t.isLive && t.bvid && t.cid && api.hasBridge) {
-        const pos = audio.currentTime;
-        const wasPlaying = !audio.paused;
-        try {
-          const url = await api.playUrl(t.bvid, t.cid, settings.quality);
-          if (state.current !== t) return;
-          audio.src = url;
-          audio.dataset.bvid = t.bvid;
-          audio.dataset.quality = String(settings.quality);
-          audio.currentTime = pos;
-          if (wasPlaying) await audio.play();
-        } catch (e) {
-          toast('该音质不可用' + (settings.quality === 2 ? '（无损需登录/大会员）' : ''));
-        }
-      }
-    });
+/* ---------- 设置项（状态发布到 'settings' slice，交互由 SettingsView 组件回调） ---------- */
+function publishSettings() {
+  publish('settings', {
+    quality: settings.quality,
+    vq: settings.vq,
+    danmaku: settings.danmaku,
+    syncHistory: settings.syncHistory,
+    blur: settings.blur,
+    deskLyric: deskLyricOn,
   });
+}
 
-  // 视频清晰度：全局默认档位；立即作用于当前曲目（重新请求原视频流，保留进度与播放状态）
-  const segV = $('segVQuality');
-  [...segV.children].forEach((b) => {
-    b.classList.toggle('on', +b.dataset.vq === settings.vq);
-    b.addEventListener('click', () => {
-      settings.vq = +b.dataset.vq;
-      store.set('biu-vquality', settings.vq);
-      [...segV.children].forEach((x) => x.classList.toggle('on', x === b));
-      toast('视频清晰度 · ' + videoQualityLabel(settings.vq));
-      if (document.body.classList.contains('video-on')) {
-        setVideoMode(true, true);
-        return;
-      }
-      // 非视频模式：作废按旧档位预热的视频，按新默认重新预热，否则进入视频模式仍沿用旧清晰度
-      const t = state.current;
-      if (t && !t.isLive && video.dataset.bvid === t.bvid
-          && Number(video.dataset.actualQuality) !== settings.vq) {
-        video.dataset.ready = 'false';
-        video.removeAttribute('data-actual-quality');
-        videoPreparePromise = null;
-        videoPrepareKey = '';
-        scheduleVideoWarmup(t);
-      }
-    });
-  });
+// 在线音质：立即作用于当前曲目（断点续播）
+async function setQuality(q) {
+  settings.quality = q;
+  store.set('biu-quality', q);
+  publishSettings();
+  toast('在线音质 · ' + ['标准', '高品', '无损'][q]);
+  const t = state.current;
+  if (t && !t.isLive && t.bvid && t.cid && api.hasBridge) {
+    const pos = audio.currentTime;
+    const wasPlaying = !audio.paused;
+    try {
+      const url = await api.playUrl(t.bvid, t.cid, q);
+      if (state.current !== t) return;
+      audio.src = url;
+      audio.dataset.bvid = t.bvid;
+      audio.dataset.quality = String(q);
+      audio.currentTime = pos;
+      if (wasPlaying) await audio.play();
+    } catch (e) {
+      toast('该音质不可用' + (q === 2 ? '（无损需登录/大会员）' : ''));
+    }
+  }
+}
 
-  // 弹幕开关
-  const swDm = $('swDanmaku');
-  swDm.classList.toggle('off', !settings.danmaku);
+// 视频清晰度：全局默认档位；立即作用于当前曲目（重新请求原视频流，保留进度与播放状态）
+function setVQuality(vq) {
+  settings.vq = vq;
+  store.set('biu-vquality', vq);
+  publishSettings();
+  toast('视频清晰度 · ' + videoQualityLabel(vq));
+  if (document.body.classList.contains('video-on')) {
+    setVideoMode(true, true);
+    return;
+  }
+  // 非视频模式：作废按旧档位预热的视频，按新默认重新预热，否则进入视频模式仍沿用旧清晰度
+  const t = state.current;
+  if (t && !t.isLive && video.dataset.bvid === t.bvid
+      && Number(video.dataset.actualQuality) !== settings.vq) {
+    video.dataset.ready = 'false';
+    video.removeAttribute('data-actual-quality');
+    videoPreparePromise = null;
+    videoPrepareKey = '';
+    scheduleVideoWarmup(t);
+  }
+}
+
+function toggleDanmaku() {
+  settings.danmaku = settings.danmaku ? 0 : 1;
+  store.set('biu-danmaku', settings.danmaku);
+  publishSettings();
   $('danmakuLayer').classList.toggle('off', !settings.danmaku);
-  swDm.addEventListener('click', () => {
-    settings.danmaku = settings.danmaku ? 0 : 1;
-    store.set('biu-danmaku', settings.danmaku);
-    swDm.classList.toggle('off', !settings.danmaku);
-    $('danmakuLayer').classList.toggle('off', !settings.danmaku);
-    if (!settings.danmaku) { danmakuItems = []; resetDanmaku(); }
-    else if (state.current && videoModeOn()) loadDanmaku(state.current, videoLoadToken);
-  });
+  if (!settings.danmaku) { danmakuItems = []; resetDanmaku(); }
+  else if (state.current && videoModeOn()) loadDanmaku(state.current, videoLoadToken);
+}
 
-  // 同步观看记录到 B 站历史开关
-  const swSyncHis = $('swSyncHistory');
-  swSyncHis.classList.toggle('off', !settings.syncHistory);
-  swSyncHis.addEventListener('click', () => {
-    settings.syncHistory = settings.syncHistory ? 0 : 1;
-    store.set('biu-sync-history', settings.syncHistory);
-    swSyncHis.classList.toggle('off', !settings.syncHistory);
-    if (settings.syncHistory && !authState.isLogin) toast('未登录：记录会在登录后才开始同步');
-  });
+function toggleSyncHistory() {
+  settings.syncHistory = settings.syncHistory ? 0 : 1;
+  store.set('biu-sync-history', settings.syncHistory);
+  publishSettings();
+  if (settings.syncHistory && !authState.isLogin) toast('未登录：记录会在登录后才开始同步');
+}
 
-  // 背景模糊度：0 - 40px
-  const setBlur = (px) => {
-    settings.blur = px;
-    store.set('biu-blur', px);
-    document.documentElement.style.setProperty('--bg-blur', px + 'px');
-    $('slBlur').querySelector('i').style.width = (px / 40 * 100) + '%';
-  };
-  bindSlider($('slBlur'), (v) => setBlur(Math.round(v * 40)));
-  setBlur(settings.blur);
+// 背景模糊度：0 - 40px（滑条拖动由组件高频回调）
+function setBlurPx(px) {
+  settings.blur = px;
+  store.set('biu-blur', px);
+  document.documentElement.style.setProperty('--bg-blur', px + 'px');
+  publishSettings();
+}
 
-  // 桌面歌词（仅 Electron）
-  const swLyr = $('swLyric');
-  const syncLyrUI = () => swLyr.classList.toggle('off', !deskLyricOn);
-  syncLyrUI();
-  swLyr.addEventListener('click', () => {
-    if (!api.hasBridge) { toast('桌面歌词仅在客户端中可用'); return; }
-    deskLyricOn = !deskLyricOn;
-    store.set('biu-desklyric', deskLyricOn ? 1 : 0);
-    window.bili.lyricToggle(deskLyricOn);
-    syncLyrUI();
-    if (deskLyricOn) syncLyric(true);
-  });
+// 桌面歌词（仅 Electron）
+function toggleDeskLyric() {
+  if (!api.hasBridge) { toast('桌面歌词仅在客户端中可用'); return; }
+  deskLyricOn = !deskLyricOn;
+  store.set('biu-desklyric', deskLyricOn ? 1 : 0);
+  window.bili.lyricToggle(deskLyricOn);
+  publishSettings();
+  if (deskLyricOn) syncLyric(true);
+}
+
+function initSettings() {
+  publishSettings();
+  document.documentElement.style.setProperty('--bg-blur', settings.blur + 'px');
+  $('danmakuLayer').classList.toggle('off', !settings.danmaku);
   if (api.hasBridge) {
     window.bili.onLyricClosed(() => {
       deskLyricOn = false;
       store.set('biu-desklyric', 0);
-      syncLyrUI();
+      publishSettings();
     });
     if (deskLyricOn) window.bili.lyricToggle(true); // 恢复上次开启状态
   }
-
 }
 
 /* ---------- 初始化 ---------- */
@@ -5016,20 +4681,20 @@ function init() {
 
   // MixSplitR 分切面板
   $('btnSplit').addEventListener('click', (event) => { event.stopPropagation(); openSplitPanel(); });
-  // 下载原视频：点击弹出清晰度菜单（复用 vqual-item 样式），选择后主进程保存对话框 + 流式下载
-  const dlMenu = $('dlMenu');
-  const closeDlMenu = () => { dlMenu.hidden = true; $('btnDownload').setAttribute('aria-expanded', 'false'); };
-  let dlBusy = false;
+  // 下载原视频：点击弹出清晰度菜单（组件化，数据走 'dlmenu' slice）
   $('btnDownload').addEventListener('click', async (event) => {
     event.stopPropagation();
     const t = state.current;
     if (!t || t.isLive || !t.bvid || !api.hasBridge) { toast('当前曲目不支持下载'); return; }
-    if (!dlMenu.hidden) { closeDlMenu(); return; }
-    dlMenu.innerHTML = '<div class="vqual-hint">正在获取可下载清晰度…</div>';
+    if (peek('dlmenu')?.open) { closeDlMenu(); return; }
     const rect = $('btnDownload').getBoundingClientRect();
-    dlMenu.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 168))}px`;
-    dlMenu.style.top = `${rect.bottom + 8}px`;
-    dlMenu.hidden = false;
+    publish('dlmenu', {
+      open: true,
+      left: Math.max(8, Math.min(rect.left, window.innerWidth - 168)),
+      top: rect.bottom + 8,
+      hint: '正在获取可下载清晰度…',
+      options: null,
+    });
     $('btnDownload').setAttribute('aria-expanded', 'true');
     try {
       const info = await api.videoDownloadInfo(t.bvid, t.cid);
@@ -5037,63 +4702,21 @@ function init() {
       const options = info.qualities && info.qualities.length
         ? info.qualities
         : [{ quality: info.quality, label: info.label }];
-      dlMenu.innerHTML = options.map((item) => {
-        const { main, sub } = splitQualityLabel(item.label);
-        return `<button type="button" class="vqual-item" data-vq="${item.quality}">`
-          + `<b>${esc(main)}</b>` + (sub ? `<small>${esc(sub)}</small>` : '') + '</button>';
-      }).join('');
+      patchSlice('dlmenu', {
+        hint: null,
+        options: options.map((item) => ({ quality: item.quality, ...splitQualityLabel(item.label) })),
+      });
     } catch (error) {
       closeDlMenu();
       toast('获取下载清晰度失败：' + (error.message || error));
     }
   });
-  dlMenu.addEventListener('click', async (event) => {
-    const item = event.target.closest('.vqual-item');
-    if (!item || dlBusy) return;
-    closeDlMenu();
-    const t = state.current;
-    if (!t || !t.bvid) return;
-    dlBusy = true;
-    toast('正在准备下载…');
-    try {
-      const info = await api.videoDownloadInfo(t.bvid, t.cid, +item.dataset.vq);
-      const safeTitle = String(t.title || t.bvid).replace(/[\\/:*?"<>|]/g, '_').slice(0, 60);
-      const filename = `${safeTitle} - ${videoQualityLabel(info.quality)}.${info.format}`;
-      const r = await window.bili.downloadStart({ url: info.url, filename });
-      if (r && r.ok) toast('下载完成');
-      else if (r && !r.canceled) toast('下载失败：' + (r.message || '未知错误'));
-    } catch (error) {
-      toast('下载失败：' + (error.message || error));
-    } finally {
-      dlBusy = false;
-    }
-  });
   document.addEventListener('click', (event) => {
-    if (!dlMenu.hidden && !event.target.closest('#dlMenu') && event.target.closest('#btnDownload') === null) closeDlMenu();
+    if (peek('dlmenu')?.open && !event.target.closest('#dlMenu') && event.target.closest('#btnDownload') === null) closeDlMenu();
   });
 
-  // 手动匹配歌词 / 歌词偏移面板
+  // 手动匹配歌词 / 歌词偏移面板（面板本体已组件化，见 views/LyricMatchView.jsx）
   $('btnLyricMatch').addEventListener('click', (event) => { event.stopPropagation(); openLyricMatch(); });
-  $('lyricMatchGo').addEventListener('click', runLyricMatchSearch);
-  $('lyricMatchInput').addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') runLyricMatchSearch();
-  });
-  $('lyricOffDown').addEventListener('click', () => setLyricOffset(lyricMatchTrack, lyricOffsetOf(lyricMatchTrack) - 0.5));
-  $('lyricOffUp').addEventListener('click', () => setLyricOffset(lyricMatchTrack, lyricOffsetOf(lyricMatchTrack) + 0.5));
-  $('lyricOffReset').addEventListener('click', () => setLyricOffset(lyricMatchTrack, 0));
-  $('lyricClose').addEventListener('click', closeLyricMatch);
-  $('lyricAuto').addEventListener('click', () => {
-    const t = lyricMatchTrack;
-    if (t) {
-      delete t.lyricRef; // 清掉手动匹配，恢复自动链路（搜词 / AI 字幕）
-      if (state.current === t) loadLyrics(t);
-      toast('已恢复自动歌词');
-    }
-    closeLyricMatch();
-  });
-  $('lyricMask').addEventListener('click', (event) => {
-    if (event.target === $('lyricMask')) closeLyricMatch();
-  });
   // 下载进度：每 4MB 主进程推一次，百分比写进 toast
   let dlLastPct = -1;
   window.bili && window.bili.onDownloadProgress && window.bili.onDownloadProgress(({ got, total }) => {
@@ -5357,7 +4980,7 @@ function init() {
   $('qClear').addEventListener('click', () => {
     state.queue = []; state.qi = -1; state.current = null;
     clearHotCommentRotation();
-    $('hotCommentAvatar').innerHTML = '<span class="cdot"></span>';
+    patchSlice('hotComment', { avatar: null, seed: null, uname: null });
     setHotCommentText('暂无热评');
     document.body.classList.remove('live-on');
     destroyHls();
@@ -5424,7 +5047,7 @@ function init() {
 
   // 设置项
   initSettings();
-  initPlaylistDialog();
+  initPlaylistInlineEdit();
   initAuth();
 
   // 窗口控制（仅 Electron）
@@ -5484,3 +5107,16 @@ function init() {
 
 // 供 React 外壳 onClick 调用的桥（替代旧版内联 onclick 依赖的全局函数）
 window.biuUi = { go, openPanel, closePanel };
+// 供 React 视图组件（LibraryGrids 等）触发的行为桥
+window.biuActions = { openPlaylist, likesPlaylist, rankingPlaylist, customPlaylistDetail, openPlDialog, setQueue, openFavFolder, showLogin, isLiked, toggleLike, plDeleteTrack, plReorder, togglePlEditing, pickInlineCover, openUpPage, toggleFollow, playDynVideo, playIndex, toggleFavFolder, toggleTrackInPlaylist,
+  // 设置面板（SettingsView）
+  setQuality, setVQuality, toggleDanmaku, toggleSyncHistory, setBlurPx, toggleDeskLyric,
+  // 登录弹窗（LoginView）
+  switchLoginTab, refreshQrLogin, sendSmsCode, submitSmsLogin, hideQrLogin, logout,
+  // 歌单新建/删除对话框（PlDialogView）
+  plDialogSubmit: submitPlDialog, plDialogClose: closePlDialog, plDialogInput: (v) => patchSlice('plDialog', { inputValue: v }),
+  plDialogPickCover, plCoverFilePicked,
+  // 下载清晰度菜单（DlMenu）
+  dlPick,
+  // 手动匹配歌词面板（LyricMatchView）
+  runLyricMatchSearch, pickLyricCandidateByIndex, lyricOffAdjust, lyricOffReset, lyricAutoRestore, closeLyricMatch };

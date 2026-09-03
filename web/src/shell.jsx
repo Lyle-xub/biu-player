@@ -1,4 +1,19 @@
 import React from 'react';
+import { GridMy, GridRec } from './views/LibraryGrids.jsx';
+import { GridFav } from './views/FavGrid.jsx';
+import { GridRadio, LiveFollows } from './views/RadioView.jsx';
+import PlaylistView from './views/PlaylistView.jsx';
+import { SearchResults } from './views/SearchView.jsx';
+import UpView from './views/UpView.jsx';
+import { QueueList } from './views/QueueList.jsx';
+import { FavPopList } from './views/FavPopList.jsx';
+import { PlPopList } from './views/PlPopList.jsx';
+import { NpInfo, NpCover, HotComment, CmtList, VQualMenu, VDetail, PpLike } from './views/PlayingView.jsx';
+import { SettingsModal } from './views/SettingsView.jsx';
+import { LoginModal } from './views/LoginView.jsx';
+import { PlDialog } from './views/PlDialogView.jsx';
+import { DlMenu } from './views/DlMenu.jsx';
+import { LyricMask } from './views/LyricMatchView.jsx';
 
 // React 只负责渲染与 renderer/index.html 完全一致的 DOM 骨架；
 // 所有交互行为由挂载后动态加载的旧版 controller 模块接管。
@@ -98,11 +113,11 @@ function ViewLibrary() {
 
         <section className="sec">
           <h2>我的歌单<small id="gridMyCount"></small></h2>
-          <div className="grid" id="grid-my"></div>
+          <GridMy />
         </section>
         <section className="sec">
           <h2>为你推荐<small id="recSource">B 站个性化音乐信息流</small></h2>
-          <div className="grid" id="grid-rec"></div>
+          <GridRec />
           <div className="recommendation-loader" id="recLoader">向下滚动加载更多</div>
         </section>
       </section>
@@ -117,7 +132,7 @@ function ViewFav() {
       <section className="view view-fav">
         <section className="sec" style={{marginTop:0}}>
           <h2>我的收藏夹<small>与 B 站同步</small></h2>
-          <div className="grid" id="grid-fav"></div>
+          <GridFav />
         </section>
       </section>
     </>
@@ -129,13 +144,10 @@ function ViewRadio() {
     <>
       {/* ================= 电台 ================= */}
       <section className="view view-radio">
-        <section className="sec" style={{marginTop:0}} id="liveFollowsSec" hidden={true}>
-          <h2>关注的主播<small>正在直播</small></h2>
-          <div className="live-follows" id="liveFollows"></div>
-        </section>
+        <LiveFollows />
         <section className="sec" style={{marginTop:0}}>
           <h2>音乐电台<small>24 小时不间断 · 下滑加载更多</small></h2>
-          <div className="grid" id="grid-radio"></div>
+          <GridRadio />
         </section>
       </section>
     </>
@@ -145,44 +157,8 @@ function ViewRadio() {
 function ViewPlaylist() {
   return (
     <>
-      {/* ================= 歌单详情 ================= */}
-      <section className="view view-playlist">
-        <div className="pl-head">
-          <div className="pl-cover" id="plCover">
-            <svg viewBox="0 0 400 400">
-              <defs><linearGradient id="lk2" x1="0" y1="0" x2="1" y2="1">
-                <stop offset="0" stopColor="#ffa9c0"/><stop offset="1" stopColor="#fb7299"/>
-              </linearGradient></defs>
-              <rect width="400" height="400" fill="url(#lk2)"/>
-              <path d="M200 300 C 120 240 90 195 90 155 C 90 118 118 95 152 95 C 176 95 193 108 200 126 C 207 108 224 95 248 95 C 282 95 310 118 310 155 C 310 195 280 240 200 300Z" fill="#fff"/>
-            </svg>
-          </div>
-          <div className="pl-info">
-            <div className="label-caps" id="plLabel">收藏夹 · Bilibili</div>
-            <div className="pl-title-row">
-              <h1 id="plTitle">我喜欢</h1>
-            </div>
-            <input id="plTitleEdit" className="pl-edit-input pl-edit-title" maxLength="40" autocomplete="off" hidden={true} />
-            <p className="pl-desc" id="plDesc">所有在 B 站点过「收藏」的音乐视频与音频，自动转存为可连续播放的歌单。</p>
-            <input id="plDescEdit" className="pl-edit-input pl-edit-desc" maxLength="60" autocomplete="off" placeholder="歌单简介（可选）" hidden={true} />
-            <div className="pl-meta" id="plMeta"></div>
-            <div className="pl-actions">
-              <button className="btn-primary" id="btnPlayAll">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-                播放全部
-              </button>
-              <button className="btn-ghost" id="btnPlShuffle">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>
-                随机播放
-              </button>
-            </div>
-          </div>
-        </div>
-        <div className="tlist">
-          <div className="thead"><span>#</span><span>标题</span><span>UP 主</span><span>时长</span><span></span></div>
-          <div id="list-playlist"></div>
-        </div>
-      </section>
+      {/* ================= 歌单详情（组件化，数据来自 store 'playlist' slice） ================= */}
+      <PlaylistView />
     </>
   );
 }
@@ -227,19 +203,7 @@ function ViewSearch() {
           </div>
         </div>
 
-        <section className="sec" style={{marginTop:0}} data-sec="up">
-          <h2>UP 主</h2>
-          <div className="ups" id="ups"></div>
-        </section>
-        <section className="sec" data-sec="video">
-          <h2>相关视频</h2>
-          <div className="vgrid" id="vgrid"><div className="list-hint">输入关键词，回车搜索</div></div>
-          <div className="sp-pager" id="spPager" hidden={true}>
-            <button type="button" className="sp-btn" id="spPrev">上一页</button>
-            <span className="sp-page num" id="spPageLabel">1 / 1</span>
-            <button type="button" className="sp-btn" id="spNext">下一页</button>
-          </div>
-        </section>
+        <SearchResults />
       </section>
     </>
   );
@@ -248,27 +212,8 @@ function ViewSearch() {
 function ViewUp() {
   return (
     <>
-      {/* ================= UP 主主页 ================= */}
-      <section className="view view-up">
-        <div className="up-head">
-          <span className="up-face" id="upFace"></span>
-          <div className="up-head-meta">
-            <h2 id="upName">加载中…</h2>
-            <p id="upSign"></p>
-            <span className="up-stat" id="upStat"></span>
-          </div>
-          <button type="button" className="fol up-fol" id="upFol">+ 关注</button>
-        </div>
-        <div className="up-tabs" id="upTabs">
-          <button type="button" className="on" data-utab="video">视频</button>
-          <button type="button" data-utab="dyn">动态</button>
-        </div>
-        <div className="vgrid" id="upVideos"></div>
-        <div className="up-dyns" id="upDyns" hidden={true}></div>
-        <div className="sp-pager" id="upMoreWrap" hidden={true}>
-          <button type="button" className="sp-btn" id="upMore">加载更多</button>
-        </div>
-      </section>
+      {/* ================= UP 主主页（组件化，数据来自 store 'up' / 'follows' slice） ================= */}
+      <UpView />
     </>
   );
 }
@@ -280,56 +225,19 @@ function ViewPlaying() {
       <section className="view view-playing">
         <div className="np-left">
           <div className="np-heading" id="npHeading">
-            <div className="np-artist" id="npArtist">—</div>
-            <div className="np-rule"></div>
-            <h1 className="np-title" id="npTitle">未在播放</h1>
-            <div className="np-album" id="npAlbum"></div>
-            <div className="np-src">
-              <div className="np-src-meta">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M17.8 3H6.2A3.2 3.2 0 0 0 3 6.2v11.6A3.2 3.2 0 0 0 6.2 21h11.6a3.2 3.2 0 0 0 3.2-3.2V6.2A3.2 3.2 0 0 0 17.8 3zm-9 13.5v-9l7 4.5z"/></svg>
-              <span id="npSrc">来源 · —</span>
-              </div>
-              <div className="np-src-tools" role="group" aria-label="原视频操作">
-              <button type="button" className="np-src-split" id="btnSplit" title="MixSplitR 分切：把长视频按歌曲分割成歌单">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><circle cx="6" cy="6" r="2.6"/><circle cx="6" cy="18" r="2.6"/><path d="M8.2 7.6 20 19M8.2 16.4 20 5"/></svg>
-                <span>分切</span>
-              </button>
-              <button type="button" className="np-src-split" id="btnDownload" title="下载原视频" aria-haspopup="true" aria-expanded="false">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3v12m0 0 5-5m-5 5-5-5M4 21h16"/></svg>
-                <span>下载</span>
-              </button>
-              <button type="button" className="np-src-split" id="btnLyricMatch" title="手动匹配歌词 / 调整歌词时间">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 18V6l10-2v11"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="15" r="2.5"/></svg>
-                <span>歌词</span>
-              </button>
-              </div>
-            </div>
-            <div className="np-actions" id="npActions">
-              <button type="button" className="np-fav-btn" id="btnLike" aria-pressed="false" title="我喜欢">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M12 21C7 16.5 4 13.3 4 9.8 4 7.2 6 5 8.7 5c1.6 0 2.8.7 3.3 1.7C12.5 5.7 13.7 5 15.3 5 18 5 20 7.2 20 9.8c0 3.5-3 6.7-8 11.2z"/></svg>
-                <span>我喜欢</span>
-              </button>
-              <button type="button" className="np-fav-btn" id="btnFav" aria-pressed="false" title="添加到收藏夹" aria-haspopup="true" aria-expanded="false">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinejoin="round"><path d="M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
-                <span>收藏</span>
-              </button>
-              <button type="button" className="np-fav-btn" id="btnAddPl" title="加入本地歌单" aria-haspopup="true" aria-expanded="false">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><path d="M4 6h10M4 12h10M4 18h6M18 9v8M14 13h8"/></svg>
-                <span>歌单</span>
-              </button>
-            </div>
+            <NpInfo />
           </div>
           {/* 收藏夹弹层放在 np-heading 外：heading 的 contain:layout 会把 fixed 后代关进自身并裁掉 */}
           <div className="fav-pop" id="favPop" hidden={true}>
             <div className="fav-pop-title">添加到收藏夹</div>
-            <div className="fav-pop-list" id="favPopList"><div className="fav-pop-hint">加载中…</div></div>
+            <FavPopList />
           </div>
           <div className="fav-pop" id="plPop" hidden={true}>
             <div className="fav-pop-title">加入本地歌单</div>
-            <div className="fav-pop-list" id="plPopList"></div>
+            <PlPopList />
           </div>
-          {/* 下载清晰度菜单：同样放 np-heading 外防裁剪 */}
-          <div className="dl-menu" id="dlMenu" hidden={true}></div>
+          {/* 下载清晰度菜单：同样放 np-heading 外防裁剪（数据来自 store 'dlmenu' slice） */}
+          <DlMenu />
 
           {/* 歌词：播放时由 JS 注入 AI 字幕时间轴歌词 */}
           <div className="lyrics" id="lyrics">
@@ -339,39 +247,14 @@ function ViewPlaying() {
           {/* 视频模式：左栏换为热门评论 */}
           <div className="np-comments">
             <h4>热门评论</h4>
-            <div id="cmt-list"></div>
+            <CmtList />
           </div>
         </div>
 
-        <div className="hot-comment">
-          <span className="hot-comment-avatar" id="hotCommentAvatar" aria-hidden="true"><span className="cdot"></span></span>
-          <span className="hot-comment-viewport" id="hotCommentViewport"><span id="hotCommentText">暂无热评</span></span>
-        </div>
+        <HotComment />
 
-        {/* 歌词模式：右侧大封面（JS 注入真实封面 img） */}
-        <div className="np-cover" id="npCover">
-          <svg viewBox="0 0 460 460">
-            <defs>
-              <linearGradient id="pc" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0" stopColor="#8a7a3e"/><stop offset=".5" stopColor="#4a5228"/><stop offset="1" stopColor="#20260f"/>
-              </linearGradient>
-              <radialGradient id="sun" cx=".72" cy=".3" r=".5">
-                <stop offset="0" stopColor="#ffe9a8" stopOpacity=".9"/><stop offset="1" stopColor="#ffe9a8" stopOpacity="0"/>
-              </radialGradient>
-            </defs>
-            <rect width="460" height="460" fill="url(#pc)"/>
-            <rect width="460" height="460" fill="url(#sun)"/>
-            <g fill="#161b0a" opacity=".85">
-              <rect x="60" y="0" width="16" height="460"/><rect x="150" y="-20" width="10" height="480"/>
-              <rect x="250" y="0" width="20" height="460"/><rect x="360" y="-10" width="12" height="470"/>
-            </g>
-            <g fill="#2c3a14" opacity=".8">
-              <ellipse cx="110" cy="120" rx="90" ry="46"/><ellipse cx="330" cy="90" rx="110" ry="50"/>
-              <ellipse cx="230" cy="200" rx="120" ry="44"/>
-            </g>
-            <path d="M0 400 Q 230 350 460 400 L 460 460 L 0 460Z" fill="#12180a"/>
-          </svg>
-        </div>
+        {/* 歌词模式：右侧大封面（数据来自 store 'np' slice） */}
+        <NpCover />
 
         {/* 视频模式：右侧播放 B 站原视频，高清档位使用 DASH 音视频双轨 */}
         <div className="np-video">
@@ -404,24 +287,10 @@ function ViewPlaying() {
                 </button>
               </div>
             </div>
-            <div className="vqual-menu" id="vQualityMenu" hidden={true}></div>
+            <VQualMenu />
           </div>
 
-          <div className="vinfo">
-            <h3 id="vTitle">—</h3>
-            <div className="vup">
-              <span className="ava" id="vUpAva" role="button" title="进入 UP 主主页"></span>
-              <span><b id="vUpName">—</b><small id="vUpFans"></small></span>
-              <button type="button" className="fol" id="vUpFol" data-fol="">+ 关注</button>
-            </div>
-            <div className="vstats">
-              <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M8 5v14l11-7z"/></svg><i id="vsPlay" style={{fontStyle:'normal'}}>—</i></span>
-              <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 6h16M4 12h10M4 18h13"/></svg><i id="vsDm" style={{fontStyle:'normal'}}>—</i> 弹幕</span>
-              <button type="button" className="vstat" id="vsLikeBtn"><svg width="15" height="14" viewBox="0 0 1143 1000" fill="currentColor" fillRule="evenodd"><g transform="translate(0,1000) scale(1,-1)"><path d="M613 1000H619Q726 981 726 893Q720 740 720 720H1006Q1121 720 1143 619V595Q997 30 929 30Q880 0 792 0H339Q327 0 327 12V714Q496 934 566 988Q587 1000 613 1000ZM179 720H238Q250 718 250 708V12Q250 0 238 0H155Q0 19 0 137V565Q16 714 137 714Q137 720 179 720Z"/></g></svg><i id="vsLike" style={{fontStyle:'normal'}}>—</i></button>
-              <button type="button" className="vstat" id="vsCoinBtn"><svg width="14" height="14" viewBox="0 0 1000 1000" fill="currentColor" fillRule="evenodd"><g transform="translate(0,1000) scale(1,-1)"><path d="M505 1000Q812 1000 969 677Q1000 580 1000 495Q1000 188 677 31Q580 0 495 0Q188 0 31 323Q0 420 0 505Q0 812 323 969Q420 1000 505 1000ZM281 771V750Q281 743 307 724H453Q464 722 464 714V661Q456 653 370 630Q240 564 240 385V375Q240 333 281 333Q303 340 313 359V385Q313 522 411 568Q421 573 458 578L464 568V224Q474 198 500 198Q526 198 536 224V568Q538 578 547 578Q655 578 688 417V359Q701 333 729 333Q757 333 760 385Q760 585 599 641Q536 652 536 661V714Q538 724 547 724H677Q703 724 714 750V755Q714 797 646 797H333Q293 797 281 771Z"/></g></svg>投币 <i id="vsCoin" style={{fontStyle:'normal'}}>—</i></button>
-              <button type="button" className="vstat" id="vsFavBtn" aria-haspopup="true" aria-expanded="false"><svg width="15" height="14" viewBox="0 0 1043 1000" fill="currentColor" fillRule="evenodd"><g transform="translate(0,1000) scale(1,-1)"><path d="M532 1000Q554 1000 695 696Q1038 651 1038 630Q1043 621 1043 609Q1043 589 804 359Q858 49 858 27Q826 0 820 0Q731 42 522 152H516Q248 5 228 5H212Q185 21 185 38Q185 61 239 364Q3 581 0 603V614Q0 660 228 674Q353 691 353 707Q491 998 505 1000Z"/></g></svg>收藏 <i id="vsFav" style={{fontStyle:'normal'}}>—</i></button>
-            </div>
-          </div>
+          <VDetail />
         </div>
 
         {/* 电台使用独立直播画面，不复用歌曲播放页。 */}
@@ -504,9 +373,7 @@ function SharedOverlays() {
             <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4h2.5v16H6zM20 5v14L9.5 12z"/></svg>
           </button>
           <span className="pp-title" id="ppTitle">未在播放</span>
-          <button type="button" className="pp-like" id="ppLike" aria-label="喜欢" title="喜欢">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20.4C7.1 16.5 3.7 13.2 3.7 9.6 3.7 7.1 5.7 5.1 8.1 5.1c1.5 0 3 .8 3.9 2 .9-1.2 2.4-2 3.9-2 2.4 0 4.4 2 4.4 4.5 0 3.6-3.4 6.9-8.3 10.8z"/></svg>
-          </button>
+          <PpLike />
           <button type="button" className="pp-step" id="ppNext" aria-label="下一首" title="下一首">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M15.5 4H18v16h-2.5zM4 5v14l10.5-7z"/></svg>
           </button>
@@ -563,132 +430,9 @@ function QueueDrawer() {
           <h3>播放队列</h3><small id="qMeta">0 首</small>
           <span className="close" onClick={() => window.biuUi?.closePanel()}><svg width="14" height="14" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" fill="none"><path d="M6 6l12 12M18 6L6 18"/></svg></span>
         </header>
-        <div className="qlist" id="qlist"></div>
+        <QueueList />
         <footer><span id="qMode">列表循环</span><span id="qClear">清空队列</span><span id="qLocate">定位当前</span></footer>
       </aside>
-    </>
-  );
-}
-
-function SettingsModal() {
-  return (
-    <>
-      {/* ============ 设置弹窗 ============ */}
-      <div className="modal-mask" onClick={(e) => { if (e.target === e.currentTarget) window.biuUi?.closePanel(); }}>
-        <div className="modal">
-          <h3>设置</h3>
-          <div className="mrow">
-            <div className="ml"><b>B 站账号</b><small id="authSubtitle">扫码或手机验证码安全登录</small></div>
-            <div className="mr auth-actions" id="authLoggedOut">
-              <button className="btn-ghost" id="btnQrLogin">扫码登录</button>
-              <button className="btn-ghost" id="btnCodeLogin">验证码</button>
-            </div>
-            <div className="mr auth-user" id="authLoggedIn" hidden={true}>
-              <img id="authFace" alt="" />
-              <b id="authName">已登录</b>
-              <button className="auth-logout" id="btnLogout">退出</button>
-            </div>
-          </div>
-          <div className="mrow">
-            <div className="ml"><b>在线音质</b><small>B 站音频流码率，无损需登录/大会员</small></div>
-            <div className="mr"><span className="mseg" id="segQuality"><button data-q="0">标准</button><button data-q="1" className="on">高品</button><button data-q="2">无损</button></span></div>
-          </div>
-          <div className="mrow">
-            <div className="ml"><b>视频清晰度</b><small>原视频模式默认清晰度</small></div>
-            <div className="mr"><span className="mseg" id="segVQuality"><button data-vq="64">720P</button><button data-vq="80" className="on">1080P</button><button data-vq="120">4K</button></span></div>
-          </div>
-          <div className="mrow">
-            <div className="ml"><b>弹幕</b><small>视频模式下默认开启弹幕</small></div>
-            <div className="mr"><span className="switch" id="swDanmaku"></span></div>
-          </div>
-          <div className="mrow">
-            <div className="ml"><b>同步观看记录</b><small>播放时把记录上报到 B 站历史，需登录</small></div>
-            <div className="mr"><span className="switch off" id="swSyncHistory"></span></div>
-          </div>
-          <div className="mrow">
-            <div className="ml"><b>背景模糊度</b><small>沉浸式封面背景的模糊强度</small></div>
-            <div className="mr"><span className="slider" id="slBlur"><i></i></span></div>
-          </div>
-          <div className="mrow">
-            <div className="ml"><b>桌面歌词</b><small>在屏幕上悬浮显示歌词</small></div>
-            <div className="mr"><span className="switch off" id="swLyric"></span></div>
-          </div>
-          <div className="mfoot">BIU PLAYER · v0.5.0 · 基于 BILIBILI 公开接口</div>
-        </div>
-      </div>
-    </>
-  );
-}
-
-function LoginModal() {
-  return (
-    <>
-      {/* ============ 登录弹窗：扫码 / 手机验证码 ============ */}
-      <div className="login-mask" id="qrLoginMask">
-        <div className="login-card">
-          <button className="login-close" id="btnCloseQr" aria-label="关闭">×</button>
-          <span className="login-kicker">BILIBILI CONNECT</span>
-          <div className="login-tabs" role="tablist">
-            <button className="on" id="tabQrLogin" role="tab" aria-selected="true">扫码登录</button>
-            <button id="tabSmsLogin" role="tab" aria-selected="false">验证码登录</button>
-          </div>
-          <div className="login-pane" id="paneQr">
-            <p>使用哔哩哔哩客户端扫码，并在手机上确认</p>
-            <div className="qr-shell" id="qrShell">
-              <img id="qrImage" alt="B 站登录二维码" />
-              <div className="qr-state" id="qrState">正在生成二维码…</div>
-            </div>
-            <div className="login-status" id="qrStatus">请使用哔哩哔哩客户端扫码</div>
-            <div className="login-buttons">
-              <button className="btn-primary" id="btnRefreshQr">刷新二维码</button>
-            </div>
-          </div>
-          <div className="login-pane" id="paneSms" hidden={true}>
-            <p>使用手机号 + 短信验证码登录，全程在应用内完成</p>
-            <div className="sms-form">
-              <label className="sms-field">
-                <span className="sms-prefix">+86</span>
-                <input id="smsPhone" type="tel" maxLength="11" placeholder="手机号" autocomplete="tel" />
-              </label>
-              <div className="sms-code-row">
-                <label className="sms-field">
-                  <input id="smsCode" type="text" inputMode="numeric" maxLength="6" placeholder="6 位验证码" autocomplete="one-time-code" />
-                </label>
-                <button className="btn-ghost" id="btnSmsSend" type="button">获取验证码</button>
-              </div>
-              <div className="geetest-slot" id="geetestSlot"></div>
-              <div className="login-status" id="smsStatus"></div>
-              <button className="btn-primary" id="btnSmsLogin" type="button">登录</button>
-            </div>
-          </div>
-          <small>登录凭证由 Electron 会话安全保存，不写入页面存储。</small>
-        </div>
-      </div>
-    </>
-  );
-}
-
-function PlDialog() {
-  return (
-    <>
-      {/* ============ 歌单新建 / 删除对话框 ============ */}
-      <div className="pl-dialog-mask" id="plDialogMask" hidden={true}>
-        <div className="pl-dialog" role="dialog" aria-modal="true">
-          <h3 id="plDialogTitle">新建歌单</h3>
-          <p id="plDialogMsg"></p>
-          <div className="pl-cpicker" id="plDialogCoverCard" role="button" aria-label="选择歌单封面" hidden={true}>
-            <span className="pl-cpicker-cover" id="plDialogCoverImg"></span>
-            <b className="pl-cpicker-name" id="plDialogCoverName">歌单</b>
-            <small className="pl-cpicker-hint">点击卡片，选择封面图片</small>
-          </div>
-          <input id="plDialogInput" maxLength="40" placeholder="歌单名称" autocomplete="off" />
-          <input type="file" id="plCoverFile" accept="image/*" hidden={true} />
-          <div className="pl-dialog-actions">
-            <button className="btn-ghost" id="plDialogCancel" type="button">取消</button>
-            <button className="btn-primary" id="plDialogOk" type="button">创建</button>
-          </div>
-        </div>
-      </div>
     </>
   );
 }
@@ -725,36 +469,6 @@ function SplitMask() {
             <button className="btn-primary" id="splitCreate" type="button">创建歌单</button>
           </div>
           <input type="file" id="splitFile" accept=".txt,.csv,.cue,.log,text/plain" hidden={true} />
-        </div>
-      </div>
-    </>
-  );
-}
-
-function LyricMask() {
-  return (
-    <>
-      {/* ============ 手动匹配歌词 / 歌词偏移面板 ============ */}
-      <div className="pl-dialog-mask" id="lyricMask" hidden={true}>
-        <div className="split-panel lyric-panel" role="dialog" aria-modal="true">
-          <h3>匹配歌词</h3>
-          <p id="lyricMatchHint">输入歌名（可带歌手）搜索 QQ 音乐 / 网易云，点选正确的歌曲替换当前歌词。</p>
-          <div className="lyric-match-row">
-            <input id="lyricMatchInput" className="pl-edit-input" placeholder="歌名 + 歌手" autocomplete="off" />
-            <button className="btn-ghost" id="lyricMatchGo" type="button">搜索</button>
-          </div>
-          <div className="lyric-cands" id="lyricCands"></div>
-          <div className="lyric-off-row">
-            <span className="lyric-off-label">歌词偏移</span>
-            <button className="btn-ghost" id="lyricOffDown" type="button">− 0.5s</button>
-            <b className="num" id="lyricOffVal">0.0s</b>
-            <button className="btn-ghost" id="lyricOffUp" type="button">+ 0.5s</button>
-            <button className="btn-ghost" id="lyricOffReset" type="button">重置</button>
-          </div>
-          <div className="pl-dialog-actions">
-            <button className="btn-ghost" id="lyricAuto" type="button">恢复自动歌词</button>
-            <button className="btn-primary" id="lyricClose" type="button">完成</button>
-          </div>
         </div>
       </div>
     </>

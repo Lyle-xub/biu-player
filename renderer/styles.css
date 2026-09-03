@@ -108,12 +108,12 @@ body {
     linear-gradient(rgba(10,11,8,.18), rgba(10,11,8,.34));
 }
 /* 漂移动画放在外层：内层模糊纹理只光栅化一次，外层纯 transform 由合成器承担，
-   避免全屏 blur(32px) 每帧重算（GPU 持续高负载的主要来源） */
+   避免全屏 blur(32px) 每帧重算（GPU 持续高负载的主要来源）。
+   注意不能加 will-change：常驻合成层会让覆盖其上的玻璃控件（抽屉/弹窗）backdrop-filter 失效 */
 .art-backdrop-drift {
   position: fixed; inset: -13%; z-index: 0; pointer-events: none;
   opacity: 0; transform: scale(1.12) translate3d(0,0,0);
   transition: opacity .8s var(--ease);
-  will-change: transform;
 }
 .art-backdrop {
   position: absolute; inset: 0;
@@ -143,8 +143,7 @@ body[data-view="playing"] .backdrop { opacity: .22; }
   background: var(--glass);
   border: 1px solid var(--glass-line);
   border-radius: var(--r-pill);
-  backdrop-filter: blur(24px) saturate(1.2);
-  -webkit-backdrop-filter: blur(24px) saturate(1.2);
+  -webkit-backdrop-filter: blur(24px) saturate(1.2); backdrop-filter: blur(24px) saturate(1.2);
 }
 .label-caps {
   font-size: var(--fs-micro); letter-spacing: .18em; text-transform: uppercase;
@@ -172,7 +171,7 @@ body[data-view="playing"] .backdrop { opacity: .22; }
 /* ============ 顶栏 ============ */
 .topbar-bg {
   position: fixed; top: 0; left: 0; right: 0; height: 104px; z-index: 3;
-  backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px);
   mask-image: linear-gradient(#000 55%, transparent);
   -webkit-mask-image: linear-gradient(#000 55%, transparent);
   pointer-events: none;
@@ -390,9 +389,9 @@ body[data-nav-dir="back"] .view.view-entering { animation-name: view-enter-back;
   content: ""; position: absolute; inset: 0; z-index: 0;
   border-radius: inherit; pointer-events: none;
   clip-path: inset(0 round 22px);
-  background: rgba(10,10,8,.5);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background: rgba(18,18,16,.38);
+  -webkit-backdrop-filter: blur(16px) saturate(1.6) brightness(1.08); backdrop-filter: blur(16px) saturate(1.6) brightness(1.08);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.16), inset 0 1px 0 rgba(255,255,255,.12);
 }
 .gcard .count > *, .card .count > * {
   position: relative; z-index: 1;
@@ -405,7 +404,7 @@ body[data-nav-dir="back"] .view.view-entering { animation-name: view-enter-back;
   font-size: var(--fs-micro); color: rgba(255,255,255,.85); line-height: 1.2;
 }
 .gcard .count-play { flex: none; width: 30px; height: 30px; display: grid; place-items: center;
-  border-radius: 50%; background: rgba(255,255,255,.17); }
+  border-radius: 50%; background: rgba(255,255,255,.22); }
 .gcard .count-play svg { width: 13px; height: 13px; }
 .gcard .count-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 加载占位只绘制底色和扫光，不反复模糊整张封面；解码完成后移除节点。 */
@@ -506,7 +505,7 @@ body[data-nav-dir="back"] .view.view-entering { animation-name: view-enter-back;
 /* 匹配候选下拉：fixed 定位（躲开列表滚动裁剪），玻璃拟态，含搜索框 + 候选列表 */
 .split-pop { position: fixed; z-index: 60; width: 300px; padding: 8px;
   border-radius: 14px; background: var(--glass-deep); border: 1px solid var(--glass-line);
-  backdrop-filter: blur(30px); -webkit-backdrop-filter: blur(30px);
+  -webkit-backdrop-filter: blur(30px); backdrop-filter: blur(30px);
   box-shadow: 0 24px 60px rgba(0,0,0,.5); animation: favpop-in .18s var(--ease); }
 .split-pop-search { width: 100%; box-sizing: border-box; border: 1px solid transparent;
   border-radius: 9px; background: rgba(255,255,255,.06); color: var(--text-1);
@@ -656,7 +655,8 @@ body[data-nav-dir="back"] .view.view-entering { animation-name: view-enter-back;
   background: transparent; border: 0; backdrop-filter: none; padding: 10px;
   transition: transform .58s cubic-bezier(.2,.92,.24,1), opacity .42s ease,
     filter .48s ease, box-shadow .45s ease;
-  will-change: transform, opacity;
+  /* 不能设 will-change：本机 Chromium GPU 合成下，will-change 祖先会让内部
+     backdrop-filter（.count 胶囊）直接不渲染模糊；过渡期间浏览器会自动提升合成层 */
   cursor: pointer;
 }
 .card .cover { position: relative; border-radius: calc(var(--r-card) - 8px); overflow: hidden;
@@ -687,15 +687,16 @@ body[data-nav-dir="back"] .view.view-entering { animation-name: view-enter-back;
   width: min(480px, calc(100vw - 160px)); min-width: 0; height: 74px; padding: 0;
   overflow: visible; transform-origin: center bottom; contain: layout style;
   background: transparent; border-color: transparent; box-shadow: none;
-  backdrop-filter: none; -webkit-backdrop-filter: none;
-  will-change: transform; pointer-events: none;
+  -webkit-backdrop-filter: none; backdrop-filter: none;
+  /* 不能设 will-change：会让 ::before 玻璃层的 backdrop-filter 失效 */
+  pointer-events: none;
   transition: transform .42s cubic-bezier(.18,.78,.24,1);
 }
 .progress-pill::before {
   content: ""; position: absolute; inset: 0; z-index: -1; border-radius: inherit;
   background: rgba(9,11,7,.48); border: 1px solid rgba(255,255,255,.1);
   box-shadow: 0 10px 28px rgba(0,0,0,.18);
-  backdrop-filter: blur(24px) saturate(1.2); -webkit-backdrop-filter: blur(24px) saturate(1.2);
+  -webkit-backdrop-filter: blur(24px) saturate(1.2); backdrop-filter: blur(24px) saturate(1.2);
   transform: scale3d(var(--pill-closed-x),var(--pill-closed-y),1); transform-origin: center bottom;
   will-change: transform; pointer-events: auto;
   transition: transform .46s cubic-bezier(.16,.86,.24,1), background .24s ease, box-shadow .32s ease;
@@ -1091,7 +1092,7 @@ body.is-playing .mini-player .mcover > .art { animation-play-state: running; }
     radial-gradient(ellipse at 17% 105%, rgba(255,224,150,.16), transparent 28%),
     linear-gradient(90deg, rgba(224,172,69,.10), transparent 33%, rgba(8,12,7,.16) 78%);
   box-shadow: inset 0 0 180px rgba(0,0,0,.34);
-  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
 }
 /* 模式切换：歌词 / 视频 */
 .mode-seg {
@@ -1165,7 +1166,7 @@ body.live-on .page-down { display: none; } /* 直播页已有 liveBack，不重�
 @keyframes pageDownIn { from { opacity: 0; transform: translateY(-10px) scale(.8); } }
 /* 这两个 fixed 按钮点击时会触发页面 view-transition，backdrop-filter 在快照中会闪一帧方形底块，
    小按钮上的毛玻璃肉眼无感，直接关掉；同时去掉 focus 描边，避免点击闪方框 */
-.home-btn, .page-down, .nav-back { backdrop-filter: none; -webkit-backdrop-filter: none; }
+.home-btn, .page-down, .nav-back { -webkit-backdrop-filter: none; backdrop-filter: none; }
 .home-btn:focus, .page-down:focus, .nav-back:focus,
 .home-btn:focus-visible, .page-down:focus-visible, .nav-back:focus-visible { outline: none; }
 .np-title.title-long { font-size: clamp(34px, 2.55vw, 56px); letter-spacing: .025em; }
@@ -1418,7 +1419,7 @@ body[data-view="playing"] .progress-pill::before { background: rgba(9,11,7,.48);
 /* —— 视频模式 —— */
 .np-left { transition: none; }
 .np-cover, .lyrics, .hot-comment, .np-video, .np-comments {
-  will-change: opacity, scale, translate;
+  /* 不能设 will-change：会让 .np-video 内 .vbar 等玻璃控件的 backdrop-filter 失效 */
   transition: opacity .34s ease, scale .46s var(--ease), translate .46s var(--ease),
     visibility 0s linear 0s;
 }

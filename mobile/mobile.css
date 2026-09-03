@@ -22,7 +22,7 @@
     padding: 6px 10px calc(7px + env(safe-area-inset-bottom));
     border-radius: 0; border: 0; border-top: 1px solid rgba(255,255,255,.09);
     background: rgba(9,11,7,.82);
-    backdrop-filter: blur(28px) saturate(1.2); -webkit-backdrop-filter: blur(28px) saturate(1.2);
+    -webkit-backdrop-filter: blur(28px) saturate(1.2); backdrop-filter: blur(28px) saturate(1.2);
     box-shadow: 0 -10px 32px rgba(0,0,0,.34);
   }
   #mainNav::before { display: none; } /* 桌面滑动指示器不用于标签栏形态 */
