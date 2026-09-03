@@ -6,6 +6,8 @@
  * - Hls：由 web/index.html 的 <script src="./vendor/hls.min.js"> 经典脚本提供
  */
 import '../../renderer/api.js';
+import '../../renderer/hot-comment-motion.js';
+import '../../renderer/player-sheet-motion.js';
 import BiuPlaybackSession from '../../renderer/playback-session.js';
 import '../../renderer/split-decode.js';
 

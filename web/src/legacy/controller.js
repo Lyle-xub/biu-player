@@ -80,23 +80,44 @@ function toast(msg) {
 
 /* ---------- 视图 / 面板控制 ---------- */
 const VIEW_ORDER = ['library', 'fav', 'radio', 'playlist', 'search', 'up', 'playing'];
-let lastNonPlayingView = 'library'; // 播放页「返回上一页」用
-let prevView = 'library';           // 全局「返回上一页」用（任意视图）
-function updateView(v) {
-  const curView = document.body.dataset.view;
-  if (curView && curView !== v) prevView = curView;
-  document.body.dataset.view = v;
-  if (v !== 'playing') {
-    setVideoTheater(false);
-    setLiveTheater(false);
-    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+// 栈顶是本次导航的目标页；返回只出栈，不把离开的页面重新压回历史。
+const viewHistory = [document.body.dataset.view || 'library'];
+let libraryScrollTop = 0;
+let viewNavigationToken = 0;
+
+function syncBackButtons() {
+  const unavailable = viewHistory.length < 2;
+  for (const id of ['navBack', 'npDownBtn', 'liveBack']) {
+    const button = $(id);
+    if (!button) continue;
+    button.disabled = unavailable;
+    button.setAttribute('aria-disabled', String(unavailable));
   }
-  if (v !== 'playing') lastNonPlayingView = v;
+}
+
+function goBack() {
+  if (viewHistory.length < 2) return;
+  viewHistory.pop();
+  go(viewHistory[viewHistory.length - 1], { back: true });
+}
+
+function resetPlayingViewMode() {
+  setVideoTheater(false);
+  setLiveTheater(false);
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  setVideoMode(false, false, true);
+}
+
+function updateView(v, { preservePlayingMode = false } = {}) {
+  const curView = document.body.dataset.view;
+  const libraryView = document.querySelector('.view-library');
+  if (curView === 'library' && libraryView) libraryScrollTop = libraryView.scrollTop;
+  document.body.dataset.view = v;
+  if (libraryView) libraryView.inert = v !== 'library';
+  if (v !== 'playing' && !preservePlayingMode) resetPlayingViewMode();
   // live-on 不随视图丢失：回到首页后播放控件仍按直播形态显示（不显示进度条）
   document.body.classList.toggle('live-on', !!(state.current && state.current.isLive));
-  const homeButton = $('homeBtn');
-  if (homeButton) homeButton.style.display = v === 'playing' ? 'grid' : 'none';
-  if (v !== 'playing') setVideoMode(false, false, true);
+  // 控件显隐交给 CSS，与背景和页面一起过渡，不在动画收尾时修改 display。
   document.querySelectorAll('#mainNav button').forEach((b) =>
     b.classList.toggle('on', b.dataset.v === v));
   try {
@@ -106,46 +127,44 @@ function updateView(v) {
     history.replaceState(null, '', url);
   } catch (e) { /* file:// 下某些环境不允许，忽略 */ }
   window.scrollTo(0, 0);
-  document.querySelectorAll('.view').forEach((s) => { s.scrollTop = 0; });
+  // display:none 时 scrollTop 不可靠，离开前记录，重新显示后恢复。
+  document.querySelectorAll('.view').forEach((s) => {
+    if (s !== libraryView) s.scrollTop = 0;
+  });
+  if (v === 'library' && libraryView) libraryView.scrollTop = libraryScrollTop;
 }
 
-function go(v) {
+function go(v, { back = false } = {}) {
+  if (!VIEW_ORDER.includes(v)) return;
+  // 快速连续导航先落定上次升降，避免旧回调把用户带回上一页。
+  window.BiuPlayerSheetMotion.cancel();
+
   const from = document.body.dataset.view || 'library';
-  if (!VIEW_ORDER.includes(v) || from === v) {
+  const navigationToken = ++viewNavigationToken;
+
+  // 在动画开始前更新逻辑历史，连续点击返回也能逐级出栈，不受延迟换页影响。
+  if (!back && viewHistory[viewHistory.length - 1] !== v) viewHistory.push(v);
+  syncBackButtons();
+  if (from === v) {
     updateView(v);
     return;
   }
-  document.body.dataset.navDir = VIEW_ORDER.indexOf(v) >= VIEW_ORDER.indexOf(from) ? 'forward' : 'back';
+  document.body.dataset.navDir = !back && VIEW_ORDER.indexOf(v) >= VIEW_ORDER.indexOf(from) ? 'forward' : 'back';
   closePanel(); // 切换视图时收掉抽屉（队列/设置），避免抽屉悬停在新页面上
-  const primaryViews = new Set(['library', 'fav', 'radio']);
-  const primarySwitch = primaryViews.has(from) && primaryViews.has(v);
-  // 搜索页不走快照过渡：大搜索框带 backdrop-filter，快照会闪/残留毛玻璃方块，改用实时动画
-  const searchInvolved = from === 'search' || v === 'search';
-  if (primarySwitch) {
-    // 主导航切换：顶部选中条滑动 + 页面按方向平移淡入（无模糊，避免闪白）
-    const view = document.querySelector('.view-' + v);
-    if (view && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      view.classList.remove('view-entering');
-      void view.offsetWidth;
-      view.classList.add('view-entering');
-      setTimeout(() => view.classList.remove('view-entering'), 460);
-    }
-    updateView(v);
-  } else if (document.startViewTransition && !searchInvolved && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
-    document.startViewTransition(() => updateView(v));
+  if (from === 'playing' || v === 'playing') {
+    window.BiuPlayerSheetMotion.start(from, v,
+      () => updateView(v, { preservePlayingMode: from === 'playing' }),
+      () => { if (v !== 'playing') resetPlayingViewMode(); });
   } else {
-    const view = document.querySelector('.view-' + v);
-    if (view) {
-      view.classList.remove('view-entering');
-      void view.offsetWidth;
-      view.classList.add('view-entering');
-      setTimeout(() => view.classList.remove('view-entering'), 460);
-    }
-    updateView(v);
+    window.BiuPlayerSheetMotion.enterPage(from, v, () => updateView(v));
   }
   // 进入搜索页：形变过渡落定后把焦点放进大搜索框，可直接输入
   if (v === 'search') {
-    setTimeout(() => { const i = $('searchInput'); if (i) i.focus({ preventScroll: true }); }, 240);
+    setTimeout(() => {
+      if (navigationToken !== viewNavigationToken || document.body.dataset.view !== 'search') return;
+      const i = $('searchInput');
+      if (i) i.focus({ preventScroll: true });
+    }, from === 'playing' ? 580 : 240);
   }
 }
 
@@ -188,9 +207,10 @@ function activateShelfCard(card) {
 
 function initShelfCarousel() {
   const shelf = document.querySelector('.shelf');
-  if (!shelf) return;
+  if (!shelf || shelf.dataset.carouselReady === 'true') return;
   const cards = [...shelf.querySelectorAll('.card')];
   if (!cards.length) return;
+  shelf.dataset.carouselReady = 'true';
   let active = 0;
   let pointerId = null;
   let startX = 0;
@@ -207,11 +227,12 @@ function initShelfCarousel() {
   ];
   const step = () => Math.min(450, Math.max(300, shelf.clientWidth * .37));
   const render = (offset = 0, animate = true) => {
+    if (!shelf.clientWidth) return;
     const spacing = step();
     // 位移对齐到物理像素，避免半像素抗锯齿导致的整体发虚
     const dpr = window.devicePixelRatio || 1;
     const snap = (v) => Math.round(v * dpr) / dpr;
-    shelf.classList.toggle('dragging', !animate);
+    shelf.classList.toggle('positioning', !animate);
     cards.forEach((card, index) => {
       const x = snap((index - active) * spacing + offset);
       const distance = Math.min(2, Math.abs(x) / spacing);
@@ -258,6 +279,7 @@ function initShelfCarousel() {
     if (event.pointerId !== pointerId) return;
     if (shelf.hasPointerCapture(pointerId)) shelf.releasePointerCapture(pointerId);
     pointerId = null;
+    shelf.classList.remove('dragging');
     const velocity = dragX / Math.max(80, performance.now() - startTime);
     const threshold = Math.min(84, step() * .22);
     if (didDrag) {
@@ -292,7 +314,11 @@ function initShelfCarousel() {
     }
   }, true);
   shelf.addEventListener('wheel', (event) => {
-    const delta = Math.abs(event.deltaX) > 3 ? event.deltaX : (event.shiftKey ? event.deltaY : 0);
+    // 触控板纵向手势通常带少量 deltaX，只有横向占主导才接管滚动。
+    if (event.ctrlKey) return;
+    const horizontal = Math.abs(event.deltaX) > Math.abs(event.deltaY);
+    const delta = horizontal && Math.abs(event.deltaX) > 3
+      ? event.deltaX : (event.shiftKey ? event.deltaY : 0);
     if (!delta) return;
     event.preventDefault();
     if (wheelLocked) return;
@@ -300,7 +326,7 @@ function initShelfCarousel() {
     select(active + (delta > 0 ? 1 : -1));
     setTimeout(() => { wheelLocked = false; }, 360);
   }, { passive: false });
-  window.addEventListener('resize', () => render(0, true));
+  window.addEventListener('resize', () => render(0, false));
   cards.forEach((card) => {
     card.tabIndex = 0;
     card.setAttribute('role', 'button');
@@ -314,6 +340,41 @@ function initShelfCarousel() {
   // 初始定位不做动画：否则卡片会从「无 transform 的中心堆叠态」带过渡飞出，启动时卡一下
   active = 0;
   render(0, false);
+}
+
+// 封面 URL 不变时复用原节点；更换封面先解码，完成前保留旧图与右下角胶囊。
+const shelfCoverRequests = new WeakMap();
+function setShelfCover(cardId, pic) {
+  const cover = $(cardId)?.querySelector('.cover');
+  if (!cover || !pic) return;
+  const artSelector = ':scope > img, :scope > svg';
+  const art = cover.querySelector(artSelector);
+  if (art?.getAttribute('src') === pic) {
+    shelfCoverRequests.delete(cover);
+    return;
+  }
+  if (shelfCoverRequests.get(cover)?.pic === pic) return;
+  const request = { pic };
+  shelfCoverRequests.set(cover, request);
+  const img = new Image();
+  img.alt = '';
+  img.decoding = 'async';
+  const fail = () => {
+    if (shelfCoverRequests.get(cover) === request) shelfCoverRequests.delete(cover);
+  };
+  const reveal = () => {
+    if (shelfCoverRequests.get(cover) !== request) return;
+    const previous = cover.querySelector(artSelector);
+    if (previous) previous.replaceWith(img);
+    else cover.prepend(img);
+    shelfCoverRequests.delete(cover);
+  };
+  img.onload = () => {
+    if (img.decode) img.decode().then(reveal, fail);
+    else reveal();
+  };
+  img.onerror = fail;
+  img.src = pic;
 }
 
 function openPanel(p) { closePanel(); document.body.classList.add('panel-' + p); }
@@ -491,7 +552,7 @@ async function switchDataNs(ns) {
     }
   }
   await loadBuckets();
-  try { await loadLibrary(); } catch (e) {}
+  try { await loadLibrary({ force: true }); } catch (e) {}
   renderFavButtons();
 }
 
@@ -1889,6 +1950,7 @@ function toggleLike(t) {
   }
   saveLikes();
   refreshLikeUI();
+  renderMyPlaylists();
   publish('likes', likes.slice());
 }
 // 收藏数变化后刷新相关 UI
@@ -2237,7 +2299,7 @@ function fillPlayingBase(t) {
   } else {
     $('mcArtHolder').innerHTML = DEFAULT_MC_ART;
   }
-  $('artBackdrop').style.backgroundImage = t.pic ? `url(${JSON.stringify(t.pic)})` : '';
+  window.BiuPlayerSheetMotion.setArtwork(t.pic);
   requestAnimationFrame(syncPlayingHeaderLayout);
   $('ppTitle').textContent = t.title || '未在播放';
   // 移动端迷你播放条封面（桌面端隐藏）
@@ -2258,7 +2320,7 @@ function fillPlayingDetail(d) {
   if (d.pic && state.current && !state.current.pic) {
     state.current.pic = d.pic.replace(/^http:/, 'https:');
     patchSlice('np', { cover: { pic: state.current.pic } });
-    $('artBackdrop').style.backgroundImage = `url(${JSON.stringify(state.current.pic)})`;
+    window.BiuPlayerSheetMotion.setArtwork(state.current.pic);
     const ppCover = $('ppCover');
     if (ppCover && ppCover.hidden) { ppCover.src = state.current.pic; ppCover.hidden = false; }
   }
@@ -2305,7 +2367,8 @@ let hotCommentRotateTimer = null;
 let hotCommentFetchTimer = null;
 
 function clearHotCommentRotation() {
-  clearInterval(hotCommentRotateTimer);
+  clearTimeout(hotCommentRotateTimer);
+  hotCommentMotion?.clear();
   clearInterval(hotCommentFetchTimer);
   hotCommentRotateTimer = null;
   hotCommentFetchTimer = null;
@@ -2313,52 +2376,51 @@ function clearHotCommentRotation() {
   hotCommentIndex = 0;
 }
 
+let hotCommentMotion = null;
+let hotCommentShownAt = 0;
+
+function updateHotComment(data, { animate = true } = {}) {
+  const pill = document.querySelector('.hot-comment');
+  if (!pill) return;
+  if (!hotCommentMotion) hotCommentMotion = window.BiuHotCommentMotion.create(pill);
+  hotCommentMotion.update(data, (next) => {
+    hotCommentShownAt = Date.now();
+    patchSlice('hotComment', next);
+  }, { animate });
+}
+
 function setHotCommentText(message) {
-  patchSlice('hotComment', { text: message || '暂无热评' });
-  requestAnimationFrame(() => {
-    const text = $('hotCommentText');
-    const viewport = $('hotCommentViewport');
-    if (!text || !viewport) return;
-    text.classList.remove('scrolling');
-    text.style.removeProperty('--marquee-distance');
-    text.style.removeProperty('--marquee-duration');
-    const overflow = Math.ceil(text.scrollWidth - viewport.clientWidth);
-    if (overflow > 6) {
-      text.style.setProperty('--marquee-distance', `${-overflow}px`);
-      text.style.setProperty('--marquee-duration', `${Math.max(8, Math.min(22, 6 + overflow / 24))}s`);
-      text.classList.add('scrolling');
-    }
-  });
+  updateHotComment({ text: message || '暂无热评', avatar: null, seed: null, uname: null }, { animate: false });
 }
 
 function renderHotComment(index = 0) {
   if (!hotComments.length) {
-    patchSlice('hotComment', { avatar: null, seed: null, uname: null });
     setHotCommentText('暂无热评');
     return;
   }
   hotCommentIndex = ((index % hotComments.length) + hotComments.length) % hotComments.length;
   const item = hotComments[hotCommentIndex];
-  patchSlice('hotComment', {
+  updateHotComment({
+    text: item.message || '暂无热评',
     avatar: item.avatar || null,
     seed: item.avatar ? null : (item.seed || 94 + hotCommentIndex * 3),
     uname: item.uname || '评论用户',
   });
-  setHotCommentText(item.message);
-  const pill = document.querySelector('.hot-comment');
-  pill.classList.remove('hot-swap');
-  void pill.offsetWidth;
-  pill.classList.add('hot-swap');
 }
 
 function scheduleHotCommentRotation(t) {
-  clearInterval(hotCommentRotateTimer);
+  clearTimeout(hotCommentRotateTimer);
   clearInterval(hotCommentFetchTimer);
-  if (hotComments.length > 1) {
-    hotCommentRotateTimer = setInterval(() => {
-      if (state.current === t) renderHotComment(hotCommentIndex + 1);
-    }, 9000);
-  }
+  const rotate = () => {
+    if (state.current !== t) return;
+    const remaining = (hotCommentMotion?.dwellTime || 9000) - (Date.now() - hotCommentShownAt);
+    if (remaining <= 0 && hotComments.length > 1 && !document.hidden
+        && document.body.dataset.view === 'playing' && !videoModeOn()) {
+      renderHotComment(hotCommentIndex + 1);
+    }
+    hotCommentRotateTimer = setTimeout(rotate, Math.max(1000, remaining > 0 ? remaining : 9000));
+  };
+  hotCommentRotateTimer = setTimeout(rotate, 9000);
   hotCommentFetchTimer = setInterval(() => {
     if (state.current === t) loadComments(t, { schedule: false, silent: true });
   }, 60000);
@@ -2369,19 +2431,30 @@ async function loadComments(t, { schedule = true, silent = false } = {}) {
   try {
     const replies = await api.replies(t.aid);
     if (state.current !== t) return;
+    const previous = hotComments[hotCommentIndex];
     hotComments = replies.map((reply, index) => ({ ...reply, seed: reply.seed || 94 + index * 3 }));
-    hotCommentIndex = 0;
-    renderHotComment(0);
+    // 静默刷新保留正在阅读的评论，相同内容不打断滚动，也不重播过渡。
+    const retained = silent && previous
+      ? hotComments.findIndex((reply) => reply.uname === previous.uname && reply.message === previous.message)
+      : -1;
+    renderHotComment(retained >= 0 ? retained : 0);
     if (schedule) scheduleHotCommentRotation(t);
     publish('comments', { list: hotComments });
   } catch (e) {
-    if (!silent) setHotCommentText('热评加载失败');
+    if (state.current === t && !silent) setHotCommentText('热评加载失败');
   }
 }
 
 /* ---------- 歌词：B 站 AI 字幕时间轴 + Folia Monet 逐词扫光复刻 ---------- */
 let lyrics = [];   // [{ from, to, text, interlude?, tokens?: [{text, t0, t1, timed}] }]
 let lastLi = -1;
+let lyricVisualsDirty = true;
+
+function lyricVisualsVisible() {
+  return !document.hidden
+    && (document.body.dataset.view === 'playing' || !!document.body.dataset.playerSheet)
+    && !videoModeOn() && !state.current?.isLive;
+}
 let lyricManualAnchor = null;
 let lyricWheelAccumulator = 0;
 let lyricWheelDirection = 0;
@@ -2855,22 +2928,29 @@ async function loadLyrics(t) {
 
 function syncLyric(force) {
   if (!lyrics.length) return;
+  const visible = lyricVisualsVisible();
+  // 首页不绘制歌词扫光。桌面歌词独立保留时钟/换行，不查询或修改隐藏页面的 DOM。
+  if (!visible && !deskLyricOn) { lyricVisualsDirty = true; return; }
   // 同步时钟 = 播放时间 + 该曲目的手动歌词偏移
   const cur = activeMedia().currentTime + lyricOffsetOf(state.current);
-  const box = $('lyrics');
-  const lineEls = box.querySelectorAll('.line');
   let idx = -1;
   for (let i = 0; i < lyrics.length; i++) {
     if (lyrics[i].from <= cur + 0.05) idx = i;
     else break;
   }
+  const changed = idx !== lastLi;
+  lastLi = idx;
+  if (changed || force) pushDeskLyric(idx >= 0 ? lyrics[idx] : null);
+  if (!visible) { lyricVisualsDirty = true; return; }
   if (idx >= 0) {
     // 活跃行逐词扫光；上一行保留发光尾部衰减
     updateMonetLineWords(idx, cur, true);
     if (idx > 0) updateMonetLineWords(idx - 1, cur, false);
   }
-  if (idx === lastLi && !force) return;
-  lastLi = idx;
+  if (!changed && !force && !lyricVisualsDirty) return;
+  const resume = lyricVisualsDirty;
+  lyricVisualsDirty = false;
+  const lineEls = $('lyrics').querySelectorAll('.line');
   // 封面取色异步落地后 --art-1 会变，行切换时刷新一次高亮色
   const accentRgb = resolveMonetAccentRgb();
   monetLineStates.forEach((st) => { st.accentRgb = accentRgb; });
@@ -2881,10 +2961,7 @@ function syncLyric(force) {
     if (i !== idx && i !== idx - 1) resetMonetLineWords(i, idx >= 0 && i < idx);
   });
   if (idx >= 0 && lineEls[idx]) {
-    scrollLyricTo(lyricManualAnchor ?? idx, !!force);
-    pushDeskLyric(lyrics[idx]);
-  } else {
-    pushDeskLyric(null);
+    scrollLyricTo(lyricManualAnchor ?? idx, !!force || resume);
   }
 }
 
@@ -3347,7 +3424,9 @@ function lyricFrame() {
       && isFinite(media.currentTime) && media.currentTime >= segNow.to - 0.06) {
     handleSegmentEnd(media, segNow);
   }
-  if (lyrics.length && !media.paused) syncLyric();
+  const visualsVisible = lyricVisualsVisible();
+  if (!visualsVisible) lyricVisualsDirty = true;
+  if (lyrics.length && (!media.paused || (visualsVisible && lyricVisualsDirty))) syncLyric();
   syncDanmaku();
   // 桌面歌词时钟：150ms 一次对齐播放位置，扫光由歌词窗本地插值渲染
   const now = performance.now();
@@ -3414,6 +3493,8 @@ function activateSpectrum() {
 }
 
 function renderSpectrum(now) {
+  // 112 根柱子每帧两次样式写入只在歌词页可见时执行，音频链路不受影响。
+  if (!lyricVisualsVisible()) { requestAnimationFrame(renderSpectrum); return; }
   const media = activeMedia();
   const playing = !!media && !media.paused && !media.ended;
   if (playing) spectrumSettled = false;
@@ -3546,8 +3627,7 @@ function recordHistory(t) {
     api.historyReport(t, Math.max(0, Math.round(t.from || 0))).catch(() => {});
   }
   // 首页轮播的历史卡片封面同步成最近播放封面
-  const card = $('cardHistory');
-  if (card && t.pic) card.querySelector('.cover').innerHTML = `<img src="${esc(t.pic)}" alt="">`;
+  setShelfCover('cardHistory', t.pic);
 }
 
 function historyPlaylist() {
@@ -3877,7 +3957,9 @@ function renderMyPlaylists() {
 
 /* ---------- 歌单库 ---------- */
 let libraryLoadToken = 0;
-let libraryLoadedAt = 0;
+let libraryLoaded = false;
+let libraryLocalReady = false;
+let libraryLoadPromise = null;
 let recommendationLoading = false;
 let recommendationUsesFeed = false;
 
@@ -3917,34 +3999,77 @@ async function loadMoreRecommendations() {
       loader.textContent = '这一批暂无新音乐，继续滚动刷新';
     }
   } catch (error) {
+    if (generation !== libraryLoadToken) return;
     console.error('追加音乐推荐失败', error);
     loader.textContent = '加载失败，继续滚动重试';
   } finally {
-    recommendationLoading = false;
-    loader.classList.remove('loading');
+    if (generation === libraryLoadToken) {
+      recommendationLoading = false;
+      loader.classList.remove('loading');
+    }
   }
 }
 
 function initRecommendationInfiniteScroll() {
   const view = document.querySelector('.view-library');
+  let frame = 0, idleTimer = 0;
+  const finishScroll = () => {
+    clearTimeout(idleTimer);
+    view.classList.remove('is-scrolling');
+  };
   const maybeLoad = () => {
+    frame = 0;
     if (document.body.dataset.view !== 'library') return;
     if (view.scrollHeight - view.scrollTop - view.clientHeight < 520) loadMoreRecommendations();
   };
-  view.addEventListener('scroll', maybeLoad, { passive: true });
+  view.addEventListener('scroll', () => {
+    if (document.body.dataset.view !== 'library') return;
+    if (!view.classList.contains('is-scrolling')) view.classList.add('is-scrolling');
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(finishScroll, 160);
+    // 同一帧的多个滚动事件只读一次布局尺寸。
+    if (!frame) frame = requestAnimationFrame(maybeLoad);
+  }, { passive: true });
+  view.addEventListener('scrollend', finishScroll, { passive: true });
   $('recLoader').addEventListener('click', loadMoreRecommendations);
 }
 
-async function loadLibrary() {
-  refreshLikeUI();
-  // 我的歌单：我喜欢 + 热榜 + 本地自建歌单 + 新建入口
-  renderMyPlaylists();
-  // 60 秒内已加载过推荐流：保留现有 DOM 与封面缓存，回到首页不再整页重载
-  if (state.recommendations.length && Date.now() - libraryLoadedAt < 60000) return;
-
+async function loadLibrary({ force = false } = {}) {
+  // 返回主页复用已有内容；首屏请求进行中时也不能清空卡片或重复请求。
+  if (!force) {
+    if (libraryLoadPromise) return libraryLoadPromise;
+    if (libraryLoaded) return;
+  }
   const loadToken = ++libraryLoadToken;
+  if (force) {
+    libraryLoaded = false;
+    libraryLocalReady = false;
+    state.recommendations = [];
+    state.ranking = [];
+    state.recommendFreshIdx = 0;
+    libraryScrollTop = 0;
+    document.querySelector('.view-library').scrollTop = 0;
+  }
+  // 本地歌单不依赖推荐请求成功；失败重试也不能重建这块区域。
+  // 后续收藏、新建、编辑与删除各自更新卡片，不在页面导航时重新发布数据。
+  if (!libraryLocalReady) {
+    refreshLikeUI();
+    renderMyPlaylists();
+    libraryLocalReady = true;
+  }
+  const request = fetchLibrary(loadToken);
+  libraryLoadPromise = request;
+  try {
+    return await request;
+  } finally {
+    if (libraryLoadPromise === request) libraryLoadPromise = null;
+  }
+}
+
+async function fetchLibrary(loadToken) {
   recommendationLoading = false;
   recommendationUsesFeed = false;
+  $('recLoader').classList.remove('loading');
 
   $('recSource').textContent = 'B 站个性化音乐信息流';
   $('recLoader').textContent = '正在准备推荐流…';
@@ -3981,11 +4106,11 @@ async function loadLibrary() {
     ? 'B 站个性化音乐信息流' : '音乐区热榜兜底';
   // 保持推荐流原始顺序，并在滚动到底部时继续追加新一批。
   renderRecommendationCards(true);
-  libraryLoadedAt = Date.now();
+  libraryLoaded = true;
   $('recLoader').textContent = recommendationUsesFeed ? '向下滚动加载更多' : '当前显示音乐区热榜';
   // 卡带侧卡换上热榜真实封面；历史卡用最近播放封面（无记录时保留渐变占位）
-  if (state.ranking[0] && state.ranking[0].pic) $('cardRank').querySelector('.cover').innerHTML = `<img src="${esc(state.ranking[0].pic)}" alt="">`;
-  if (playHistory[0] && playHistory[0].pic) $('cardHistory').querySelector('.cover').innerHTML = `<img src="${esc(playHistory[0].pic)}" alt="">`;
+  setShelfCover('cardRank', state.ranking[0]?.pic);
+  setShelfCover('cardHistory', playHistory[0]?.pic);
 }
 
 /* ---------- 收藏夹 ---------- */
@@ -4961,10 +5086,11 @@ function init() {
   $('btnVideo').addEventListener('focus', primeVideoStream);
   $('homeBtn').addEventListener('click', () => go('library'));
   // 全局「返回上一页」：仅顶栏按钮（歌单/收藏页标题旁的返回按钮已去除）
-  $('navBack').addEventListener('click', () => go(prevView || 'library'));
+  $('navBack').addEventListener('click', goBack);
   // 歌词页 / 原视频页共用的顶部下降返回钮（与主页按钮同排）
-  $('npDownBtn').addEventListener('click', () => go(lastNonPlayingView || 'library'));
-  $('liveBack').addEventListener('click', () => go(lastNonPlayingView));
+  $('npDownBtn').addEventListener('click', goBack);
+  $('liveBack').addEventListener('click', goBack);
+  syncBackButtons();
   document.addEventListener('pointerdown', activateSpectrum, { capture: true });
   audio.addEventListener('play', activateSpectrum);
   video.addEventListener('play', activateSpectrum);
@@ -5072,10 +5198,12 @@ function init() {
   initVideoActions();
   // 卡带占位封面（mock 模式下的渐变封面）
   document.querySelectorAll('[data-cover]').forEach((el) => {
-    el.innerHTML = coverSVG(+el.dataset.cover);
+    if (!el.querySelector(':scope > img, :scope > svg')) {
+      el.insertAdjacentHTML('afterbegin', coverSVG(+el.dataset.cover));
+    }
   });
 
-  // 视图懒加载：进入时刷新对应数据
+  // 视图懒加载：主页已有内容时直接复用，不因导航刷新推荐。
   const navLoad = { library: loadLibrary, fav: loadFav, radio: loadRadio };
   document.querySelectorAll('#mainNav button').forEach((b) =>
     b.addEventListener('click', () => navLoad[b.dataset.v] && navLoad[b.dataset.v]()));

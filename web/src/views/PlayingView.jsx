@@ -3,7 +3,7 @@ import { useSlice } from '../store.js';
 
 /* 播放页 / 原视频页数据区组件集合：DOM 由组件拥有，controller 只 publish 数据。
  * 所有 id 保留（init 里的 $() 绑定与命令式逻辑继续工作）；
- * marquee/hot-swap/硬币飞起等动画 class 仍由 controller 直接操作（组件不渲染这些 class，React 不会回写）。 */
+ * marquee/硬币飞起等动画 class 仍由 controller 直接操作（组件不渲染这些 class，React 不会回写）。 */
 
 /* 默认大封面：原 shell npCover 骨架（旧版 DEFAULT_NP_COVER 的来源） */
 const defaultNpCover = (
@@ -56,7 +56,7 @@ export function NpInfo() {
           <span>分切</span>
         </button>
         <button type="button" className="np-src-split" id="btnDownload" title="下载原视频" aria-haspopup="true" aria-expanded="false">
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3v12m0 0 5-5m-5-5-5-5M4 21h16"/></svg>
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3V15M7 10L12 15L17 10M4 21H20"/></svg>
           <span>下载</span>
         </button>
         <button type="button" className="np-src-split" id="btnLyricMatch" title="手动匹配歌词 / 调整歌词时间">
@@ -93,17 +93,19 @@ export function NpCover() {
   );
 }
 
-/* 热评胶囊：头像与文本来自 slice；scrolling/marquee 样式与 hot-swap 动画 class 由 controller 命令式控制 */
+/* 热评胶囊：头像与文本一次发布；内容过渡由共享动画控制器负责。 */
 export function HotComment() {
   const hc = useSlice('hotComment');
   return (
     <div className="hot-comment">
+      <div className="hot-comment-content">
       <span className="hot-comment-avatar" id="hotCommentAvatar" aria-hidden="true">{hc && (hc.avatar || hc.seed != null)
         ? (hc.avatar
           ? <img src={hc.avatar} alt={hc.uname || '评论用户'} />
           : <span style={{ display: 'contents' }} dangerouslySetInnerHTML={{ __html: window.coverSVG(hc.seed) }} />)
         : <span className="cdot"></span>}</span>
-      <span className="hot-comment-viewport" id="hotCommentViewport"><span id="hotCommentText">{hc ? hc.text : '暂无热评'}</span></span>
+      <span className="hot-comment-viewport" id="hotCommentViewport"><span className="hot-comment-text" id="hotCommentText">{hc ? hc.text : '暂无热评'}</span></span>
+      </div>
     </div>
   );
 }

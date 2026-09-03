@@ -1,26 +1,41 @@
-import React, { useState } from 'react';
-import { useSlice } from '../store.js';
+import React, { memo, useCallback, useRef, useState } from 'react';
+import { peek, useSlice } from '../store.js';
 
 /* 通用歌单卡片：DOM 结构与 controller 的 gcardHTML 完全一致
  * （cover 内依次为 封面 / badge / count 胶囊 / cover-loading 占位）。 */
 export function GCard({ title, meta, cover, badge, id, extraAttrs, onClick }) {
-  const isImg = cover && cover.type === 'img';
-  const [ready, setReady] = useState(!isImg);
-  const reveal = () => setReady(true);
-  const decodeThenReveal = (img) => {
-    if (!img.decode) { reveal(); return; }
-    img.decode().then(reveal, reveal);
-  };
+  // React 元素也有 type: 'svg' / 'img'，必须先与封面数据描述对象区分。
+  const isElement = React.isValidElement(cover);
+  const isImg = !isElement && cover && cover.type === 'img';
+  const src = isImg ? cover.src : null;
+  const [readySrc, setReadySrc] = useState(null);
+  const ready = !isImg || readySrc === src;
+  const pendingDecode = useRef(null);
+  const imageNode = useRef(null);
+  const reveal = useCallback(() => setReadySrc(src), [src]);
+  const decodeThenReveal = useCallback((img) => {
+    // ref 和 load 都可能命中缓存，只解码一次；追加卡片不能重新解码旧封面。
+    if (pendingDecode.current?.img === img && pendingDecode.current.src === src) return;
+    const request = { img, src };
+    pendingDecode.current = request;
+    const done = () => {
+      if (pendingDecode.current === request && imageNode.current === img) setReadySrc(src);
+    };
+    if (!img.decode) { done(); return; }
+    img.decode().then(done, done);
+  }, [src]);
   // 缓存命中的图片不会触发 load 事件，mount 时按 complete 状态直接处理。
-  const imgRef = (img) => {
-    if (!img || !img.complete) return;
+  const imgRef = useCallback((img) => {
+    imageNode.current = img;
+    if (!img) { pendingDecode.current = null; return; }
+    if (!img.complete) return;
     if (img.naturalWidth) decodeThenReveal(img);
     else reveal(); // 缓存的失败图片可能已经触发过 error，不能永远保留加载层。
-  };
+  }, [decodeThenReveal, reveal]);
   return (
     <div className={`gcard${ready ? ' cover-ready' : ''}`} id={id} {...extraAttrs} onClick={onClick}>
       <div className="cover">
-        {isImg
+        {isElement ? cover : isImg
           ? <img src={cover.src} loading={cover.lazy ? 'lazy' : undefined}
               decoding={cover.lazy ? 'async' : undefined} alt=""
               ref={imgRef} onLoad={(e) => decodeThenReveal(e.currentTarget)} onError={reveal} />
@@ -87,6 +102,22 @@ export function GridMy() {
   );
 }
 
+// 父列表追加时只挂载新卡片。回调读取最新队列，避免 memo 后仍播放旧的分页数据。
+const RecommendationCard = memo(function RecommendationCard({ track: t, index }) {
+  return (
+    <GCard title={t.title}
+      meta={t.recommendationReason || t.up || t.tname || '音乐'}
+      extraAttrs={{ 'data-ri': index }}
+      cover={t.pic
+        ? { type: 'img', src: t.pic, lazy: true }
+        : { type: 'svg', html: window.coverSVG(t.seed || 1, 400) }}
+      onClick={() => {
+        const tracks = peek('lib.rec')?.tracks;
+        if (tracks?.[index]) window.biuActions.setQueue(tracks, '为你推荐 · Bilibili', index);
+      }} />
+  );
+});
+
 export function GridRec() {
   const data = useSlice('lib.rec');
   return (
@@ -94,13 +125,7 @@ export function GridRec() {
       {data && (data.hint
         ? <div className="list-hint">{data.hint}</div>
         : data.tracks.map((t, i) => (
-          <GCard key={`rec-${t.bvid || t.title}`} title={t.title}
-            meta={t.recommendationReason || t.up || t.tname || '音乐'}
-            extraAttrs={{ 'data-ri': i }}
-            cover={t.pic
-              ? { type: 'img', src: t.pic, lazy: true }
-              : { type: 'svg', html: window.coverSVG(t.seed || 1, 400) }}
-            onClick={() => window.biuActions.setQueue(data.tracks, '为你推荐 · Bilibili', i)} />
+          <RecommendationCard key={`rec-${t.bvid || t.title}`} track={t} index={i} />
         )))}
     </div>
   );

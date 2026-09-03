@@ -252,7 +252,7 @@
           <span>分切</span>
         </button>
         <button type="button" class="np-src-split" id="btnDownload" title="下载原视频" aria-haspopup="true" aria-expanded="false">
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 5-5m-5 5-5-5M4 21h16"/></svg>
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3V15M7 10L12 15L17 10M4 21H20"/></svg>
           <span>下载</span>
         </button>
         <button type="button" class="np-src-split" id="btnLyricMatch" title="手动匹配歌词 / 调整歌词时间">
@@ -301,8 +301,10 @@
   </div>
 
   <div class="hot-comment">
+    <div class="hot-comment-content">
     <span class="hot-comment-avatar" id="hotCommentAvatar" aria-hidden="true"><span class="cdot"></span></span>
-    <span class="hot-comment-viewport" id="hotCommentViewport"><span id="hotCommentText">暂无热评</span></span>
+    <span class="hot-comment-viewport" id="hotCommentViewport"><span class="hot-comment-text" id="hotCommentText">暂无热评</span></span>
+    </div>
   </div>
 
   <!-- 歌词模式：右侧大封面（JS 注入真实封面 img） -->
@@ -679,6 +681,8 @@
 <script src="vendor/hls.min.js"></script>
 <script src="api.js"></script>
 <script src="playback-session.js"></script>
+<script src="hot-comment-motion.js"></script>
+<script src="player-sheet-motion.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

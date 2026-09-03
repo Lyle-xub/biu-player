@@ -26,7 +26,7 @@ export default function PlaylistView() {
         <div className="pl-cover" id="plCover">
           {pl && pl.cover
             ? (pl.cover.pic
-              ? <img src={pl.cover.pic} loading="lazy" decoding="async" alt="" />
+              ? <img src={pl.cover.pic} loading="eager" decoding="async" alt="" />
               : <span style={{ display: 'contents' }} dangerouslySetInnerHTML={{ __html: window.coverSVG(pl.cover.seed || 1, 400) }} />)
             : defaultCover}
           <span className="pl-cover-edit" id="plCoverEdit" title="更换封面"

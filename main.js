@@ -1,5 +1,5 @@
 /* Biu Player · 主进程 */
-const { app, BrowserWindow, ipcMain, net, session, protocol, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, net, session, protocol, dialog, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -278,7 +278,22 @@ function createWindow() {
 app.whenReady().then(() => {
   // 开发态 Dock 图标（打包后由 app bundle 提供）
   if (process.platform === 'darwin' && !app.isPackaged) {
-    app.dock.setIcon(path.join(__dirname, 'renderer/assets/icon.png'));
+    // Dock 按整张画布缩放；为满幅图标补上约 10% 的透明边距，与系统图标视觉大小一致。
+    // 只处理开发态 Dock，不改变应用内和启动动画所用的原图。
+    const canvasSize = 1024;
+    const artworkSize = 820;
+    const inset = (canvasSize - artworkSize) / 2;
+    const artwork = nativeImage.createFromPath(path.join(__dirname, 'renderer/assets/icon.png'))
+      .resize({ width: artworkSize, height: artworkSize, quality: 'best' });
+    const pixels = artwork.toBitmap({ scaleFactor: 1 });
+    const canvas = Buffer.alloc(canvasSize * canvasSize * 4);
+    for (let row = 0; row < artworkSize; row++) {
+      pixels.copy(canvas, ((row + inset) * canvasSize + inset) * 4,
+        row * artworkSize * 4, (row + 1) * artworkSize * 4);
+    }
+    app.dock.setIcon(nativeImage.createFromBitmap(canvas, {
+      width: canvasSize, height: canvasSize, scaleFactor: 1,
+    }));
   }
   protocol.handle('biu-media', async (request) => {
     const parsed = new URL(request.url);
