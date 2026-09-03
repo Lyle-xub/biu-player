@@ -1,0 +1,44 @@
+{
+  "expo": {
+    "name": "Biu Player",
+    "slug": "biu-player-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0b0d09",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.biuplayer.mobile"
+    },
+    "android": {
+      "package": "com.biuplayer.mobile",
+      "adaptiveIcon": {
+        "backgroundColor": "#0b0d09",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      }
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-audio",
+        {
+          "enableBackgroundPlayback": true,
+          "enableBackgroundRecording": false
+        }
+      ],
+      [
+        "expo-video",
+        {
+          "supportsBackgroundPlayback": true,
+          "supportsPictureInPicture": false
+        }
+      ],
+      "expo-image"
+    ]
+  }
+}
