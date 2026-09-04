@@ -12,7 +12,7 @@
   <a href="https://github.com/Lyle-xub/biu-player/issues"><img src="https://img.shields.io/badge/反馈与建议-899c72?style=for-the-badge&labelColor=181b14" alt="反馈与建议"></a>
 </p>
 
-<p align="center"><sub>macOS · Apple Silicon &nbsp; / &nbsp; Android · arm64</sub></p>
+<p align="center"><sub>macOS · Apple Silicon &nbsp; / &nbsp; Windows · x64 &nbsp; / &nbsp; Android · arm64</sub></p>
 
 <br>
 
@@ -92,7 +92,7 @@
 
 ## 开始听歌
 
-1. 在 [Releases](https://github.com/Lyle-xub/biu-player/releases/latest) 下载对应的安装包：Mac 选择 `.dmg`，Android 选择 `.apk`。
+1. 在 [Releases](https://github.com/Lyle-xub/biu-player/releases/latest) 下载对应的安装包：Mac 选择 `.dmg`，Windows 选择 `Setup.exe`（或解压 Windows ZIP 直接运行），Android 选择 `.apk`。
 2. 打开 Biu Player，登录 B 站账号，或先从音乐热榜开始听。
 3. 收藏喜欢的歌曲；需要跨设备使用时，在设置中开启同步。
 

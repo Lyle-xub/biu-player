@@ -20,6 +20,16 @@ macOS 打包使用 electron-builder；项目配置包含维护者的 Developer I
 npm run dist -- --arm64
 ```
 
+Windows x64 安装包与免安装 ZIP 在 Windows 上构建。安装 Node.js 24 和 Visual Studio C++ Build Tools 后运行：
+
+```powershell
+npm ci
+npm run dist:win -- --publish never
+```
+
+构建命令会先编译 React 页面与视频云同步 DLL，再生成 NSIS 安装包和 ZIP。输出位于 `dist/`；Windows 安装包目前未配置代码签名。
+也可以在 GitHub Actions 手动运行 `Windows release`，填写已有 Release 标签；流程会在 Windows 上检查 DLL、启动应用，再上传这两种安装文件与校验值。
+
 ## 手机端
 
 使用 React Native / Expo SDK 57，建议 Node.js 22.13+、JDK 17 和 Android SDK。
