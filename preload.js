@@ -29,6 +29,16 @@ contextBridge.exposeInMainWorld('bili', {
   // 本地数据仓（likes / 自建歌单 / 历史）：主进程 JSON 文件，带原子写入与 .bak
   storeGet: (key) => ipcRenderer.invoke('store:get', key),
   storeSet: (key, val) => ipcRenderer.send('store:set', key, val),
+  updateStatus: () => ipcRenderer.invoke('app-update:status'),
+  updateCheck: () => ipcRenderer.invoke('app-update:check'),
+  updateDownload: () => ipcRenderer.invoke('app-update:download'),
+  updateInstall: () => ipcRenderer.invoke('app-update:install'),
+  updateConfigure: patch => ipcRenderer.invoke('app-update:configure', patch),
+  onUpdateStatus: cb => {
+    const listener = (_event, status) => cb(status);
+    ipcRenderer.on('app-update:status', listener);
+    return () => ipcRenderer.removeListener('app-update:status', listener);
+  },
   videoCloudStatus: () => ipcRenderer.invoke('video-cloud:status'),
   videoCloudPreview: () => ipcRenderer.invoke('video-cloud:preview'),
   videoCloudConfigure: (patch) => ipcRenderer.invoke('video-cloud:configure', patch),

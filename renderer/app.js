@@ -5052,6 +5052,7 @@ function initLanSync() {
 function initSettings() {
   initLanSync();
   window.BiuVideoCloud?.mount($('videoCloudSettings'));
+  window.BiuAppUpdates?.mount($('appUpdateSettings'));
   const segRecommend = $('segRecommendMode');
   const updateRecommendMode = () => [...segRecommend.children].forEach((button) => {
     const selected = button.dataset.mode === settings.recommendMode;

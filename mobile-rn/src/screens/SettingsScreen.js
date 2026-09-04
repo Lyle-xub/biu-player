@@ -11,6 +11,7 @@ import { IconBack } from '../components/icons';
 import RecommendationProfileCard from '../components/RecommendationProfileCard';
 import LanSyncCard from '../components/LanSyncCard';
 import CloudSyncCard from '../components/CloudSyncCard';
+import AppUpdateCard from '../components/AppUpdateCard';
 import { PLAYBACK_QUALITIES as QUALITIES } from '../player/playbackQuality';
 
 const LYRIC_EFFECTS = [
@@ -102,6 +103,9 @@ export default function SettingsScreen({ navigation }) {
         <Text style={styles.sectionTitle}>同步</Text>
         <LanSyncCard />
         <CloudSyncCard />
+
+        <Text style={styles.sectionTitle}>应用更新</Text>
+        <AppUpdateCard />
 
         <Text style={styles.sectionTitle}>关于</Text>
         <View style={styles.card}>

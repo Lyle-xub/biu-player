@@ -1,6 +1,6 @@
 {
   "name": "mobile-rn",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "main": "index.js",
   "dependencies": {
     "@noble/ciphers": "^2.4.0",
@@ -13,6 +13,7 @@
     "@react-navigation/native-stack": "^7.18.10",
     "buffer": "^6.0.3",
     "expo": "~57.0.19",
+    "expo-application": "~57.0.2",
     "expo-asset": "~57.0.16",
     "expo-audio": "~57.0.4",
     "expo-blur": "~57.0.2",

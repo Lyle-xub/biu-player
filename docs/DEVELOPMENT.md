@@ -58,3 +58,11 @@ macOS（Apple Silicon）和 Windows（x64）安装包内置 Python、FFmpeg、�
 在设置中创建视频云同步后，通过恢复密钥配对其他设备；同账号的局域网自动同步也能交换密钥。恢复密钥和登录信息只保存在设备上，不要提交到仓库。
 
 构建目录、登录数据、恢复密钥和签名文件不应提交到仓库。
+
+## 应用更新
+
+正式版默认自动检测更新，桌面端后台下载、退出后安装，也可点击重启安装。Android 在 Wi-Fi 下后台下载，安装前校验 SHA-256、包名、版本及签名，再交给系统确认安装。设置可关闭自动检测或自动下载。
+
+桌面发布时，除了安装包，还必须上传 `latest.yml`（Windows）、`latest-mac.yml`（macOS）及对应 `.blockmap` 文件；使用构建生成的原始文件名，并在安装包上传完成后上传更新元数据。Windows 工作流已包含此步骤。不要重命名或修改已生成元数据所对应的安装包。
+
+Android 更新从正式 GitHub Release 中读取 `Biu-Player-版本-android-arm64.apk`，以 APK 文件名中的版本独立比较，不使用桌面标签号。每次发布必须同时增加 `expo.version` 和 Android `versionCode`，并使用同一签名。iOS 通过 App Store 查询与跳转更新，尚未上架时不会提示不存在的更新。Expo Go / 开发客户端不执行安装更新。

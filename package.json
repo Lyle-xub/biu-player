@@ -1,6 +1,6 @@
 {
   "name": "biu-player",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "基于 B 站公开接口的桌面音乐播放器",
   "main": "main.js",
   "scripts": {
@@ -29,7 +29,8 @@
       "vendor/**",
       "video-cloud-sync.js",
       "cloud-video-runtime.js",
-      "cloud-video-bili.js"
+      "cloud-video-bili.js",
+      "app-updates.js"
     ],
     "mac": {
       "category": "public.app-category.music",
@@ -48,7 +49,8 @@
       "signIgnore": [
         "\\.lproj/locale\\.pak$"
       ],
-      "notarize": false
+      "notarize": false,
+      "artifactName": "Biu-Player-${version}-mac-${arch}.${ext}"
     },
     "win": {
       "target": [
@@ -79,6 +81,14 @@
         "from": "dist/cloud-runtime",
         "to": "cloud-video/runtime"
       }
+    ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Lyle-xub",
+        "repo": "biu-player",
+        "releaseType": "release"
+      }
     ]
   },
   "devDependencies": {
@@ -89,6 +99,7 @@
   },
   "dependencies": {
     "bonjour-service": "^1.4.4",
+    "electron-updater": "^6.8.3",
     "qrcode": "^1.5.4",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",

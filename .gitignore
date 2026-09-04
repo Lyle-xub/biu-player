@@ -12,3 +12,8 @@ mobile-rn/CLAUDE.md
 *.p12
 *.pfx
 *.mobileprovision
+
+# Local Expo module build outputs
+mobile-rn/modules/*/android/build/
+mobile-rn/modules/*/android/.cxx/
+mobile-rn/modules/*/android/.gradle/

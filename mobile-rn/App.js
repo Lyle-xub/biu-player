@@ -39,6 +39,7 @@ import HistoryScreen from './src/screens/HistoryScreen';
 import LocalPlaylistScreen from './src/screens/LocalPlaylistScreen';
 import PlaylistDetailScreen from './src/screens/PlaylistDetailScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
+import { AppUpdateNotice } from './src/components/AppUpdateCard';
 
 // 等启动遮罩完成布局且 Logo 加载后再交接，避免露出空白帧。
 SplashScreen.preventAutoHideAsync().catch(() => {});
@@ -297,6 +298,7 @@ export default function App() {
               <Stack.Screen name="PlaylistDetail" component={PlaylistDetailScreen} />
               <Stack.Screen name="Settings" component={SettingsScreen} />
             </Stack.Navigator>
+            <AppUpdateNotice />
             <StartupGlow />
             </OverlayProvider>
           </View>

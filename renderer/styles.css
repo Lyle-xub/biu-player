@@ -2200,3 +2200,14 @@ body[data-view="daily"] .mini-player { display:none !important; }
 .cloud-result pre { max-height:240px; }
 .video-cloud-card button:disabled { opacity:.4; cursor:default; }
 .video-cloud-card button:focus-visible,.cloud-details summary:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+
+/* Application updates share the settings palette and never block playback. */
+.settings-update-section { margin-top:18px; padding-top:18px; border-top:1px solid var(--glass-line); }
+.settings-update-section .mrow { padding:10px 0; }
+.app-update-actions,.app-update-heading { display:flex; align-items:center; justify-content:flex-end; gap:12px; }
+.app-update-heading { justify-content:space-between; }
+.app-update-message,.app-update-notice p { font-size:12px; line-height:1.7; color:var(--text-2); }
+.settings-update-section progress { width:100%; height:4px; accent-color:var(--accent); margin:10px 0; }
+.app-update-notice { position:fixed; top:72px; right:24px; z-index:900; width:min(340px,calc(100vw - 48px)); padding:18px; border-radius:20px; border:1px solid rgba(255,255,255,.14); background:rgba(25,27,23,.94); backdrop-filter:blur(24px); box-shadow:0 16px 48px rgba(0,0,0,.3); }
+.app-update-notice[hidden] { display:none; }
+.app-update-notice b { font-size:14px; }

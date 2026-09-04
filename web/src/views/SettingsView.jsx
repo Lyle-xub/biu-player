@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import '../../../renderer/video-cloud-settings.js';
+import '../../../renderer/app-update-settings.js';
 import { useSlice } from '../store.js';
 
 const DEFAULT_SETTINGS = { recommendMode: 'music', quality: 1, vq: 80, danmaku: 1, syncHistory: 0, blur: 0, deskLyric: false };
@@ -16,6 +17,8 @@ export function SettingsModal() {
   const A = () => window.biuActions;
   const profileHost = useRef(null);
   const cloudHost = useRef(null);
+  const updateHost = useRef(null);
+  useEffect(() => window.BiuAppUpdates?.mount(updateHost.current), []);
   useEffect(() => window.BiuVideoCloud?.mount(cloudHost.current), []);
   useEffect(() => window.biuProfiles?.mount(profileHost.current), [auth.mid, auth.isLogin]);
   return (
@@ -80,6 +83,7 @@ export function SettingsModal() {
           <div className="ml"><b>桌面歌词</b><small>在屏幕上悬浮显示歌词</small></div>
           <div className="mr"><span className={`switch${s.deskLyric ? '' : ' off'}`} id="swLyric" onClick={() => A().toggleDeskLyric()}></span></div>
         </div>
+        <section className="settings-update-section"><h4 className="settings-card-title">应用更新</h4><div ref={updateHost} /></section>
         </section>
         <section className="settings-card" aria-labelledby="settingsSync"><h4 id="settingsSync" className="settings-card-title">数据与同步</h4>
         <div className="mrow lan-sync-row">
@@ -95,7 +99,7 @@ export function SettingsModal() {
         <div ref={cloudHost} />
         </section>
         </div>
-        <div className="mfoot">BIU PLAYER · v0.5.0 · 基于 BILIBILI 公开接口</div>
+        <div className="mfoot" data-app-version>BIU PLAYER</div>
       </div>
     </div>
   );

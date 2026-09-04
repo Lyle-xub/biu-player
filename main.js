@@ -491,6 +491,23 @@ app.whenReady().then(() => {
     scheduleBiuStoreWrite();
   });
 
+  const updates = require('./app-updates').createAppUpdates({
+    app, updater: require('electron-updater').autoUpdater,
+    read: () => readBiuStore()['biu-app-updates'],
+    write: value => {
+      readBiuStore()['biu-app-updates'] = value;
+      if (!flushBiuStore()) throw new Error('更新设置保存失败');
+    },
+    notify: value => { if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('app-update:status', value); },
+    beforeInstall: () => { quitting = true; flushBiuStore(); },
+  });
+  for (const action of ['status', 'check', 'download', 'configure', 'install']) {
+    ipcMain.handle(`app-update:${action}`, (event, value) => {
+      if (event.sender !== mainWin?.webContents) throw new Error('更新请求来源无效');
+      return action === 'check' ? updates.check(true) : updates[action](value);
+    });
+  }
+
   const savedSync = readBiuStore();
   if (!savedSync['biu-lan-device']) savedSync['biu-lan-device'] = require('node:crypto').randomUUID();
   let lanScope = '';
