@@ -29,6 +29,19 @@ jobs:
       - run: npm run dist:win -- --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Verify cloud video round trip on Windows
+        shell: pwsh
+        run: |
+          python -m pip install -r cloud-video/requirements.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg -y --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $env:BIU_WIREHAIR = (Resolve-Path dist/windows-native/wirehair.dll).Path
+          $env:PYTHONUTF8 = '1'
+          python test/cloud-stream.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Verify Windows bundle and launch
         shell: pwsh
         run: |

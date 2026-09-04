@@ -31,7 +31,7 @@ def main():
             fullframe.render(packet).save(out/f'frames/{index:05d}.png')
             if index%8==0 or index==len(packets)-1:emit(dict(type='encode',frames=index+1,total=len(packets)))
         subprocess.run(['ffmpeg','-v','error','-framerate','2','-i',str(out/'frames/%05d.png'),
-            '-vf','fps=30,format=yuv420p','-c:v','libx264','-preset','fast','-crf','18','-movflags','+faststart',str(out/'video.mp4')],check=True)
+            '-vf','fps=30,format=yuv420p','-c:v','libx264','-preset','fast','-crf','18','-movflags','+faststart',str(out/'video.mp4')],check=True,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
         # Generated frame files are temporary; retain encrypted payload/video only.
         import shutil
         shutil.rmtree(out/'frames')

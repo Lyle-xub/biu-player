@@ -5,7 +5,7 @@ are deliberately not checked; this is a snapshot reader, not a whole-video audit
 """
 import argparse
 import json
-import selectors
+import queue
 import subprocess
 import tempfile
 import threading
@@ -32,6 +32,7 @@ def restore(source,key,output,expected,mode='stream',rate=0,timeout=120,on_event
     stop=threading.Event()
     errors=[]
     worker=None
+    reader=None
     process=None
     watchdog=threading.Timer(timeout,stop.set)
     watchdog.daemon=True
@@ -71,7 +72,7 @@ def restore(source,key,output,expected,mode='stream',rate=0,timeout=120,on_event
             '-threads','1','-i','pipe:0','-an','-vf','fps=4,scale=640:360',
             '-threads','1','-f','rawvideo','-pix_fmt','gray','pipe:1']
         with tempfile.TemporaryFile() as err:
-            process=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=err,bufsize=0)
+            process=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=err,bufsize=0,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
             def feed():
                 try:
                     for data in chunks():
@@ -86,44 +87,60 @@ def restore(source,key,output,expected,mode='stream',rate=0,timeout=120,on_event
                     process.stdin.close()
             worker=threading.Thread(target=feed,daemon=True)
             worker.start()
+            # Windows select() cannot monitor subprocess pipes. A bounded reader
+            # thread also lets the main loop honor the deadline while FFmpeg stalls.
+            decoded=queue.Queue(maxsize=2)
+            def deliver(frame):
+                while not stop.is_set():
+                    try:decoded.put(frame,timeout=.1);return
+                    except queue.Full:pass
+            def read_frames():
+                try:
+                    buffer=bytearray()
+                    while not stop.is_set():
+                        data=process.stdout.read(640*360-len(buffer))
+                        if not data:break
+                        buffer.extend(data)
+                        if len(buffer)==640*360:
+                            deliver(bytes(buffer))
+                            buffer.clear()
+                except Exception as e:
+                    if not stop.is_set():errors.append(e)
+                finally:deliver(b'')
+            reader=threading.Thread(target=read_frames,daemon=True)
+            reader.start()
             packets={}
             frames=0
-            buffer=bytearray()
             verified=False
-            with selectors.DefaultSelector() as selector:
-                selector.register(process.stdout,selectors.EVENT_READ)
-                while not stop.is_set():
-                    if not selector.select(.1):continue
-                    data=process.stdout.read(640*360-len(buffer))
-                    if not data:break
-                    buffer.extend(data)
-                    if len(buffer)!=640*360:continue
-                    frames+=1
-                    on_event(dict(type='frame', frame=frames, mediaSeconds=frames/4))
-                    stats.setdefault('firstFrameSeconds',round(time.monotonic()-started,4))
-                    pixels=np.frombuffer(buffer,dtype=np.uint8).reshape(360,640)
-                    for packet in ff.read(pixels):
-                        parsed=codec.parse(packet,ff.BLOCK,ff.PROFILE)
-                        if not parsed:continue
-                        group,index,_=parsed
-                        codec.require(group[0].hex()==expected,'unexpected snapshot')
-                        codec.require(index not in packets or packets[index]==packet,'conflicting duplicate')
-                        packets[index]=packet
-                        on_event(dict(type='symbol', symbols=len(packets), needed=group[1]))
-                        if len(packets)<group[1]:continue
-                        try:payload,_=codec.recover(packets.values(),expected,ff.BLOCK,ff.PROFILE)
-                        except ValueError as e:
-                            if 'not enough independent symbols' in str(e):continue
-                            raise
-                        raw,meta=codec.unseal(payload,key)
-                        codec.require(not stop.is_set(),'stream deadline exceeded')
-                        codec.atomic(output,raw)
-                        stats.update(symbols=len(packets),scannedFrames=frames,librarySha256=codec.sha(raw),libraryBytes=len(raw),verifiedSeconds=round(time.monotonic()-started,4),mediaSecondsScanned=frames/4)
-                        verified=True
-                        stop.set()
-                        break
-                    del pixels
-                    buffer=bytearray()
+            while not stop.is_set():
+                try:data=decoded.get(timeout=.1)
+                except queue.Empty:continue
+                if not data:break
+                frames+=1
+                on_event(dict(type='frame', frame=frames, mediaSeconds=frames/4))
+                stats.setdefault('firstFrameSeconds',round(time.monotonic()-started,4))
+                pixels=np.frombuffer(data,dtype=np.uint8).reshape(360,640)
+                for packet in ff.read(pixels):
+                    parsed=codec.parse(packet,ff.BLOCK,ff.PROFILE)
+                    if not parsed:continue
+                    group,index,_=parsed
+                    codec.require(group[0].hex()==expected,'unexpected snapshot')
+                    codec.require(index not in packets or packets[index]==packet,'conflicting duplicate')
+                    packets[index]=packet
+                    on_event(dict(type='symbol', symbols=len(packets), needed=group[1]))
+                    if len(packets)<group[1]:continue
+                    try:payload,_=codec.recover(packets.values(),expected,ff.BLOCK,ff.PROFILE)
+                    except ValueError as e:
+                        if 'not enough independent symbols' in str(e):continue
+                        raise
+                    raw,meta=codec.unseal(payload,key)
+                    codec.require(not stop.is_set(),'stream deadline exceeded')
+                    codec.atomic(output,raw)
+                    stats.update(symbols=len(packets),scannedFrames=frames,librarySha256=codec.sha(raw),libraryBytes=len(raw),verifiedSeconds=round(time.monotonic()-started,4),mediaSecondsScanned=frames/4)
+                    verified=True
+                    stop.set()
+                    break
+                del pixels
             if not verified:
                 if errors:raise errors[0]
                 raise ValueError('timeout or insufficient authenticated stream data')
@@ -135,6 +152,9 @@ def restore(source,key,output,expected,mode='stream',rate=0,timeout=120,on_event
             # SIGTERM can block flushing its unread raw-frame pipe.
             if process.poll() is None:process.kill()
             process.wait()
+            if reader:
+                reader.join(timeout=2)
+                codec.require(not reader.is_alive(),'decoder worker did not stop')
             process.stdout.close()
         if worker:
             worker.join(timeout=6)
