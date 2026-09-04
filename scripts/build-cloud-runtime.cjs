@@ -89,7 +89,7 @@ for archive in (out / 'python').rglob('*.a'):
     run(process.env.ComSpec || 'cmd.exe', ['/d', '/c', 'scripts\\build-windows-native.cmd']);
     fs.copyFileSync(path.join(root, 'dist/windows-native/wirehair.dll'), path.join(output, 'wirehair.dll'));
   } else {
-    run('c++', ['-std=c++11', '-O2', '-dynamiclib', '-I', 'cloud-video',
+    run('c++', ['-std=c++11', '-O2', '-dynamiclib', '-Wl,-install_name,@rpath/libwirehair.dylib', '-I', 'cloud-video',
       ...['wirehair.cpp', 'WirehairCodec.cpp', 'WirehairTools.cpp', 'gf256.cpp'].map(f => `cloud-video/wirehair/${f}`),
       '-o', path.join(output, 'libwirehair.dylib')]);
   }
