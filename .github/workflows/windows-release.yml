@@ -1,0 +1,73 @@
+name: Windows release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release to receive the Windows packages
+        required: true
+        default: v0.6.0
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: npm ci
+      - run: node --test test/cloud-runtime.test.cjs
+      - run: npm run dist:win -- --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Verify Windows bundle and launch
+        shell: pwsh
+        run: |
+          python -c "import ctypes; lib=ctypes.CDLL(r'dist\win-unpacked\resources\cloud-video\wirehair.dll'); assert lib.wirehair_init_(2)==0"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node -e "const a=require('@electron/asar'),assert=require('assert/strict'); const files=a.listPackage('dist/win-unpacked/resources/app.asar').map(p=>p.replaceAll(String.fromCharCode(92),'/')); assert(files.includes('/web-dist/index.html')); assert(files.includes('/renderer/recommendation-profile.js'));"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $app = Start-Process -FilePath '.\dist\win-unpacked\Biu Player.exe' -PassThru
+          try {
+            Start-Sleep -Seconds 12
+            $app.Refresh()
+            if ($app.HasExited) { throw "App exited during startup: $($app.ExitCode)" }
+            if (-not $app.MainWindowHandle) { throw 'App did not create a window' }
+          } finally {
+            taskkill /PID $app.Id /T /F
+          }
+      - name: Checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem dist -File | Where-Object { $_.Name -match '^Biu-Player-.*windows-x64.*\.(exe|zip)$' } | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content dist/SHA256SUMS-Windows.txt -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: |
+            dist/Biu-Player-*windows-x64*.exe
+            dist/Biu-Player-*windows-x64*.zip
+            dist/SHA256SUMS-Windows.txt
+          if-no-files-found: error
+      - name: Publish to existing release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          gh release view $env:RELEASE_TAG
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $assets = @(Get-ChildItem dist -File | Where-Object { $_.Name -match '^Biu-Player-.*windows-x64.*\.(exe|zip)$' } | ForEach-Object { $_.FullName })
+          if ($assets.Count -ne 2) { throw 'Expected both Windows installer and ZIP' }
+          gh release upload $env:RELEASE_TAG @assets dist/SHA256SUMS-Windows.txt --clobber
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

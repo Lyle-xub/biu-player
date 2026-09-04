@@ -11,7 +11,8 @@
     "start:web": "BIU_WEB_UI=1 electron .",
     "check": "node --check main.js && node --check preload.js && node --check renderer/api.js && node --check renderer/playback-session.js && node --check renderer/app.js && node --check video-cloud-sync.js && node --check cloud-video-bili.js && node --check cloud-video-runtime.js && node --check renderer/video-cloud-settings.js",
     "test": "node --test test/*.test.cjs",
-    "dist": "electron-builder --mac"
+    "dist": "electron-builder --mac",
+    "dist:win": "npm run build:web && scripts\\build-windows-native.cmd && electron-builder --win --x64"
   },
   "build": {
     "appId": "com.biu.player",
@@ -47,6 +48,27 @@
         "\\.lproj/locale\\.pak$"
       ],
       "notarize": false
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "zip"
+      ],
+      "icon": "build/icon.png",
+      "artifactName": "Biu-Player-${version}-windows-${arch}.${ext}",
+      "extraResources": [
+        {
+          "from": "dist/windows-native/wirehair.dll",
+          "to": "cloud-video/wirehair.dll"
+        }
+      ]
+    },
+    "nsis": {
+      "artifactName": "Biu-Player-${version}-windows-${arch}-Setup.${ext}",
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
     },
     "extraResources": [
       {
