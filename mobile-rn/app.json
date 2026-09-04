@@ -54,7 +54,6 @@
       "expo-image",
       "expo-sharing",
       "./plugins/withLanSync",
-      "./plugins/withPrivateBuildPaths",
       "expo-asset",
       [
         "expo-dev-client",
