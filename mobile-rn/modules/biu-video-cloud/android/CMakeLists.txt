@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.22)
+project(biu_cloud)
+set(CMAKE_CXX_STANDARD 17)
+set(CARRIER ../cpp)
+add_library(biu_cloud SHARED Jni.cpp ${CARRIER}/Carrier.cpp ${CARRIER}/wirehair/wirehair.cpp ${CARRIER}/wirehair/WirehairCodec.cpp ${CARRIER}/wirehair/WirehairTools.cpp ${CARRIER}/wirehair/gf256.cpp)
+target_include_directories(biu_cloud PRIVATE ${CARRIER})

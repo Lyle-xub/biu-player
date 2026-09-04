@@ -1,6 +1,6 @@
 {
   "name": "biu-player",
-  "version": "0.5.4",
+  "version": "0.6.0",
   "description": "基于 B 站公开接口的桌面音乐播放器",
   "main": "main.js",
   "scripts": {
@@ -9,7 +9,7 @@
     "dev:web": "vite",
     "build:web": "vite build",
     "start:web": "BIU_WEB_UI=1 electron .",
-    "check": "node --check main.js && node --check preload.js && node --check renderer/api.js && node --check renderer/playback-session.js && node --check renderer/app.js",
+    "check": "node --check main.js && node --check preload.js && node --check renderer/api.js && node --check renderer/playback-session.js && node --check renderer/app.js && node --check video-cloud-sync.js && node --check cloud-video-bili.js && node --check cloud-video-runtime.js && node --check renderer/video-cloud-settings.js",
     "test": "node --test test/*.test.cjs",
     "dist": "electron-builder --mac"
   },
@@ -23,12 +23,19 @@
       "lyric-preload.js",
       "lyric.html",
       "renderer/**",
-      "vendor/**"
+      "web-dist/**",
+      "vendor/**",
+      "video-cloud-sync.js",
+      "cloud-video-runtime.js",
+      "cloud-video-bili.js"
     ],
     "mac": {
       "category": "public.app-category.music",
       "extendInfo": {
-        "NSLocalNetworkUsageDescription": "连接同一局域网内的 Biu Player 手机端，手动同步我喜欢和歌单。"
+        "NSLocalNetworkUsageDescription": "自动连接同一局域网内登录相同账号的 Biu Player 手机端，同步我喜欢和歌单。",
+        "NSBonjourServices": [
+          "_biu-sync._tcp"
+        ]
       },
       "target": [
         "dmg",
@@ -36,8 +43,21 @@
       ],
       "icon": "build/icon.png",
       "hardenedRuntime": true,
+      "signIgnore": [
+        "\\.lproj/locale\\.pak$"
+      ],
       "notarize": false
-    }
+    },
+    "extraResources": [
+      {
+        "from": "cloud-video",
+        "to": "cloud-video",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**"
+        ]
+      }
+    ]
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^6.1.1",
@@ -46,6 +66,7 @@
     "vite": "^8.2.2"
   },
   "dependencies": {
+    "bonjour-service": "^1.4.4",
     "qrcode": "^1.5.4",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",

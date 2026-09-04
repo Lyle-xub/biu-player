@@ -1,4 +1,5 @@
 /* Biu Player RN · 首页：搜索胶囊 + 入口行（我的喜欢/热榜）+ 双栏瀑布流推荐 */
+import { blend, isStrict } from '../../../renderer/recommendation-profile';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator, FlatList, RefreshControl, StyleSheet, Text, TouchableOpacity, View,
@@ -10,6 +11,7 @@ import { initClient } from '../api/client';
 import { usePlayer } from '../player/PlayerContext';
 import TrackCard from '../components/TrackCard';
 import HomeBanner from '../components/HomeBanner';
+import { DailyCard } from './DailyScreen';
 import { IconHeart, IconNote, IconSearch } from '../components/icons';
 
 const WATERFALL_BATCH = 8;
@@ -34,7 +36,8 @@ function waterfallBlocks(items) {
 }
 
 export default function HomeScreen({ navigation }) {
-  const { playQueue, likes, recommendMode = 'music', account } = usePlayer();
+  const { playQueue, likes, recommendMode = 'music', account, recommendationManager, recommendationProfile } = usePlayer();
+  const strictProfile = isStrict(recommendationProfile);
   const [mode, setMode] = useState('recommend'); // recommend | rank | likes
   const [tracks, setTracks] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -42,11 +45,19 @@ export default function HomeScreen({ navigation }) {
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState(null);
   const [clientReady, setClientReady] = useState(false);
-  const freshIdxRef = useRef(1);
+  const profilePageRef = useRef(0);
+  const freshIdxRef = useRef(0);
   const tracksRef = useRef([]);
   const requestRef = useRef(0);
   const loadingMoreRef = useRef(false);
+  const scrollIntentRef = useRef(false);
+  const listRef = useRef(null);
   tracksRef.current = tracks;
+
+  useEffect(() => navigation.addListener?.('homeDoublePress', () => {
+    scrollIntentRef.current = false;
+    listRef.current?.scrollToOffset({ offset: 0, animated: true });
+  }), [navigation]);
 
   const load = useCallback(async (more = false, m = mode) => {
     if (more && (m !== 'recommend' || loadingMoreRef.current)) return;
@@ -60,16 +71,59 @@ export default function HomeScreen({ navigation }) {
     if (more) setLoadingMore(true); else setLoading(true);
     setError(null);
     try {
+      const previous = more ? tracksRef.current : [];
+      // Refresh replaces the list, but continues discovery instead of replaying page zero.
+      const exclude = m === 'recommend' ? tracksRef.current.map((t) => t.bvid) : [];
+      const profilePage = profilePageRef.current;
+      // Wait for saved selection before requesting or displaying platform content.
+      if (m === 'recommend' && recommendationManager) {
+        await recommendationManager.ready();
+        if (token !== requestRef.current) return;
+        if (isStrict(recommendationManager.getSnapshot())) {
+          const received = [], seen = new Set(exclude);
+          const onBatch = (batch) => {
+            if (token !== requestRef.current) return;
+            const fresh = batch.filter((t) => { if (seen.has(t.bvid)) return false; seen.add(t.bvid); return true; });
+            if (!fresh.length) return;
+            received.push(...fresh);
+            setTracks([...previous, ...received]);
+            setLoading(false);
+            setRefreshing(false);
+            setLoadingMore(true);
+          };
+          const matches = await recommendationManager.recommend({ page: profilePage, mode: recommendMode,
+            exclude, onBatch });
+          if (token !== requestRef.current) return;
+          profilePageRef.current = profilePage + 1;
+          onBatch(matches);
+          if (!received.length) setTracks(previous);
+          return;
+        }
+      }
+      const suggested = () => m === 'recommend' && recommendationManager
+        ? recommendationManager.recommend({ page: profilePage, mode: recommendMode, exclude }).catch(() => [])
+        : Promise.resolve([]);
+      const finish = async (items) => {
+        const personalized = await suggested();
+        if (token !== requestRef.current) return;
+        profilePageRef.current = profilePage + 1;
+        // Keep the carousel platform-only; sample insertion slots in the actual waterfall.
+        const banner = m === 'recommend' && !previous.length ? items.slice(0, 5) : [];
+        const bannerIds = new Set(banner.map((t) => t.bvid));
+        const merged = [...banner, ...blend(items.slice(banner.length),
+          personalized.filter((t) => !bannerIds.has(t.bvid)))];
+        setTracks([...previous, ...merged]);
+        return merged;
+      };
       let list;
       if (m === 'rank') {
         list = await bili.ranking();
       } else if (!account?.isLogin) {
         list = await bili.ranking();
       } else {
-        const previous = more ? tracksRef.current : [];
-        const seen = new Set(previous.map((track) => track.bvid));
+        const seen = new Set(exclude);
         list = [];
-        let freshIdx = more ? freshIdxRef.current : 0;
+        let freshIdx = freshIdxRef.current;
         let fetchError;
         const append = (items) => {
           for (const track of items) {
@@ -91,6 +145,7 @@ export default function HomeScreen({ navigation }) {
           if (token !== requestRef.current) return;
           freshIdx += 1;
           freshIdxRef.current = freshIdx;
+          recommendationManager?.observeFeed(items);
           append(items);
           if (list.length) {
             setTracks([...previous, ...list]);
@@ -112,17 +167,16 @@ export default function HomeScreen({ navigation }) {
           }
         }
         if (token !== requestRef.current) return;
-        if (!list.length && !previous.length && fetchError) throw fetchError;
-        setTracks([...previous, ...list]);
+        const merged = await finish(list);
+        if (token === requestRef.current && !merged?.length && !previous.length && fetchError) throw fetchError;
         return;
       }
       if (token === requestRef.current) {
-        setTracks((prev) => (more ? [...prev, ...list] : list));
+        await finish(list);
       }
     } catch (e) {
       if (token === requestRef.current) {
         setError(String(e.message || e));
-        if (!more) setTracks([]);
       }
     } finally {
       if (token === requestRef.current) {
@@ -132,26 +186,43 @@ export default function HomeScreen({ navigation }) {
         setLoadingMore(false);
       }
     }
-  }, [mode, likes, recommendMode, account?.isLogin]);
+  }, [mode, likes, recommendMode, account?.isLogin, recommendationManager]);
+
+  const loadMoreOnScroll = () => {
+    if (mode === 'recommend' && (account?.isLogin || strictProfile)
+      && scrollIntentRef.current && !loadingMore && !loading && !error) {
+      scrollIntentRef.current = false;
+      load(true);
+    }
+  };
 
   useEffect(() => {
     initClient().then(() => setClientReady(true));
   }, []);
   useEffect(() => {
     if (!clientReady || account === null || mode !== 'recommend') return;
-    freshIdxRef.current = 1;
+    setTracks([]);
+    tracksRef.current = [];
+    freshIdxRef.current = 0;
+    profilePageRef.current = 0;
     load(false, 'recommend');
-  }, [clientReady, recommendMode, account?.isLogin]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [clientReady, recommendMode, account?.isLogin, account?.mid, recommendationManager, recommendationProfile?.revision]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const switchMode = (m) => {
     setMode(m);
+    setTracks([]);
+    tracksRef.current = [];
     setLoading(true);
     load(false, m);
   };
 
-  // 轮播预览前 5 条，信息流保留完整结果，避免音乐筛选后条目少时被轮播占空。
-  const bannerTracks = mode === 'recommend' ? tracks.slice(0, 5) : [];
-  const waterfall = useMemo(() => waterfallBlocks(tracks), [tracks]);
+  const { bannerTracks, waterfall } = useMemo(() => {
+    const bannerTracks = mode === 'recommend' ? tracks.slice(0, 5) : [];
+    const bannerIds = new Set(bannerTracks.map((track) => track.bvid));
+    // 按视频标识排除轮播内容，刷新和分页时保持两处推荐互不重复。
+    const feed = tracks.filter((track) => !bannerIds.has(track.bvid));
+    return { bannerTracks, waterfall: waterfallBlocks(feed) };
+  }, [tracks, mode]);
 
   const chips = [
     { key: 'likes', label: '我的喜欢', icon: IconHeart },
@@ -184,7 +255,8 @@ export default function HomeScreen({ navigation }) {
         ))}
       </View>
       <FlatList
-        data={!loading && !error ? waterfall : []}
+        ref={listRef}
+        data={!loading ? waterfall : []}
         initialNumToRender={2}
         maxToRenderPerBatch={2}
         windowSize={3}
@@ -215,16 +287,18 @@ export default function HomeScreen({ navigation }) {
           />
         )}
         onEndReachedThreshold={0.5}
-        onEndReached={() => {
-          if (mode === 'recommend' && account?.isLogin
-            && !loadingMore && !loading && !error && tracks.length) load(true);
+        onScrollBeginDrag={() => { scrollIntentRef.current = true; }}
+        onEndReached={() => { if (tracks.length) loadMoreOnScroll(); }}
+        onScrollEndDrag={({ nativeEvent: { contentOffset, contentSize, layoutMeasurement } }) => {
+          // An empty next batch leaves the content height unchanged, so FlatList
+          // may not emit onEndReached again. A new drag can still request a page.
+          if (contentOffset.y >= 0 && contentSize.height - contentOffset.y - layoutMeasurement.height
+            <= layoutMeasurement.height * 0.5) loadMoreOnScroll();
         }}
-        ListHeaderComponent={!loading && !error && bannerTracks.length ? (
-          <HomeBanner tracks={bannerTracks} onPress={(_, index) => playQueue(tracks, index)} />
-        ) : null}
+        ListHeaderComponent={<View><DailyCard navigation={navigation} />{!loading && bannerTracks.length > 0 && <HomeBanner tracks={bannerTracks} onPress={(_, index) => playQueue(tracks, index)} />}</View>}
         ListEmptyComponent={loading && !refreshing ? (
           <ActivityIndicator color={colors.accent} style={{ marginTop: 48 }} />
-        ) : error ? (
+        ) : error && !tracks.length ? (
           <View style={styles.emptyBox}>
             <Text style={styles.emptyText}>{error}</Text>
             <TouchableOpacity style={styles.retryBtn} onPress={() => load(false)}>
@@ -234,18 +308,21 @@ export default function HomeScreen({ navigation }) {
         ) : !tracks.length ? (
           <View style={styles.emptyBox}>
             <Text style={styles.emptyText}>
-              {mode === 'likes' ? '还没有喜欢的歌曲，去播放页点小心心吧' : '暂时没有内容'}
+              {mode === 'likes' ? '还没有喜欢的歌曲，去播放页点小心心吧'
+                : mode === 'recommend' && strictProfile ? '暂无匹配当前画像的视频，可继续向下滑动或调整标签、推荐范围' : '暂时没有内容'}
             </Text>
           </View>
         ) : null}
-        ListFooterComponent={loadingMore
-          ? <ActivityIndicator color={colors.accent} style={{ marginVertical: 16 }} />
-          : mode === 'recommend' && account?.isLogin && !loading && !error ? (
-            <TouchableOpacity style={styles.loadMoreBtn} accessibilityRole="button"
-              accessibilityLabel="加载更多推荐" onPress={() => load(true)}>
-              <Text style={styles.retryText}>加载更多</Text>
+        ListFooterComponent={error && tracks.length ? (
+          <View style={styles.feedError}>
+            <Text style={styles.emptyText}>{error}</Text>
+            <TouchableOpacity style={styles.retryBtn} onPress={() => load(true)}>
+              <Text style={styles.retryText}>重试</Text>
             </TouchableOpacity>
-          ) : null}
+          </View>
+        ) : loadingMore
+          ? <ActivityIndicator color={colors.accent} style={{ marginVertical: 16 }} />
+          : null}
       />
     </SafeAreaView>
   );
@@ -272,6 +349,7 @@ const styles = StyleSheet.create({
   chipTextOn: { color: colors.accent, fontWeight: '600' },
   scroll: { flex: 1 },
   scrollContent: { paddingHorizontal: 14, paddingBottom: 130 },
+  feedError: { alignItems: 'center', gap: 12, paddingVertical: 20 },
   waterfallRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
   waterfallColumn: { flex: 1 },
   emptyBox: { alignItems: 'center', marginTop: 64, gap: 14 },
@@ -281,5 +359,4 @@ const styles = StyleSheet.create({
     backgroundColor: colors.accentSoft, justifyContent: 'center',
   },
   retryText: { color: colors.accent, fontSize: 13, fontWeight: '600' },
-  loadMoreBtn: { alignSelf: 'center', paddingHorizontal: 22, paddingVertical: 16 },
 });

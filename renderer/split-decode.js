@@ -71,8 +71,15 @@ function parseEsds(u8, start, end) {
 
 /* ---------- moov：解码参数（ASC / 采样率 / 声道 / timescale） ---------- */
 function parseMoov(u8, moov) {
-  const trak = findBox(u8, moov.head, moov.end, 'trak');
+  const trak = [...walkBoxes(u8, moov.head, moov.end)].find((box) => {
+    if (box.type !== 'trak') return false;
+    const mdia = findBox(u8, box.head, box.end, 'mdia');
+    const handler = mdia && findBox(u8, mdia.head, mdia.end, 'hdlr');
+    return handler && String.fromCharCode(...u8.subarray(handler.head + 8, handler.head + 12)) === 'soun';
+  });
   if (!trak) throw new Error('moov 缺少 trak');
+  const tkhd = findBox(u8, trak.head, trak.end, 'tkhd');
+  const trackId = tkhd ? u32(u8, tkhd.head + (u8[tkhd.head] === 1 ? 20 : 12)) : null;
   const mdia = findBox(u8, trak.head, trak.end, 'mdia');
   const mdhd = mdia && findBox(u8, mdia.head, mdia.end, 'mdhd');
   if (!mdhd) throw new Error('缺少 mdhd');
@@ -92,7 +99,7 @@ function parseMoov(u8, moov) {
     if (b.type === 'esds') { const r = parseEsds(u8, b.head, b.end); asc = r.asc; oti = r.oti; break; }
   }
   if (!asc) throw new Error('缺少 esds 解码参数');
-  return { timescale, sampleRate, channels, asc, oti, stbl };
+  return { timescale, sampleRate, channels, asc, oti, stbl, trackId };
 }
 
 /* ---------- 普通 MP4 样本表（stts/stsc/stsz/stco） ---------- */
@@ -149,14 +156,18 @@ function parseSampleTable(u8, stbl) {
 }
 
 /* ---------- fMP4：moof(traf: tfhd/tfdt/trun) + mdat ---------- */
-function parseFragment(u8, moof, samples) {
-  const traf = findBox(u8, moof.head, moof.end, 'traf');
+function parseFragment(u8, moof, samples, trackId) {
+  const traf = [...walkBoxes(u8, moof.head, moof.end)].find((box) => {
+    if (box.type !== 'traf') return false;
+    const header = findBox(u8, box.head, box.end, 'tfhd');
+    return header && (trackId === null || u32(u8, header.head + 4) === trackId);
+  });
   if (!traf) return;
   const tfhd = findBox(u8, traf.head, traf.end, 'tfhd');
   const tfdt = findBox(u8, traf.head, traf.end, 'tfdt');
   if (!tfhd) return;
   const tf = u32(u8, tfhd.head) & 0xffffff;
-  let p = tfhd.head + 4; // track_ID
+  let p = tfhd.head + 8; // version/flags + track_ID
   let baseOff = 0, defDur = 0, defSize = 0;
   let baseIsMoof = !!(tf & 0x020000);
   if (tf & 0x1) { baseOff = u64(u8, p); p += 8; }
@@ -196,7 +207,7 @@ function demuxAac(u8) {
   if (!samples) {
     // fMP4：顺序收集所有 moof 里的样本
     samples = [];
-    for (const b of walkBoxes(u8, 0, u8.length)) if (b.type === 'moof') parseFragment(u8, b, samples);
+    for (const b of walkBoxes(u8, 0, u8.length)) if (b.type === 'moof') parseFragment(u8, b, samples, info.trackId);
     if (!samples.length) throw new Error('未找到音频样本');
   }
   return { ...info, samples };
@@ -308,4 +319,79 @@ async function splitDecodeAacStream(u8, opts = {}) {
 }
 
 window.splitDecodeAacStream = splitDecodeAacStream;
+// Mobile analysis consumes short decoded frames instead of retaining hours of PCM.
+// The same demuxer also lets recognition decode only the selected 25-second clip.
+window.splitDecodeAacFrames = async function (u8, { from = 0, to = Infinity, onFrame, onProgress } = {}) {
+  const info = demuxAac(u8);
+  const samples = info.samples.filter((sample) => sample.ts / info.timescale >= Math.max(0, from - 0.1)
+    && sample.ts / info.timescale < to);
+  if (!samples.length) throw new Error('分段超出音频范围');
+  const config = { codec: `mp4a.40.${info.asc[0] >> 3 || 2}`, sampleRate: info.sampleRate,
+    numberOfChannels: info.channels, description: info.asc };
+  const supported = typeof AudioDecoder === 'function'
+    && await AudioDecoder.isConfigSupported(config).then((r) => r.supported).catch(() => false);
+  if (supported) {
+    let failure;
+    const decoder = new AudioDecoder({
+      output(frame) {
+        try {
+          const mono = new Float32Array(frame.numberOfFrames);
+          const plane = new Float32Array(frame.numberOfFrames);
+          for (let ch = 0; ch < frame.numberOfChannels; ch++) {
+            frame.copyTo(plane, { planeIndex: ch, format: 'f32-planar' });
+            for (let i = 0; i < mono.length; i++) mono[i] += plane[i] / frame.numberOfChannels;
+          }
+          onFrame(mono, frame.sampleRate, frame.timestamp / 1e6);
+        } catch (error) { failure = error; }
+        finally { frame.close(); }
+      },
+      error(error) { failure = error; },
+    });
+    try {
+      decoder.configure(config);
+      for (let i = 0; i < samples.length; i += 128) {
+        for (const sample of samples.slice(i, i + 128)) decoder.decode(new EncodedAudioChunk({
+          type: 'key', timestamp: Math.round(sample.ts * 1e6 / info.timescale),
+          data: u8.subarray(sample.off, sample.off + sample.size),
+        }));
+        await decoder.flush(); // Bound the native decoder queue as well as JS memory.
+        if (failure) throw failure;
+        onProgress?.(Math.min(1, (i + 128) / samples.length));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    } finally { if (decoder.state !== 'closed') decoder.close(); }
+    return;
+  }
+  // Older WebViews lack WebCodecs. Feed Web Audio small self-contained ADTS clips,
+  // never the complete long recording (which would allocate gigabytes of Float32).
+  const AC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  if (!AC) throw new Error('当前系统不支持音频解码，请更新 Android System WebView 或系统版本');
+  const frequencyIndex = ((info.asc[0] & 7) << 1) | (info.asc[1] >> 7);
+  const profile = (info.asc[0] >> 3) - 1;
+  const channels = (info.asc[1] >> 3) & 15;
+  if (profile < 0 || profile > 3 || frequencyIndex > 12 || channels > 7) throw new Error('当前系统不支持此 AAC 格式');
+  const context = new AC(1, 1, info.sampleRate);
+  for (let i = 0; i < samples.length; i += 400) {
+    const batch = samples.slice(i, i + 400);
+    const adts = new Uint8Array(batch.reduce((n, s) => n + s.size + 7, 0));
+    let offset = 0;
+    for (const sample of batch) {
+      const size = sample.size + 7;
+      if (size > 8191) throw new Error('AAC 帧过大');
+      adts.set([255, 241, (profile << 6) | (frequencyIndex << 2) | (channels >> 2),
+        ((channels & 3) << 6) | (size >> 11), (size >> 3) & 255, ((size & 7) << 5) | 31, 252], offset);
+      adts.set(u8.subarray(sample.off, sample.off + sample.size), offset + 7);
+      offset += size;
+    }
+    const audio = await context.decodeAudioData(adts.buffer);
+    const mono = new Float32Array(audio.length);
+    for (let ch = 0; ch < audio.numberOfChannels; ch++) {
+      const plane = audio.getChannelData(ch);
+      for (let j = 0; j < mono.length; j++) mono[j] += plane[j] / audio.numberOfChannels;
+    }
+    onFrame(mono, audio.sampleRate, batch[0].ts / info.timescale);
+    onProgress?.(Math.min(1, (i + 400) / samples.length));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+};
 })();

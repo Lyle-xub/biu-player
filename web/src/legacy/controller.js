@@ -37,6 +37,7 @@ const videoQualityLabel = (quality) => VIDEO_QUALITY_LABELS[Number(quality)] || 
 
 /* ---------- 设置（全部真实生效） ---------- */
 const settings = {
+  recommendMode: store.get('biu-recommend-mode', 'music') === 'all' ? 'all' : 'music',
   quality: store.get('biu-quality', 1),      // 在线音质：0 标准 / 1 高品 / 2 无损
   vq: normalizedVideoQuality,                // B 站视频清晰度 qn，默认 1080P
   danmaku: store.get('biu-danmaku', 1),      // 视频模式弹幕
@@ -79,7 +80,7 @@ function toast(msg) {
 }
 
 /* ---------- 视图 / 面板控制 ---------- */
-const VIEW_ORDER = ['library', 'fav', 'radio', 'playlist', 'search', 'up', 'playing'];
+const VIEW_ORDER = ['library', 'fav', 'radio', 'daily', 'playlist', 'search', 'up', 'playing'];
 // 栈顶是本次导航的目标页；返回只出栈，不把离开的页面重新压回历史。
 const viewHistory = [document.body.dataset.view || 'library'];
 let libraryScrollTop = 0;
@@ -201,6 +202,7 @@ function transitionMode(on) {
 function activateShelfCard(card) {
   if (!card) return;
   if (card.id === 'cardLike') openPlaylist(likesPlaylist());
+  else if (card.id === 'dailyHome') recommendationProfiles.openDaily();
   else if (card.id === 'cardRank') openPlaylist(rankingPlaylist());
   else if (card.id === 'cardHistory') openPlaylist(historyPlaylist());
 }
@@ -222,6 +224,7 @@ function initShelfCarousel() {
   let wheelLocked = false;
   const info = [
     ['我喜欢', () => `${likes.length} 首歌曲<i>·</i>本地收藏`],
+    ['每日推荐', () => `${window.BiuDaily.current(recommendationProfiles.manager().getSnapshot().daily)?.tracks.length || 0} 首歌曲<i>·</i>为今天挑选`],
     ['音乐区热榜', () => `${state.ranking.length || 20} 首歌曲<i>·</i>B 站音乐区`],
     ['我的历史', () => `${playHistory.length} 首<i>·</i>最近播放`],
   ];
@@ -502,6 +505,23 @@ let qrPollTimer = null;
    游客数据在无后缀键，登录后用 base@mid；首次登录把游客数据拷进空账号桶，老用户不丢数据 */
 let dataNs = '';
 const dataKey = (base) => (dataNs ? `${base}@${dataNs}` : base);
+const recommendationProfiles = window.BiuRecommendationDesktop({
+  getMode: () => settings.recommendMode,
+  navigateDaily: () => go('daily'),
+  backDaily: () => goBack(),
+  playDaily: (tracks, index) => setQueue(tracks, '每日推荐', index),
+  saveDaily: async (entry) => {
+    const id = Math.max(Date.now(), ...customPlaylists.map((p) => Number(p.id) + 1 || 0));
+    const title = `每日推荐 · ${entry.date}`;
+    const next = [...customPlaylists, { id, title, desc: entry.themes.join(' · '), createdAt: Date.now(), tracks: entry.tracks }];
+    if (api.hasBridge) await window.bili.storeSet(dataKey('biu-playlists'), next);
+    store.set(dataKey('biu-playlists'), next);
+    customPlaylists = next;
+    renderMyPlaylists();
+  },
+  getScope: () => dataNs, getLikes: () => likes, getPlaylists: () => customPlaylists, onRefresh: () => loadLibrary({ force: true }).catch(() => {}),
+});
+window.biuProfiles = recommendationProfiles;
 
 async function loadBuckets() {
   const adopt = {
@@ -530,6 +550,7 @@ async function switchDataNs(ns) {
   await window.bili?.lanSyncStop?.();
   const prev = dataNs;
   dataNs = ns;
+  recommendationProfiles.manager();
   if (ns && !prev) {
     // 游客 → 登录：账号桶为空时把游客数据拷过去（不搬动，游客数据保留）
     for (const base of ['biu-likes', 'biu-playlists', 'biu-history']) {
@@ -555,6 +576,7 @@ async function switchDataNs(ns) {
   await loadBuckets();
   try { await loadLibrary({ force: true }); } catch (e) {}
   renderFavButtons();
+  if (dataNs === ns) await window.bili?.lanSyncConfigure?.(ns);
 }
 
 function renderAuth(auth = authState) {
@@ -1937,6 +1959,7 @@ try { likes = JSON.parse(localStorage.getItem('biu-likes') || '[]'); } catch (e)
 const saveLikes = () => {
   try { localStorage.setItem(dataKey('biu-likes'), JSON.stringify(likes)); } catch (e) {}
   if (api.hasBridge && window.bili.storeSet) window.bili.storeSet(dataKey('biu-likes'), likes);
+  recommendationProfiles.manager().refresh().catch(() => {});
 };
 const isLiked = (t) => !!(t && trackKey(t) && likes.some((l) => trackKey(l) === trackKey(t)));
 function toggleLike(t) {
@@ -1979,14 +2002,16 @@ function renderQueue() {
 }
 
 /* ---------- 播放 ---------- */
-async function playIndex(i) {
+async function playIndex(i, automatic = false) {
   if (i < 0 || i >= state.queue.length) return;
   state.qi = i;
-  await playTrack(state.queue[i]);
+  await playTrack(state.queue[i], { automatic });
   renderQueue();
 }
 
 async function playTrack(t, options = {}) {
+  recommendationProfiles.startListening(t, { manual: options.autoplay !== false && !options.automatic,
+    search: state.queueName?.startsWith('搜索') });
   recordHistory(t);
   const keepVideoMode = options.videoMode ?? videoModeOn();
   const autoplay = options.autoplay !== false;
@@ -2222,9 +2247,9 @@ function randIdx() {
   while (state.queue.length > 1 && i === state.qi) i = Math.floor(Math.random() * state.queue.length);
   return i;
 }
-function next() {
+function next(automatic = false) {
   if (!state.queue.length) return;
-  playIndex(playMode === 'shuffle' ? randIdx() : (state.qi + 1) % state.queue.length);
+  playIndex(playMode === 'shuffle' ? randIdx() : (state.qi + 1) % state.queue.length, automatic === true);
 }
 function prev() {
   if (!state.queue.length) return;
@@ -3173,7 +3198,11 @@ function paintProgressAt(frac) {
 }
 
 function bindMediaEvents(media) {
-  media.addEventListener('timeupdate', () => syncProgress(media));
+  media.addEventListener('timeupdate', () => {
+    syncProgress(media);
+    if (media === activeMedia()) recommendationProfiles.listeningTick(media.currentTime, !media.paused && !media.seeking && media.readyState >= 3);
+  });
+  media.addEventListener('pause', () => { if (media === activeMedia()) recommendationProfiles.listeningTick(media.currentTime, false); });
   media.addEventListener('loadedmetadata', () => {
     if (media !== activeMedia()) return;
     const seg = segmentRange(state.current);
@@ -3188,7 +3217,7 @@ function bindMediaEvents(media) {
     // 旧流自然播完，若放行会连跳两首
     if (segmentRange(state.current)) return;
     if (playMode === 'one') { media.currentTime = 0; media.play().catch(() => {}); }
-    else next();
+    else next(true);
   });
 }
 
@@ -3412,7 +3441,7 @@ function handleSegmentEnd(media, seg) {
   // 立即停掉发声的元素：音频模式停 audio；视频模式 DASH 双轨停 audio、合体流停 video
   try { audio.pause(); } catch (e) {}
   if (videoModeOn() && !videoUsesSeparateAudio()) { try { video.pause(); } catch (e) {} }
-  next();
+  next(true);
 }
 
 // timeupdate 频率较低，歌词扫光用 rAF 补齐到屏幕刷新率。
@@ -3716,6 +3745,7 @@ if (!Array.isArray(customPlaylists)) customPlaylists = [];
 const saveCustomPlaylists = () => {
   store.set(dataKey('biu-playlists'), customPlaylists);
   if (api.hasBridge && window.bili.storeSet) window.bili.storeSet(dataKey('biu-playlists'), customPlaylists);
+  recommendationProfiles.manager().refresh().catch(() => {});
 };
 
 let plDialogMode = 'create'; // 'create' | 'delete'
@@ -3972,37 +4002,46 @@ function renderRecommendationCards() {
   publish('lib.rec', { tracks: state.recommendations.slice(), hint: null });
 }
 
+// Append only: late search pages must not rebuild visible cards or reset scroll.
+function appendRecommendationBatch(batch, generation) {
+  if (generation !== libraryLoadToken) return;
+  const seen = new Set(state.recommendations.map(recommendationKey));
+  const additions = batch.filter((track) => {
+    const key = recommendationKey(track);
+    if (seen.has(key)) return false;
+    seen.add(key); return true;
+  });
+  if (!additions.length) return;
+  const startIndex = state.recommendations.length;
+  state.recommendations.push(...additions);
+  renderRecommendationCards(startIndex === 0, startIndex);
+}
+
 async function loadMoreRecommendations() {
   if (recommendationLoading || !recommendationUsesFeed || !api.hasBridge) return;
   const generation = libraryLoadToken;
   recommendationLoading = true;
   const loader = $('recLoader');
   loader.classList.add('loading');
-  loader.textContent = '正在刷新更多音乐…';
+  loader.textContent = '正在加载更多推荐…';
   const freshIdx = state.recommendFreshIdx;
   state.recommendFreshIdx += 3;
   try {
-    const incoming = await api.recommendMusic(freshIdx, 12);
+    const strict = await recommendationProfiles.isStrict();
+    const base = strict ? [] : await api.recommendMusic(freshIdx, 12, settings.recommendMode).catch(() => []);
     if (generation !== libraryLoadToken) return;
-    const seen = new Set(state.recommendations.map(recommendationKey));
-    const additions = incoming.filter((track) => {
-      const key = recommendationKey(track);
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-    if (additions.length) {
-      const startIndex = state.recommendations.length;
-      state.recommendations.push(...additions);
-      renderRecommendationCards(false, startIndex);
-      loader.textContent = '继续向下滚动加载更多';
-    } else {
-      loader.textContent = '这一批暂无新音乐，继续滚动刷新';
-    }
+    if (!strict) recommendationProfiles.observeFeed(base);
+    const suggested = await recommendationProfiles.recommend(freshIdx, state.recommendations.map((t) => t.bvid),
+      strict ? (batch) => appendRecommendationBatch(batch, generation) : undefined);
+    const incoming = strict ? suggested : window.BiuRecommendation.blend(base, suggested);
+    if (generation !== libraryLoadToken) return;
+    appendRecommendationBatch(incoming, generation);
+    loader.textContent = '继续向下滚动加载更多';
   } catch (error) {
     if (generation !== libraryLoadToken) return;
     console.error('追加音乐推荐失败', error);
-    loader.textContent = '加载失败，继续滚动重试';
+    loader.textContent = error.message || '加载失败，继续滚动重试';
+    toast(loader.textContent);
   } finally {
     if (generation === libraryLoadToken) {
       recommendationLoading = false;
@@ -4032,7 +4071,10 @@ function initRecommendationInfiniteScroll() {
     if (!frame) frame = requestAnimationFrame(maybeLoad);
   }, { passive: true });
   view.addEventListener('scrollend', finishScroll, { passive: true });
-  $('recLoader').addEventListener('click', loadMoreRecommendations);
+  // Short/empty result pages may have no scroll range; wheel input still advances.
+  view.addEventListener('wheel', (event) => {
+    if (event.deltaY > 0 && !frame) frame = requestAnimationFrame(maybeLoad);
+  }, { passive: true });
 }
 
 async function loadLibrary({ force = false } = {}) {
@@ -4072,14 +4114,24 @@ async function fetchLibrary(loadToken) {
   recommendationUsesFeed = false;
   $('recLoader').classList.remove('loading');
 
-  $('recSource').textContent = 'B 站个性化音乐信息流';
+  $('recSource').textContent = settings.recommendMode === 'all' ? 'B 站个性化推荐 · 全部分区' : 'B 站个性化推荐 · 音乐分区';
   $('recLoader').textContent = '正在准备推荐流…';
-  publish('lib.rec', { tracks: [], hint: '正在获取你的音乐推荐…' });
+  publish('lib.rec', { tracks: [], hint: '正在获取你的推荐…' });
   const freshIdx = state.recommendFreshIdx;
   state.recommendFreshIdx += 3;
+  let strict;
+  try { strict = await recommendationProfiles.isStrict(); }
+  catch {
+    if (loadToken !== libraryLoadToken) return;
+    publish('lib.rec', { tracks: [], hint: '画像读取失败，请在设置中重试' });
+    $('recSource').textContent = '画像读取失败';
+    $('recLoader').textContent = '请在设置中重新读取画像';
+    return;
+  }
+  if (loadToken !== libraryLoadToken) return;
   const [rankingResult, recommendationResult] = await Promise.allSettled([
-    api.ranking(),
-    api.recommendMusic(freshIdx, 12),
+    strict ? Promise.resolve([]) : api.ranking(),
+    strict ? Promise.resolve([]) : api.recommendMusic(freshIdx, 12, settings.recommendMode),
   ]);
   if (loadToken !== libraryLoadToken) return;
 
@@ -4088,25 +4140,61 @@ async function fetchLibrary(loadToken) {
   } else {
     console.error('音乐区排行加载失败', rankingResult.reason);
   }
-  const personalized = recommendationResult.status === 'fulfilled'
-    ? recommendationResult.value : [];
+  // Show platform recommendations while tag analysis is still running.
+  const initialRecommendations = recommendationResult.status === 'fulfilled' && recommendationResult.value.length
+    ? recommendationResult.value : state.ranking;
+  if (!strict && initialRecommendations.length) {
+    state.recommendations = initialRecommendations;
+    renderRecommendationCards(true);
+  }
+  if (!strict && recommendationResult.status === 'fulfilled') recommendationProfiles.observeFeed(recommendationResult.value);
+  if (strict) {
+    recommendationLoading = true;
+    $('recLoader').classList.add('loading');
+    $('recSource').textContent = '自定义画像 · 严格匹配';
+  }
+  let suggested;
+  try {
+    suggested = await recommendationProfiles.recommend(freshIdx, [],
+      strict ? (batch) => appendRecommendationBatch(batch, loadToken) : undefined);
+  } catch (error) {
+    if (loadToken !== libraryLoadToken) return;
+    recommendationLoading = false;
+    recommendationUsesFeed = strict;
+    $('recLoader').classList.remove('loading');
+    $('recLoader').textContent = error.message || '推荐加载失败，请稍后重试';
+    $('grid-rec').innerHTML = `<div class="list-hint">${esc($('recLoader').textContent)}</div>`;
+    $('recSource').textContent = '推荐暂不可用';
+    return;
+  }
+  if (loadToken !== libraryLoadToken) return;
+  const personalized = strict ? suggested : window.BiuRecommendation.blend(
+    recommendationResult.status === 'fulfilled' ? recommendationResult.value : [],
+    suggested,
+  );
   if (recommendationResult.status === 'rejected') {
     console.error('个性化音乐推荐加载失败', recommendationResult.reason);
   }
-  state.recommendations = personalized.length ? personalized : state.ranking;
-  recommendationUsesFeed = personalized.length > 0;
+  if (strict) {
+    appendRecommendationBatch(suggested, loadToken);
+    recommendationLoading = false;
+    $('recLoader').classList.remove('loading');
+  } else state.recommendations = personalized.length ? personalized : state.ranking;
+  recommendationUsesFeed = strict || personalized.length > 0;
   const R = state.recommendations;
   if (!R.length) {
-    publish('lib.rec', { tracks: [], hint: '推荐加载失败，请检查网络后重试' });
-    $('recSource').textContent = '暂时无法连接 B 站';
-    $('recLoader').textContent = '暂无更多内容';
+    const hint = strict ? '当前推荐范围暂无匹配此画像的视频，可继续加载或调整标签' : '推荐加载失败，请检查网络后重试';
+    publish('lib.rec', { tracks: [], hint });
+    $('recSource').textContent = strict ? '自定义画像 · 严格匹配' : '暂时无法连接 B 站';
+    $('recLoader').textContent = strict ? '继续查找匹配视频（向下滚动）' : '暂无更多内容';
+    libraryLoaded = strict;
     return;
   }
 
-  $('recSource').textContent = personalized.length
-    ? 'B 站个性化音乐信息流' : '音乐区热榜兜底';
-  // 保持推荐流原始顺序，并在滚动到底部时继续追加新一批。
-  renderRecommendationCards(true);
+  $('recSource').textContent = strict ? '自定义画像 · 严格匹配' : personalized.length
+    ? `个性化推荐 · ${settings.recommendMode === 'all' ? '全部分区' : '音乐分区'} · 兴趣画像` : '音乐区热榜兜底';
+  // Strict batches have already been appended without rebuilding visible cards.
+  if (!strict) renderRecommendationCards(true);
   libraryLoaded = true;
   $('recLoader').textContent = recommendationUsesFeed ? '向下滚动加载更多' : '当前显示音乐区热榜';
   // 卡带侧卡换上热榜真实封面；历史卡用最近播放封面（无记录时保留渐变占位）
@@ -4596,35 +4684,27 @@ function initUpPage() {
 }
 
 /* ---------- 设置项（状态发布到 'settings' slice，交互由 SettingsView 组件回调） ---------- */
-let lanSyncBusy = false;
-async function manualLanSync() {
-  if (lanSyncBusy) return;
-  if (!window.bili?.lanSync) { toast('请在桌面客户端使用局域网同步'); return; }
-  lanSyncBusy = true;
-  patchSlice('lanSync', { busy: true, error: '' });
-  try { publish('lanSync', await window.bili.lanSync(dataNs)); }
-  catch (e) { patchSlice('lanSync', { error: e.message || '同步启动失败' }); }
-  finally { lanSyncBusy = false; patchSlice('lanSync', { busy: false }); }
-}
-async function stopLanSync() {
-  try { await window.bili?.lanSyncStop?.(); }
-  catch (e) { patchSlice('lanSync', { error: e.message }); }
+function renderLanSync(status) { publish('lanSync', status); }
+async function setLanSyncEnabled(enabled) {
+  try { renderLanSync(await window.bili?.lanSyncConfigure?.(dataNs, enabled)); }
+  catch (e) { patchSlice('lanSync', { error: e.message || '同步设置保存失败' }); }
 }
 function initLanSync() {
-  window.bili?.onLanSyncStatus?.((status) => publish('lanSync', status));
-  window.bili?.onLanSyncLibrary?.(({ scope, library }) => {
+  window.bili?.onLanSyncStatus?.(renderLanSync);
+  window.bili?.onLanSyncLibrary?.(({ scope, library, base }) => {
     if (scope !== dataNs) return;
-    const merged = BiuLibrarySync.merge({ version: 1, likes, playlists: customPlaylists }, library);
+    const merged = BiuLibrarySync.reconcile(base, { version: 1, likes, playlists: customPlaylists }, library);
     likes = merged.likes; customPlaylists = merged.playlists;
     saveLikes(); saveCustomPlaylists(); refreshLikeUI(); renderMyPlaylists(); renderFavButtons();
     publish('likes', likes.slice());
     const current = customPlaylists.find((p) => p.id === state.playlist?.customId);
     if (current && document.body.dataset.view === 'playlist') openPlaylist(customPlaylistDetail(current));
   });
-  window.bili?.lanSyncStatus?.().then((status) => publish('lanSync', status)).catch(() => {});
+  window.bili?.lanSyncConfigure?.(dataNs).then(renderLanSync).catch(() => {});
 }
 function publishSettings() {
   publish('settings', {
+    recommendMode: settings.recommendMode,
     quality: settings.quality,
     vq: settings.vq,
     danmaku: settings.danmaku,
@@ -4632,6 +4712,14 @@ function publishSettings() {
     blur: settings.blur,
     deskLyric: deskLyricOn,
   });
+}
+
+function setRecommendMode(mode) {
+  if (!['music', 'all'].includes(mode) || settings.recommendMode === mode) return;
+  settings.recommendMode = mode;
+  store.set('biu-recommend-mode', mode);
+  publishSettings();
+  loadLibrary({ force: true }).catch((error) => toast(error.message || '推荐加载失败'));
 }
 
 // 在线音质：立即作用于当前曲目（断点续播）
@@ -4694,14 +4782,6 @@ function toggleSyncHistory() {
   store.set('biu-sync-history', settings.syncHistory);
   publishSettings();
   if (settings.syncHistory && !authState.isLogin) toast('未登录：记录会在登录后才开始同步');
-}
-
-// 背景模糊度：0 - 40px（滑条拖动由组件高频回调）
-function setBlurPx(px) {
-  settings.blur = px;
-  store.set('biu-blur', px);
-  document.documentElement.style.setProperty('--bg-blur', px + 'px');
-  publishSettings();
 }
 
 // 桌面歌词（仅 Electron）
@@ -5267,8 +5347,8 @@ window.biuUi = { go, openPanel, closePanel };
 // 供 React 视图组件（LibraryGrids 等）触发的行为桥
 window.biuActions = { openPlaylist, likesPlaylist, rankingPlaylist, customPlaylistDetail, openPlDialog, setQueue, openFavFolder, showLogin, isLiked, toggleLike, plDeleteTrack, plReorder, togglePlEditing, pickInlineCover, openUpPage, toggleFollow, playDynVideo, playIndex, toggleFavFolder, toggleTrackInPlaylist,
   // 设置面板（SettingsView）
-  setQuality, setVQuality, toggleDanmaku, toggleSyncHistory, setBlurPx, toggleDeskLyric,
-  manualLanSync, stopLanSync,
+  setRecommendMode, setQuality, setVQuality, toggleDanmaku, toggleSyncHistory, toggleDeskLyric,
+  setLanSyncEnabled,
   // 登录弹窗（LoginView）
   switchLoginTab, refreshQrLogin, sendSmsCode, submitSmsLogin, hideQrLogin, logout,
   // 歌单新建/删除对话框（PlDialogView）

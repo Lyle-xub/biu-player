@@ -75,7 +75,10 @@ function toTrack(v) {
     bvid: v.bvid || null,
     aid: v.aid || v.id || 0,
     cid: v.cid || 0,
+    mid: v.owner?.mid || v.mid || 0,
     title: stripEm(v.title),
+    tid: Number(v.tid || v.typeid) || 0, tags: v.tags || (typeof v.tag === 'string' ? v.tag.split(',') : []),
+    desc: String(v.desc || v.description || '').slice(0, 1500),
     up: (v.owner && v.owner.name) || v.author || '',
     duration: parseDur(v.duration),
     pic: v.pic ? (v.pic.startsWith('//') ? 'https:' + v.pic : v.pic.replace(/^http:/, 'https:')) : null,
@@ -97,7 +100,10 @@ function recommendationToTrack(item, detail) {
     up: (item.owner && item.owner.name) || (detail.owner && detail.owner.name) || '',
     duration: Number(item.duration || detail.duration || 0),
     pic: (item.pic || detail.pic || '').replace(/^http:/, 'https:'),
+    mid: item.owner?.mid || detail.owner?.mid || 0,
     tid: detail.tid,
+    tags: detail.tags || (typeof item.tag === 'string' ? item.tag.split(',') : []),
+    desc: String(detail.desc || item.description || '').slice(0, 1500),
     tname: detail.tname || '音乐',
     recommendationReason: item.rcmd_reason && item.rcmd_reason.content || '',
     stat: item.stat || detail.stat || null,
@@ -730,11 +736,11 @@ const api = {
   async ranking() {
     if (!hasBridge) return mockTracks();
     const data = await jget('https://api.bilibili.com/x/web-interface/ranking/v2?rid=3&ps=20');
-    return (data.list || []).map(toTrack).filter((t) => t.duration > 30);
+    return (data.list || []).map(toTrack);
   },
 
   // 首页真实推荐信息流：沿用 PiliPlus 的 WBI Web 推荐参数，再以视频详情严格筛选音乐分区。
-  async recommendMusic(freshIdx = 0, limit = 12) {
+  async recommendMusic(freshIdx = 0, limit = 12, mode = 'music') {
     if (!hasBridge) return mockTracks().slice(0, limit);
     const result = [];
     const seen = new Set();
@@ -751,6 +757,10 @@ const api = {
       const candidates = (data.item || []).filter((item) =>
         item.goto === 'av' && item.bvid && item.owner && !seen.has(item.bvid));
       candidates.forEach((item) => seen.add(item.bvid));
+      if (mode === 'all') {
+        result.push(...candidates.map((item) => recommendationToTrack(item, item)));
+        continue;
+      }
 
       // 小批量补取分区字段，既保持推荐顺序，也避免同时发出大量详情请求。
       for (let offset = 0; offset < candidates.length && result.length < limit; offset += 5) {
@@ -759,7 +769,7 @@ const api = {
           api.view(item.bvid).catch(() => null)));
         batch.forEach((item, i) => {
           const detail = details[i];
-          if (detail && isMusicPartition(detail) && Number(item.duration || detail.duration || 0) > 30) {
+          if (detail && isMusicPartition(detail)) {
             result.push(recommendationToTrack(item, detail));
           }
         });
@@ -768,7 +778,7 @@ const api = {
     return result.slice(0, limit);
   },
 
-  // 视频搜索（筛掉 60 秒以内的短视频），返回 { list, numPages, page }
+  // 视频搜索（不按时长排除短视频），返回 { list, numPages, page }
   // order: '' 综合 / click 最多播放 / pubdate 最新发布 / dm 最多弹幕 / stow 最多收藏
   // duration: 0 全部 / 1 <10 分钟 / 2 10-30 / 3 30-60 / 4 60+
   async search(keyword, order = '', duration = 0, page = 1) {
@@ -783,7 +793,7 @@ const api = {
     const list = (data.result || [])
       .filter((v) => v.type === 'video')
       .map(toTrack)
-      .filter((t) => t.bvid && t.duration > 60);
+      .filter((t) => t.bvid);
     return { list, numPages: data.numPages || 1, page: data.page || page };
   },
 
@@ -1324,12 +1334,12 @@ const api = {
   // 联网搜索歌曲候选：并行搜 QQ 音乐 + 网易云，返回合并候选列表（QQ 在前）。
   // QQ 候选封面由 albummid 直拼 y.gtimg.cn 图床（无需二次请求）；网易云候选封面按需 resolveSongCover。
   // 返回 [{ title, artist, duration, pic, source: 'qq' | 'netease', id?, albummid? }]；两源都失败返回 []
-  async searchSongCandidates(name) {
+  async searchSongCandidates(name, { source, limit = 6 } = {}) {
     if (!hasBridge || !name) return [];
     const fetchNetease = async () => {
       try {
         const r = await window.bili.get('https://music.163.com/api/search/get/web?s='
-          + encodeURIComponent(name) + '&type=1&limit=6&offset=0');
+          + encodeURIComponent(name) + `&type=1&limit=${limit}&offset=0`);
         if (r.status !== 200) return [];
         return (((JSON.parse(r.body).result || {}).songs) || []).map((s) => ({
           title: s.name,
@@ -1344,7 +1354,7 @@ const api = {
     const fetchQQ = async () => {
       try {
         const r = await window.bili.get('https://c.y.qq.com/soso/fcgi-bin/client_search_cp?w='
-          + encodeURIComponent(name) + '&format=json&p=1&n=6&t=0',
+          + encodeURIComponent(name) + `&format=json&p=1&n=${limit}&t=0`,
           { referer: 'https://y.qq.com/' });
         if (r.status !== 200) return [];
         const list = ((JSON.parse(r.body).data || {}).song || {}).list || [];
@@ -1361,7 +1371,9 @@ const api = {
         })).filter((s) => s.title);
       } catch (e) { return []; }
     };
-    const [ne, qq] = await Promise.all([fetchNetease(), fetchQQ()]);
+    const [ne, qq] = await Promise.all([
+      source === 'qq' ? [] : fetchNetease(), source === 'netease' ? [] : fetchQQ(),
+    ]);
     return [...qq, ...ne]; // QQ 在前：手动填名匹配默认采用 QQ 结果
   },
 
@@ -1444,13 +1456,14 @@ const api = {
     return null;
   },
 
-  // 单曲歌词搜索（参考主流播放器做法）：网易云搜索 → 按时长挑歌 → 拉 LRC 时间轴
+  // 单曲歌词搜索：QQ 优先，未命中可用歌词再查网易云；各源按时长挑歌。
   // 命中失败（无结果 / 时长差太多 / 纯音乐）返回 null，由调用方回退 AI 字幕
   async searchLyric(title, artist, durationSec) {
     if (!hasBridge || !title) return null;
     try {
-      // B 站标题噪音多：去书名号/方括号/画质与“官方/MV”等修饰词
-      let q = String(title)
+      // 优先使用书名号内的歌名；没有明确歌名时再清洗视频标题。
+      const songTitle = String(title).match(/《([^《》]+)》/)?.[1].trim();
+      let q = songTitle || String(title)
         .replace(/【[^】]*】/g, ' ')
         .replace(/\[[^\]]*\]/g, ' ')
         .replace(/[《》「」]/g, ' ')
@@ -1458,65 +1471,39 @@ const api = {
         .replace(/(官方|完整版|无损|高音质|音质|歌词版|字幕版)/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
-      if (q.length < 2) q = String(title).trim();
+      if (!songTitle && q.length < 2) q = String(title).trim();
       const queries = [q];
       if (artist && !q.includes(artist)) queries.push(`${q} ${artist}`);
-      let songs = [];
-      for (const query of queries) {
-        const r = await window.bili.get('https://music.163.com/api/search/get/web?s='
-          + encodeURIComponent(query) + '&type=1&limit=8&offset=0');
-        if (r.status !== 200) continue;
-        const d = JSON.parse(r.body);
-        songs = (d.result && d.result.songs) || [];
-        if (songs.length) break;
+      for (const source of ['qq', 'netease']) {
+        let songs = [];
+        for (const query of queries) {
+          songs = await api.searchSongCandidates(query, { source, limit: 8 });
+          if (songs.length) break;
+        }
+        if (!songs.length) continue;
+        // 容忍 10s 取最接近者，否则仅接受搜索首项时长差不超过 15s。
+        let pick = songs[0];
+        if (durationSec > 0) {
+          const near = songs.filter((s) => Math.abs(s.duration - durationSec) <= 10)
+            .sort((a, b) => Math.abs(a.duration - durationSec) - Math.abs(b.duration - durationSec));
+          if (near.length) pick = near[0];
+          else if (Math.abs(pick.duration - durationSec) > 15) continue;
+        }
+        const lines = await api.lyricForMatch(pick);
+        if (lines?.length) return lines;
       }
-      if (!songs.length) return null;
-      // 时长相近优先（B 站视频常含片头片尾，容忍 10s；全不匹配且差距 >15s 视为搜错，放弃）
-      let pick = songs[0];
-      if (durationSec > 0) {
-        const near = songs
-          .filter((s) => Math.abs((s.duration || 0) / 1000 - durationSec) <= 10)
-          .sort((a, b) => Math.abs(a.duration / 1000 - durationSec) - Math.abs(b.duration / 1000 - durationSec));
-        if (near.length) pick = near[0];
-        else if (Math.abs((pick.duration || 0) / 1000 - durationSec) > 15) return null;
-      }
-      const r2 = await window.bili.get(`https://music.163.com/api/song/lyric?id=${pick.id}&lv=1`);
-      if (r2.status !== 200) return null;
-      const d2 = JSON.parse(r2.body);
-      if (d2.nolyric || d2.pureMusic || !d2.lrc || !d2.lrc.lyric) return null;
-      const lines = parseLrc(d2.lrc.lyric);
-      return lines.length >= 3 ? lines : null;
+      return null;
     } catch (e) {
       console.error('歌词搜索失败', e);
       return null;
     }
   },
 
-  // AI 字幕歌词（参考 wood3n/biu ai-lyrics）：x/player/v2 → subtitle_url → 时间轴歌词
-  // 注意：B 站字幕列表对匿名用户不可见，需先完成 B 站登录。
-  // 返回 [{ from, to, text }]，无字幕返回 null
+  // 旧播放器字幕优先；无可用字幕时回退新版 Protobuf 接口，沿用当前登录态。
+  // 返回 [{ from, to, text }]，无字幕返回 null。
   async subtitles(bvid, cid) {
     if (!hasBridge) return null;
-    const q = `bvid=${encodeURIComponent(bvid)}&cid=${cid}`;
-    let data;
-    try {
-      data = await jget('https://api.bilibili.com/x/player/wbi/v2?' + q, { wbi: true });
-    } catch (e) {
-      data = await jget('https://api.bilibili.com/x/player/v2?' + q);
-    }
-    const subs = data.subtitle && data.subtitle.subtitles;
-    if (!subs || !subs.length) return null;
-    const sub = subs.find((s) => /zh|chi|中文/i.test(s.lan || '')) || subs[0];
-    let url = sub.subtitle_url || '';
-    if (url.startsWith('//')) url = 'https:' + url;
-    if (!url) return null;
-    const r = await window.bili.get(url);
-    if (r.status !== 200) return null;
-    const json = JSON.parse(r.body);
-    const lines = (json.body || [])
-      .filter((l) => l && l.content)
-      .map((l) => ({ from: +l.from || 0, to: +l.to || 0, text: String(l.content).trim() }));
-    return lines.length ? lines : null;
+    return window.BiuSubtitles.fetchSubtitles(window.bili.get, bvid, cid);
   },
 
   // 历史弹幕 XML：原视频直播模式叠加使用。

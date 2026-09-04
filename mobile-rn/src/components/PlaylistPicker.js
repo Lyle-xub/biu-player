@@ -20,17 +20,20 @@ export default function PlaylistPicker({ track, onClose }) {
   };
 
   const pick = async (pl) => {
-    const r = await addToPlaylist(pl.id, track);
-    if (r === 'added') { onClose(); return; }
-    flash(r === 'dup' ? `「${pl.title}」里已有这首歌` : '加入失败');
+    try {
+      const r = await addToPlaylist(pl.id, track);
+      if (r === 'added') { onClose(); return; }
+      flash(r === 'dup' ? `「${pl.title}」里已有这首歌` : '加入失败');
+    } catch (e) { flash(e.message || '加入失败'); }
   };
 
   const createAndAdd = async () => {
-    const pl = await createPlaylist(newName);
-    if (!pl) { flash('先输入歌单名'); return; }
-    setNewName('');
-    if (track) await addToPlaylist(pl.id, track);
-    onClose();
+    try {
+      const pl = await createPlaylist(newName, track ? [track] : []);
+      if (!pl) { flash('先输入歌单名'); return; }
+      setNewName('');
+      onClose();
+    } catch (e) { flash(e.message || '新建失败'); }
   };
 
   return (

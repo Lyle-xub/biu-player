@@ -7,7 +7,7 @@
  */
 import { useEffect, useState } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { merge } from '../../../renderer/library-sync';
+import { reconcile } from '../../../renderer/library-sync';
 
 const KEY = 'biu.playlists';
 
@@ -15,6 +15,7 @@ let cache = null; // null = 尚未从磁盘加载
 let loading = null;
 let scope = '';
 let generation = 0;
+let writes = Promise.resolve();
 const listeners = new Set();
 const storageKey = () => (scope ? `${KEY}@${scope}` : KEY);
 
@@ -56,23 +57,27 @@ export async function setPlaylistScope(nextScope = '') {
   return value;
 }
 
-export async function mergeSyncedPlaylists(incoming) {
-  await ensureLoaded();
-  for (;;) {
-    const before = cache;
-    const next = merge({ version: 1, likes: [], playlists: before }, { version: 1, likes: [], playlists: incoming }).playlists;
+// Serialize edits and LAN merges; publish only after storage succeeds.
+function changePlaylists(update) {
+  const requestedGeneration = generation;
+  const operation = writes.then(async () => {
+    await ensureLoaded();
+    if (generation !== requestedGeneration) throw new Error('账号已切换，请重新打开歌单');
+    const next = update(cache);
+    if (next === cache) return cache;
     await AsyncStorage.setItem(storageKey(), JSON.stringify(next));
-    // Preserve edits made while the native storage write was in flight.
-    if (cache !== before) continue;
+    if (generation !== requestedGeneration) throw new Error('账号已切换，请重新打开歌单');
     cache = next;
     listeners.forEach((fn) => fn(cache));
     return cache;
-  }
+  });
+  writes = operation.catch(() => {});
+  return operation;
 }
 
-function persist() {
-  AsyncStorage.setItem(storageKey(), JSON.stringify(cache || [])).catch(() => {});
-  listeners.forEach((fn) => fn(cache));
+export function mergeSyncedPlaylists(incoming, base) {
+  return changePlaylists((list) => reconcile(base ? { version: 1, likes: [], playlists: base } : null,
+    { version: 1, likes: [], playlists: incoming }, { version: 1, likes: [], playlists: list }).playlists);
 }
 
 import { trackKeyOf } from '../player/track';
@@ -91,38 +96,67 @@ export function usePlaylists() {
   return list;
 }
 
-export async function createPlaylist(title, tracks = []) {
+export async function createPlaylist(title, tracks = [], metadata = {}) {
   const name = String(title || '').trim();
   if (!name) return null;
-  await ensureLoaded();
-  const pl = { id: Date.now(), title: name, tracks, createdAt: Date.now() };
-  cache = [...cache, pl];
-  persist();
+  const pl = { id: Date.now(), title: name, tracks, createdAt: Date.now(),
+    ...(metadata.cover ? { cover: metadata.cover } : {}), ...(metadata.desc ? { desc: metadata.desc } : {}) };
+  await changePlaylists((list) => {
+    while (list.some((p) => p.id === pl.id)) pl.id += 1;
+    return [...list, pl];
+  });
   return pl;
 }
 
-export async function deletePlaylist(id) {
-  await ensureLoaded();
-  cache = cache.filter((p) => p.id !== id);
-  persist();
+export function deletePlaylist(id) {
+  return changePlaylists((list) => list.filter((p) => p.id !== id));
 }
 
 /** 把曲目加入歌单（按 bvid/aid 去重；已在歌单里则不动）。返回 'added' | 'dup' | null */
 export async function addToPlaylist(id, track) {
-  await ensureLoaded();
-  const pl = cache.find((p) => p.id === id);
-  if (!pl || !track || !trackKeyOf(track)) return null;
-  if (pl.tracks.some((t) => trackKeyOf(t) === trackKeyOf(track))) return 'dup';
-  cache = cache.map((p) => (p.id === id ? { ...p, tracks: [...p.tracks, track] } : p));
-  persist();
-  return 'added';
+  let result = null;
+  await changePlaylists((list) => {
+    const pl = list.find((p) => p.id === id);
+    if (!pl || !track || !trackKeyOf(track)) return list;
+    if (pl.tracks.some((t) => trackKeyOf(t) === trackKeyOf(track))) { result = 'dup'; return list; }
+    result = 'added';
+    return list.map((p) => p.id === id ? { ...p, tracks: [...p.tracks, track] } : p);
+  });
+  return result;
 }
 
 /** 从歌单移除一首（key = bvid/aid） */
-export async function removeFromPlaylist(id, key) {
-  await ensureLoaded();
-  cache = cache.map((p) => (p.id === id
-    ? { ...p, tracks: p.tracks.filter((t) => trackKeyOf(t) !== key) }
-    : p));
-  persist();
+export function removeFromPlaylist(id, key) {
+  return removePlaylistTracks(id, [key]);
+}
+
+export function removePlaylistTracks(id, keys) {
+  const removed = new Set(keys);
+  return changePlaylists((list) => list.map((p) => p.id === id
+    ? { ...p, tracks: p.tracks.filter((t) => !removed.has(trackKeyOf(t))) } : p));
+}
+
+export function updatePlaylist(id, { title, desc, cover }) {
+  const name = String(title || '').trim();
+  if (!name) return Promise.reject(new Error('歌单名称不能为空'));
+  return changePlaylists((list) => {
+    if (!list.some((p) => p.id === id)) throw new Error('歌单已被删除');
+    return list.map((p) => p.id === id ? { ...p, title: name, desc: String(desc || '').trim(),
+      ...(cover !== undefined ? { cover } : {}) } : p);
+  });
+}
+
+/** toIndex is the final zero-based position; keys distinguish segments of one video. */
+export function movePlaylistTrack(id, key, toIndex) {
+  return changePlaylists((list) => {
+    const pl = list.find((p) => p.id === id);
+    if (!pl) throw new Error('歌单已被删除');
+    const from = pl.tracks.findIndex((t) => trackKeyOf(t) === key);
+    if (from < 0) throw new Error('歌曲已被移除');
+    if (!Number.isInteger(toIndex) || toIndex < 0 || toIndex >= pl.tracks.length) throw new Error('目标位置超出歌单范围');
+    if (from === toIndex) return list;
+    const tracks = [...pl.tracks];
+    tracks.splice(toIndex, 0, tracks.splice(from, 1)[0]);
+    return list.map((p) => p.id === id ? { ...p, tracks } : p);
+  });
 }

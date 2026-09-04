@@ -72,6 +72,7 @@
       <h3>我喜欢</h3>
       <p>本地收藏</p>
     </div>
+    <div class="card side" id="dailyHome"><div class="cover" data-cover="8"></div><h3>每日推荐</h3><p>为今天挑选</p></div>
     <div class="card side side-r" id="cardRank">
       <div class="cover" data-cover="5"><span class="count shelf-count"><span class="count-play"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></span><span class="count-label">B 站音乐区</span></span></div>
       <h3>音乐区热榜</h3>
@@ -99,6 +100,8 @@
     <div class="recommendation-loader" id="recLoader">向下滚动加载更多</div>
   </section>
 </section>
+
+<section class="view view-daily" id="dailyPage" aria-label="每日推荐"></section>
 
 <!-- ================= 收藏夹 ================= -->
 <section class="view view-fav">
@@ -516,9 +519,9 @@
 
 <!-- ============ 设置弹窗 ============ -->
 <div class="modal-mask" onclick="if(event.target===this)closePanel()">
-  <div class="modal">
-    <h3>设置</h3>
-    <div class="mrow">
+  <div class="modal settings-modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <header class="settings-heading"><h3 id="settingsTitle">设置</h3><button class="settings-close" type="button" aria-label="关闭设置" onclick="closePanel()"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m6 6 12 12M6 18 18 6"/></svg></button></header>
+    <div class="mrow settings-account">
       <div class="ml"><b>B 站账号</b><small id="authSubtitle">扫码或手机验证码安全登录</small></div>
       <div class="mr auth-actions" id="authLoggedOut">
         <button class="btn-ghost" id="btnQrLogin">扫码登录</button>
@@ -530,6 +533,18 @@
         <button class="auth-logout" id="btnLogout">退出</button>
       </div>
     </div>
+    <div class="settings-cards">
+    <section class="settings-card" aria-labelledby="settingsRecommendation"><h4 id="settingsRecommendation" class="settings-card-title">推荐与画像</h4>
+    <div id="recommendationProfiles"></div>
+    <div class="mrow recommend-mode-row">
+      <div class="ml"><b>首页推荐范围</b><small>适用于个性推荐和自定义画像；默认仅推荐音乐分区。</small></div>
+      <div class="mr"><span class="mseg" id="segRecommendMode" role="radiogroup" aria-label="首页推荐范围">
+        <button data-mode="music" role="radio" aria-checked="true" class="on">音乐分区推荐</button>
+        <button data-mode="all" role="radio" aria-checked="false">全部推荐</button>
+      </span></div>
+    </div>
+    </section>
+    <section class="settings-card" aria-labelledby="settingsPlayback"><h4 id="settingsPlayback" class="settings-card-title">播放与歌词</h4>
     <div class="mrow">
       <div class="ml"><b>在线音质</b><small>B 站音频流码率，无损需登录/大会员</small></div>
       <div class="mr"><span class="mseg" id="segQuality"><button data-q="0">标准</button><button data-q="1" class="on">高品</button><button data-q="2">无损</button></span></div>
@@ -547,20 +562,19 @@
       <div class="mr"><span class="switch off" id="swSyncHistory"></span></div>
     </div>
     <div class="mrow">
-      <div class="ml"><b>背景模糊度</b><small>沉浸式封面背景的模糊强度</small></div>
-      <div class="mr"><span class="slider" id="slBlur"><i></i></span></div>
-    </div>
-    <div class="mrow">
       <div class="ml"><b>桌面歌词</b><small>在屏幕上悬浮显示歌词</small></div>
       <div class="mr"><span class="switch off" id="swLyric"></span></div>
     </div>
+    </section>
+    <section class="settings-card" aria-labelledby="settingsSync"><h4 id="settingsSync" class="settings-card-title">数据与同步</h4>
     <div class="mrow lan-sync-row">
-      <div class="ml"><b>局域网同步</b><small>合并两端的我喜欢和自建歌单，自动去重，保留两端内容。</small>
-        <small id="lanSyncStatus" role="status">手机与电脑连接同一 Wi-Fi，点击手动同步开始配对。</small>
-        <small id="lanSyncPair" class="lan-sync-pair"></small>
+      <div class="ml"><b>局域网自动同步</b><small>默认开启。在同一 Wi-Fi 打开两端，登录相同账号后自动同步我喜欢、自建歌单、推荐画像及云同步密钥。</small>
+        <small id="lanSyncStatus" role="status">正在检查同步状态…</small>
       </div>
-      <div class="mr"><button class="btn-ghost" id="lanSyncStart" type="button">手动同步</button>
-        <button class="btn-ghost" id="lanSyncStop" type="button" hidden>关闭同步</button></div>
+      <div class="mr"><button class="switch" id="swLanSync" type="button" role="switch" aria-label="局域网自动同步" aria-checked="true"></button></div>
+    </div>
+    <div id="videoCloudSettings"></div>
+    </section>
     </div>
     <div class="mfoot">BIU PLAYER · v0.5.0 · 基于 BILIBILI 公开接口</div>
   </div>
@@ -687,11 +701,20 @@
 <audio id="audio" preload="auto" crossorigin="anonymous"></audio>
 
 <script src="vendor/hls.min.js"></script>
+<script src="subtitles.js"></script>
 <script src="api.js"></script>
 <script src="playback-session.js"></script>
+<script src="music-dictionary.js"></script>
+<script src="daily-recommendation.js"></script>
+<script src="daily-desktop.js"></script>
+<script src="recommendation-profile.js"></script>
+<script src="profile-presentation.js"></script>
 <script src="library-sync.js"></script>
 <script src="hot-comment-motion.js"></script>
 <script src="player-sheet-motion.js"></script>
+<script src="recommendation-editor.js"></script>
+<script src="recommendation-desktop.js"></script>
+<script src="video-cloud-settings.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

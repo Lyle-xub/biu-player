@@ -9,7 +9,7 @@
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  Alert, Image, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View,
+  Image, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors } from '../theme';
@@ -22,6 +22,7 @@ import { trackKeyOf } from '../player/track';
 import { createPlaylist, deletePlaylist, usePlaylists } from '../store/playlists';
 import { stabilizeFavoriteCovers } from '../store/favoriteCovers';
 import GeetestModal from '../components/GeetestModal';
+import ConfirmDialog, { Dialog } from '../components/Dialog';
 import DefaultCover, { defaultCoverSeed } from '../components/DefaultCover';
 import RemoteImage from '../components/RemoteImage';
 import {
@@ -32,6 +33,8 @@ export default function MineScreen({ navigation }) {
   const { likes, playQueue, history, account: auth, switchAccount } = usePlayer();
   const playlists = usePlaylists();
   const [gridTab, setGridTab] = useState('local'); // local 自建歌单 | fav 收藏夹
+  const [confirm, setConfirm] = useState(null);
+  const [libraryError, setLibraryError] = useState('');
   const [favs, setFavs] = useState([]);
   const [favLoading, setFavLoading] = useState(false);
   const [favError, setFavError] = useState(null);
@@ -64,6 +67,7 @@ export default function MineScreen({ navigation }) {
   }, []);
 
   useEffect(() => { if (auth) loadFavs(auth); }, [auth, loadFavs]);
+  useEffect(() => navigation.addListener?.('focus', () => loadFavs(auth)), [navigation, auth, loadFavs]);
   useEffect(() => () => clearInterval(timerRef.current), []);
 
   const setMsg = (text, ok = false) => setStatus({ text, ok });
@@ -161,10 +165,8 @@ export default function MineScreen({ navigation }) {
 
   /* ---------- 菜单与卡片行为 ---------- */
   const needLoginAlert = () => {
-    Alert.alert('未登录', '收藏夹是你的 B 站数据，登录后可查看', [
-      { text: '取消', style: 'cancel' },
-      { text: '去登录', onPress: () => setLoginVisible(true) },
-    ]);
+    setConfirm({ title: '未登录', message: '收藏夹是你的 B 站数据，登录后可查看',
+      confirmText: '去登录', onConfirm: () => setLoginVisible(true) });
   };
 
   const menuItems = [
@@ -191,17 +193,19 @@ export default function MineScreen({ navigation }) {
   ];
 
   const submitCreate = async () => {
-    const pl = await createPlaylist(newPlName);
-    if (!pl) return;
-    setNewPlName('');
-    setCreateVisible(false);
+    try {
+      const pl = await createPlaylist(newPlName);
+      if (!pl) return;
+      setNewPlName(''); setCreateVisible(false);
+    } catch (e) { setLibraryError(e.message || '新建歌单失败'); }
   };
 
   const confirmDeletePl = (pl) => {
-    Alert.alert('删除歌单', `确定删除歌单「${pl.title}」吗？此操作不可恢复。`, [
-      { text: '取消', style: 'cancel' },
-      { text: '删除', style: 'destructive', onPress: () => deletePlaylist(pl.id) },
-    ]);
+    setConfirm({ title: '删除歌单', message: `确定删除歌单「${pl.title}」吗？此操作不可恢复。`,
+      confirmText: '删除', destructive: true, onConfirm: async () => {
+        try { await deletePlaylist(pl.id); }
+        catch (e) { setLibraryError(e.message || '删除歌单失败'); }
+      } });
   };
 
   const renderGridCard = ({ key, pic, seed, title, meta, onPress, onLongPress }) => (
@@ -310,8 +314,9 @@ export default function MineScreen({ navigation }) {
         </ScrollView>
 
         {/* 歌单卡片区：分段标题 + 新建 */}
-        <View style={styles.sectionHead}>
-          <TouchableOpacity onPress={() => setGridTab('local')} hitSlop={6}>
+        <View style={[styles.sectionHead, styles.gridHead]}>
+          <TouchableOpacity onPress={() => setGridTab('local')} hitSlop={6}
+            accessibilityRole="tab" accessibilityLabel="自建歌单" accessibilityState={{ selected: gridTab === 'local' }}>
             <Text style={[styles.segTitle, gridTab === 'local' && styles.segTitleOn]}>
               自建歌单 {playlists.length}
             </Text>
@@ -319,6 +324,7 @@ export default function MineScreen({ navigation }) {
           <TouchableOpacity
             onPress={() => (auth && auth.isLogin ? setGridTab('fav') : needLoginAlert())}
             hitSlop={6}
+            accessibilityRole="tab" accessibilityLabel="收藏夹" accessibilityState={{ selected: gridTab === 'fav' }}
           >
             <Text style={[styles.segTitle, gridTab === 'fav' && styles.segTitleOn]}>
               收藏夹 {auth && auth.isLogin ? favs.length : ''}
@@ -365,7 +371,7 @@ export default function MineScreen({ navigation }) {
               seed: f.seed,
               title: f.title,
               meta: `${f.count} 首`,
-              onPress: () => navigation.navigate('PlaylistDetail', { mediaId: f.id, title: f.title }),
+              onPress: () => navigation.navigate('PlaylistDetail', { mediaId: f.id, title: f.title, intro: f.intro }),
             }))}
           </View>
         ) : (
@@ -374,9 +380,7 @@ export default function MineScreen({ navigation }) {
       </ScrollView>
 
       {/* 新建歌单弹窗 */}
-      <Modal visible={createVisible} transparent animationType="fade" onRequestClose={() => setCreateVisible(false)}>
-        <View style={styles.modalMask}>
-          <View style={styles.modalCard}>
+      <Dialog visible={createVisible} onClose={() => setCreateVisible(false)}>
             <Text style={styles.modalTitle}>新建歌单</Text>
             <View style={styles.field}>
               <TextInput
@@ -395,14 +399,10 @@ export default function MineScreen({ navigation }) {
             <TouchableOpacity onPress={() => setCreateVisible(false)} hitSlop={8}>
               <Text style={styles.closeText}>取消</Text>
             </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
+      </Dialog>
 
       {/* 验证码登录弹窗 */}
-      <Modal visible={loginVisible} transparent animationType="fade" onRequestClose={closeLogin}>
-        <View style={styles.modalMask}>
-          <View style={styles.modalCard}>
+      <Dialog visible={loginVisible} onClose={closeLogin}>
             <Text style={styles.modalTitle}>手机号登录</Text>
             <View style={styles.field}>
               <Text style={styles.prefix}>+86</Text>
@@ -451,9 +451,15 @@ export default function MineScreen({ navigation }) {
             <TouchableOpacity onPress={closeLogin} hitSlop={8}>
               <Text style={styles.closeText}>关闭</Text>
             </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
+      </Dialog>
+      <ConfirmDialog config={confirm} onClose={() => setConfirm(null)} />
+      <Dialog visible={!!libraryError} onClose={() => setLibraryError('')}>
+        <Text style={styles.modalTitle}>保存失败</Text>
+        <Text style={styles.status}>{libraryError}</Text>
+        <TouchableOpacity style={styles.submitBtn} onPress={() => setLibraryError('')}>
+          <Text style={styles.submitText}>知道了</Text>
+        </TouchableOpacity>
+      </Dialog>
 
       {/* 极验滑块 */}
       {gtParams ? (
@@ -515,6 +521,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16, marginTop: 18, marginBottom: 10,
   },
   sectionTitle: { color: colors.text, fontSize: 14, fontWeight: '600', flex: 1 },
+  gridHead: { minHeight: 28 }, // 与新建按钮等高，切换收藏夹时不收缩。
   sectionMore: { color: colors.text3, fontSize: 12 },
   segTitle: { color: colors.text3, fontSize: 14, fontWeight: '500' },
   segTitleOn: { color: colors.text, fontWeight: '700' },
@@ -563,16 +570,6 @@ const styles = StyleSheet.create({
   actionText: { color: colors.accent, fontSize: 13, fontWeight: '600' },
 
   /* 弹窗 */
-  modalMask: {
-    flex: 1, backgroundColor: 'rgba(0,0,0,0.62)',
-    alignItems: 'center', justifyContent: 'center',
-  },
-  modalCard: {
-    alignItems: 'stretch', gap: 12,
-    backgroundColor: colors.bgSoft, borderRadius: 24, padding: 22,
-    borderWidth: 1, borderColor: colors.cardBorder,
-    width: '84%',
-  },
   modalTitle: { color: colors.text, fontSize: 16, fontWeight: '600', textAlign: 'center' },
   field: {
     flexDirection: 'row', alignItems: 'center',

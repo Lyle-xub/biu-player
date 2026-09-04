@@ -22,9 +22,13 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as bili from '../api/bili';
 import { authStatus, initClient, streamHeaders } from '../api/client';
 import { segmentRange, trackKeyOf } from './track';
+import { PLAYBACK_QUALITIES, normalizePlaybackQuality } from './playbackQuality';
 import { getPlaylists, mergeSyncedPlaylists, setPlaylistScope } from '../store/playlists';
 import { accountKey, adoptGuestLibrary, readAccountValue } from '../store/accountStorage';
-import { merge, normalize } from '../../../renderer/library-sync';
+import { reconcile, normalize } from '../../../renderer/library-sync';
+
+import useRecommendationProfile from '../store/useRecommendationProfile';
+import { tracker } from '../../../renderer/daily-recommendation';
 
 const LIKES_KEY = 'biu.likes';
 const HISTORY_KEY = 'biu.history';
@@ -47,6 +51,7 @@ export function PlayerProvider({ children }) {
   const { isPlaying } = useEvent(player, 'playingChange', { isPlaying: player.playing });
   const { status } = useEvent(player, 'statusChange', { status: player.status });
   const [currentTime, setCurrentTime] = useState(0);
+  const pendingSeek = useRef(null);
 
   const [queue, setQueue] = useState([]);
   const [index, setIndex] = useState(-1);
@@ -60,10 +65,13 @@ export function PlayerProvider({ children }) {
   const [account, setAccount] = useState(null);
   const accountScope = useRef('');
   const accountSwitch = useRef(Promise.resolve());
+  const libraryEpoch = useRef(0);
+  const libraryReadyRef = useRef(false);
   const likesRef = useRef(likes);
   likesRef.current = likes;
   const [history, setHistory] = useState([]);
   const [quality, setQualityState] = useState(1);
+  const qualityEdited = useRef(false);
   const [lyricSettings, setLyricSettings] = useState({});
   const [lyricEffect, setLyricEffectState] = useState('simple');
   const [recommendMode, setRecommendModeState] = useState('music');
@@ -71,11 +79,15 @@ export function PlayerProvider({ children }) {
   const lyricEffectEdited = useRef(false);
   const recommendModeEdited = useRef(false);
   const tokenRef = useRef(0);
+  const listeningRef = useRef(null);
+  const searchPlaybackRef = useRef(false);
   const resolvingRef = useRef(false);
   const loadedMediaKey = useRef(null);
   const replaceChain = useRef(Promise.resolve()); // 串行化 replaceAsync，防串台
 
   const switchAccount = useCallback((nextAccount) => {
+    libraryEpoch.current += 1;
+    libraryReadyRef.current = false;
     const normalized = nextAccount && nextAccount.isLogin
       ? nextAccount : { isLogin: false };
     accountSwitch.current = accountSwitch.current.catch(() => {}).then(async () => {
@@ -93,6 +105,7 @@ export function PlayerProvider({ children }) {
       setLikes(likesRef.current);
       setHistory(Array.isArray(nextHistory) ? nextHistory : []);
       setAccount(normalized);
+      libraryReadyRef.current = true;
       setLibraryReady(true);
       return normalized;
     });
@@ -107,7 +120,7 @@ export function PlayerProvider({ children }) {
           AsyncStorage.getItem(QUALITY_KEY),
           AsyncStorage.getItem(LYRIC_KEY),
         ]);
-        if (q !== null) setQualityState(Number(q));
+        if (q !== null && !qualityEdited.current) setQualityState(normalizePlaybackQuality(q));
         if (lyric) setLyricSettings(JSON.parse(lyric) || {});
       } catch (e) { /* 本地数据损坏时从空开始 */ }
     })();
@@ -139,18 +152,23 @@ export function PlayerProvider({ children }) {
     AsyncStorage.setItem(accountKey(key, accountScope.current), JSON.stringify(val)).catch(() => {});
   }, []);
 
-  const playIndex = useCallback(async (list, i, keepShuffleHistory = false) => {
+  const playIndex = useCallback(async (list, i, keepShuffleHistory = false, automatic = false, startAt = 0) => {
     const t = list[i];
     if (!t) return;
+    listeningRef.current?.start(t, { manual: !automatic, search: !automatic && searchPlaybackRef.current });
+    searchPlaybackRef.current = false;
     if (!keepShuffleHistory) shuffleHistory.current = [];
     setQueue(list);
     setIndex(i);
     setResolving(true);
     setPlayError(null);
     const token = ++tokenRef.current;
+    pendingSeek.current = null;
     resolvingRef.current = true;
     try {
-      player.pause();
+      // 自动续播时保留 playWhenReady：pause 会让 Android 媒体服务退出前台，
+      // 随后的后台取流 / 重新播放可能被系统限制。replaceAsync 本身会切换旧媒体。
+      if (!automatic) player.pause();
       let source;
       let mediaKey;
       if (t.isLive) {
@@ -173,8 +191,8 @@ export function PlayerProvider({ children }) {
         if (!cid) throw new Error('无法获取视频分 P 信息');
         mediaKey = `${t.bvid}:${cid}:${quality}`;
         if (loadedMediaKey.current !== mediaKey) {
-          // progressive mp4（含音轨）：标准音质 → qn 32（480P 省流），其余默认档（登录可到 1080P）
-          const url = await bili.videoUrl(t.bvid, cid, quality === 0 ? 32 : undefined);
+          // 音画共用视频流；自动不指定 qn，手动档位传递实际的视频清晰度。
+          const url = await bili.videoUrl(t.bvid, cid, quality === 1 ? undefined : quality);
           if (token !== tokenRef.current) return; // 已被更新的切歌请求取代
           source = { uri: url, headers: streamHeaders(), contentType: 'progressive' };
         }
@@ -198,8 +216,12 @@ export function PlayerProvider({ children }) {
         }
         if (token !== tokenRef.current) return;
         const segment = segmentRange(t);
-        if (!t.isLive) player.currentTime = segment?.from || 0;
-        setCurrentTime(segment?.from || 0);
+        const offset = Number.isFinite(startAt) ? Math.max(0, Math.min(startAt,
+          segment ? segment.to - segment.from : (player.duration || t.duration || Infinity))) : 0;
+        const start = (segment?.from || 0) + offset;
+        if (!t.isLive) player.currentTime = start;
+        if (!t.isLive && offset > 0) pendingSeek.current = { target: start, started: Date.now() };
+        setCurrentTime(start);
         player.play();
         if (!t.isLive) {
           setHistory((h) => {
@@ -221,9 +243,12 @@ export function PlayerProvider({ children }) {
     }
   }, [player, quality, persistLibrary]);
 
-  const playQueue = useCallback((tracks, i = 0) => playIndex(tracks, i), [playIndex]);
+  const playQueue = useCallback((tracks, i = 0, startAt = 0, source = '') => {
+    searchPlaybackRef.current = source === 'search';
+    return playIndex(tracks, i, false, false, startAt);
+  }, [playIndex]);
 
-  const next = useCallback(() => {
+  const next = useCallback((automatic = false) => {
     if (!queue.length) return;
     let target = (index + 1) % queue.length;
     if (playMode === 'shuffle' && !isLive && queue.length > 1) {
@@ -231,7 +256,7 @@ export function PlayerProvider({ children }) {
       target = (index + 1 + Math.floor(Math.random() * (queue.length - 1))) % queue.length;
       shuffleHistory.current = [...shuffleHistory.current.slice(-99), index];
     }
-    return playIndex(queue, target, true);
+    return playIndex(queue, target, true, automatic === true);
   }, [queue, index, playIndex, playMode, isLive]);
 
   const prev = useCallback(() => {
@@ -248,16 +273,17 @@ export function PlayerProvider({ children }) {
   }, [player, current, playError, queue, index, playIndex]);
 
   const seekTo = useCallback((sec) => {
-    if (current && current.isLive) return; // 直播不可拖
+    if (!current || current.isLive || resolvingRef.current) return;
     if (!Number.isFinite(sec)) return;
     const segment = segmentRange(current);
     const end = segment ? segment.to - segment.from : (player.duration || current?.duration || Infinity);
     try {
       const target = (segment?.from || 0) + Math.max(0, Math.min(end, sec));
+      pendingSeek.current = { target, started: Date.now() };
       player.currentTime = target;
       setCurrentTime(target); // Paused seek updates lyrics without waiting for a native tick.
       setSeekRevision((n) => n + 1); // Even a small seek must reset the lyric clock immediately.
-    } catch (e) { /* 忽略 */ }
+    } catch (e) { pendingSeek.current = null; }
   }, [player, current]);
 
   // 恢复当前曲目播放（单 player 架构下等价于 player.play()，保留给旧调用方）
@@ -277,6 +303,8 @@ export function PlayerProvider({ children }) {
   }, [player]);
 
   const setQuality = useCallback((q) => {
+    if (!PLAYBACK_QUALITIES.some((item) => item.q === q)) return;
+    qualityEdited.current = true;
     setQualityState(q);
     persist(QUALITY_KEY, q);
   }, [persist]);
@@ -328,24 +356,52 @@ export function PlayerProvider({ children }) {
     });
   }, [persist]);
 
-  const getSyncLibrary = useCallback(async () => ({ version: 1, likes: likesRef.current, playlists: await getPlaylists() }), []);
-  const applySyncLibrary = useCallback(async (incoming) => {
-    const data = normalize(incoming);
-    await mergeSyncedPlaylists(data.playlists);
-    for (;;) {
-      const before = likesRef.current;
-      const next = merge({ version: 1, likes: before, playlists: [] }, { version: 1, likes: data.likes, playlists: [] }).likes;
-      await AsyncStorage.setItem(accountKey(LIKES_KEY, accountScope.current), JSON.stringify(next));
-      if (likesRef.current !== before) continue;
-      likesRef.current = next;
-      setLikes(next);
-      return;
-    }
-  }, []);
+  const { recommendationManager, recommendationProfile } = useRecommendationProfile(account, likes, libraryReady);
+  const listening = useMemo(() => tracker((event) => recommendationManager.recordListening(event)), [recommendationManager]);
+  listeningRef.current = listening;
+  useEffect(() => () => listening.flush(), [listening]);
+  useEffect(() => { if (!isPlaying) listening.tick(currentTime, false); }, [isPlaying, listening]);
+  const profileScope = account?.isLogin && account.mid ? String(account.mid) : '';
+  const getSyncLibrary = useCallback(async (scope = accountScope.current) => {
+    const epoch = libraryEpoch.current;
+    const [playlists, recommendation] = await Promise.all([getPlaylists(), recommendationManager.exportSync()]);
+    if (!libraryReadyRef.current || epoch !== libraryEpoch.current || scope !== accountScope.current || scope !== profileScope) throw new Error('账号正在切换');
+    return { version: 1, likes: likesRef.current, playlists, recommendation };
+  }, [recommendationManager, profileScope]);
+  const applySyncLibrary = useCallback((incoming, base, scope = accountScope.current) => {
+    const epoch = libraryEpoch.current;
+    const check = () => {
+      if (!libraryReadyRef.current || epoch !== libraryEpoch.current || scope !== accountScope.current || scope !== profileScope) throw new Error('账号已切换，已取消同步');
+    };
+    // Account switches wait for this write; a late response cannot enter another bucket.
+    const operation = accountSwitch.current.catch(() => {}).then(async () => {
+      check();
+      const data = normalize(incoming);
+      await mergeSyncedPlaylists(data.playlists, base?.playlists);
+      check();
+      await recommendationManager.applySync(data.recommendation, base?.recommendation);
+      for (;;) {
+        check();
+        const before = likesRef.current;
+        const next = reconcile(base ? { version: 1, likes: base.likes, playlists: [] } : null,
+          { version: 1, likes: data.likes, playlists: [] }, { version: 1, likes: before, playlists: [] }).likes;
+        await AsyncStorage.setItem(accountKey(LIKES_KEY, scope), JSON.stringify(next));
+        check();
+        if (likesRef.current !== before) continue;
+        likesRef.current = next;
+        setLikes(next);
+        return;
+      }
+    });
+    accountSwitch.current = operation.catch(() => {});
+    return operation;
+  }, [recommendationManager, profileScope]);
 
   // 单曲循环只影响自动结束，手动上一首/下一首仍可切歌；分切也从自己的起点重播。
   const nextRef = useRef(next);
-  nextRef.current = playMode === 'single' ? () => playIndex(queue, index, true) : next;
+  nextRef.current = playMode === 'single'
+    ? () => playIndex(queue, index, true, true)
+    : () => next(true);
   const autoNextRef = useRef({ queue, isLive });
   autoNextRef.current = { queue, isLive, range, resolving };
   const endedToken = useRef(-1);
@@ -356,10 +412,20 @@ export function PlayerProvider({ children }) {
     nextRef.current();
   };
   useEventListener(player, 'playToEnd', () => {
+    listening.flush();
     advanceOnce();
   });
   useEventListener(player, 'timeUpdate', ({ currentTime: time }) => {
     if (resolvingRef.current) return;
+    listening.tick(time, player.playing && player.status === 'readyToPlay' && !pendingSeek.current);
+    const pending = pendingSeek.current;
+    if (pending) {
+      // Native ticks queued before a seek must not rewind the scrubber or lyrics.
+      // Bound the hold so a failed/adjusted seek can recover to the actual position.
+      const elapsed = Date.now() - pending.started;
+      if (elapsed < 2500 && (time < pending.target - 0.5 || time > pending.target + 0.5 + elapsed / 1000)) return;
+      pendingSeek.current = null;
+    }
     setCurrentTime(time);
     const s = autoNextRef.current;
     if (s.range && player.playing && time >= s.range.to) advanceOnce();
@@ -380,14 +446,14 @@ export function PlayerProvider({ children }) {
     quality, setQuality,
     lyricSettings, updateLyricSettings,
     lyricEffect, setLyricEffect, seekRevision,
-    recommendMode, setRecommendMode,
+    recommendMode, setRecommendMode, recommendationManager, recommendationProfile,
     setVolume, pauseAll, resume,
     playQueue, playIndex, togglePlay, next, prev, seekTo,
     player, // 原始 VideoPlayer：播放页/视频页的 VideoView 共用
   }), [
     queue, index, current, isLive, playMode, setPlayMode, playing, status, currentTime,
     resolving, playError, likes, isLiked, toggleLike, libraryReady, getSyncLibrary, applySyncLibrary, account, switchAccount, history, quality, setQuality, lyricSettings, updateLyricSettings,
-    lyricEffect, setLyricEffect, seekRevision, recommendMode, setRecommendMode,
+    lyricEffect, setLyricEffect, seekRevision, recommendMode, setRecommendMode, recommendationManager, recommendationProfile,
     setVolume, pauseAll, resume,
     playQueue, playIndex, togglePlay, next, prev, seekTo, player,
   ]);

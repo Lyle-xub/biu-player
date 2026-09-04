@@ -4,3 +4,4 @@ dist/
 test/*.png
 mobile/data/
 web-dist/
+cloud-video/__pycache__/

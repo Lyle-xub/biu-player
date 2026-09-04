@@ -326,7 +326,8 @@ const server = http.createServer(async (req, res) => {
         } else {
           r = await biliFetch(payload.url, payload.opts || {});
         }
-        sendJson(res, { status: r.status, body: await r.text() });
+        sendJson(res, { status: r.status, body: payload.opts?.responseType === 'bytes'
+          ? Array.from(new Uint8Array(await r.arrayBuffer())) : await r.text() });
       } catch (e) { sendJson(res, { status: -1, body: String(e) }); }
       return;
     }

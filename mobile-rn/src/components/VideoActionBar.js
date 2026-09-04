@@ -12,8 +12,8 @@ import { colors, fmtCount, fmtDur } from '../theme';
 import * as bili from '../api/bili';
 import { authStatus, imageHeaders, streamHeaders } from '../api/client';
 import { usePlayer } from '../player/PlayerContext';
-import { segmentTracks, trackKeyOf } from '../player/track';
-import { createPlaylist } from '../store/playlists';
+import { trackKeyOf } from '../player/track';
+import SplitPanel from './SplitPanel';
 import { IconCoin, IconComment, IconDownload, IconLyric, IconSplit, IconStar, IconThumbUp } from './icons';
 
 function Sheet({ visible, title, onClose, children }) {
@@ -31,12 +31,18 @@ function Sheet({ visible, title, onClose, children }) {
 }
 
 export default function VideoActionBar({ track, ...props }) {
+  const [splitSource, setSplitSource] = useState(null);
+  const focused = useIsFocused();
+  useEffect(() => { if (!focused || props.active === false) setSplitSource(null); }, [focused, props.active]);
   if (!track?.bvid || track.isLive) return null;
-  return <TrackActions key={`${trackKeyOf(track)}:${track.cid || 0}`} track={track} {...props} />;
+  return <>
+    <TrackActions key={`${trackKeyOf(track)}:${track.cid || 0}`} track={track} {...props} onSplit={setSplitSource} />
+    <SplitPanel source={splitSource} onClose={() => setSplitSource(null)} />
+  </>;
 }
 
-function TrackActions({ track, onShowLyrics, active = true }) {
-  const { playQueue, lyricSettings, updateLyricSettings } = usePlayer();
+function TrackActions({ track, onShowLyrics, onSplit, active = true }) {
+  const { lyricSettings, updateLyricSettings } = usePlayer();
   const focused = useIsFocused();
   const [detail, setDetail] = useState(null);
   const [relation, setRelation] = useState(null);
@@ -224,24 +230,6 @@ function TrackActions({ track, onShowLyrics, active = true }) {
     updateLyricSettings(track, { match, lines });
   });
 
-  const [segments, setSegments] = useState(null);
-  const [timeline, setTimeline] = useState('');
-  const [splitMessage, setSplitMessage] = useState('');
-  const loadSegments = () => run('split', async () => {
-    setSegments(await bili.mixSplitDetect(track.bvid, cid, totalDuration));
-  });
-  const parseSegments = () => {
-    setError(''); setSplitMessage('');
-    const result = bili.parseTimestampLines(timeline, totalDuration);
-    if (!result.length) { setError('请按「00:00 歌曲名」输入，每行一首，时间须在视频范围内'); return; }
-    setSegments(result);
-  };
-  const tracks = () => segmentTracks({ ...track, cid }, segments || []);
-  const saveSegments = () => run('save-split', async () => {
-    await createPlaylist(`${track.parentTitle || track.title} · 分切`, tracks());
-    setSplitMessage('已保存到「我的」自建歌单，可逐首播放');
-  });
-
   const actions = [
     { key: 'like', Icon: IconThumbUp, label: liked ? '已赞' : '点赞', count: stat.like, on: liked, onPress: toggleLike },
     { key: 'coin', Icon: IconCoin, label: coinCount ? '已投币' : '投币', count: stat.coin, on: coinCount > 0,
@@ -251,11 +239,15 @@ function TrackActions({ track, onShowLyrics, active = true }) {
     { key: 'comments', Icon: IconComment, label: '评论', count: stat.reply,
       onPress: () => { open('comments'); if (!comments) loadComments(); } },
     { key: 'lyrics', Icon: IconLyric, label: '歌词', onPress: () => open('lyrics') },
-    { key: 'split', Icon: IconSplit, label: '分切', onPress: () => { open('split'); if (!segments) loadSegments(); } },
+    { key: 'split', Icon: IconSplit, label: '分切', onPress: () => onSplit({
+      bvid: track.bvid, aid, cid, duration: totalDuration,
+      title: track.parentTitle || detail?.title || track.title,
+      up: detail?.owner?.name || track.up, pic: detail?.pic || track.pic,
+    }) },
     { key: 'download', Icon: IconDownload, label: '下载', onPress: () => { open('download'); if (!dlInfo) loadDownload(); } },
   ];
   const retry = { favorite: loadFolders, comments: () => loadComments(commentPage + 1),
-    download: loadDownload, split: loadSegments }[sheet];
+    download: loadDownload }[sheet];
   const button = (label, onPress, disabled = !!busy) => (
     <TouchableOpacity accessibilityRole="button" accessibilityLabel={label} disabled={disabled}
       onPress={onPress} style={[styles.moreBtn, disabled && { opacity: 0.45 }]}>
@@ -280,7 +272,7 @@ function TrackActions({ track, onShowLyrics, active = true }) {
     {error && !sheet ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
     {busy === 'download' && !sheet ? button('正在下载 · 查看进度', () => setSheet('download'), false) : null}
     <Sheet visible={!!sheet} title={{ coin: '投币', favorite: '收藏到', comments: `评论 ${fmtCount(commentTotal)}`,
-      lyrics: '歌词', split: '分切', download: '下载原视频' }[sheet]} onClose={() => setSheet(null)}>
+      lyrics: '歌词', download: '下载原视频' }[sheet]} onClose={() => setSheet(null)}>
       {sheet === 'coin' ? <>
         <Text style={styles.sheetHint}>已投 {coinCount} 枚 · 还可投 {Math.max(0, coinLimit - coinCount)} 枚</Text>
         <View style={styles.coinRow}>
@@ -336,20 +328,6 @@ function TrackActions({ track, onShowLyrics, active = true }) {
           {button('提前 0.5 秒', () => updateLyricSettings(track, { offset: (lyric.offset || 0) + 0.5 }))}
         </View>
         {button('恢复自动匹配与时间', () => updateLyricSettings(track, { match: null, lines: null, offset: 0 }))}
-      </ScrollView> : null}
-      {sheet === 'split' ? <ScrollView style={styles.sheetList} keyboardShouldPersistTaps="handled">
-        <Text style={styles.sheetHint}>优先读取章节与简介时间轴；也可手动输入，每行一首。</Text>
-        {(segments || []).map((s, i) => <TouchableOpacity key={`${s.from}`} style={styles.segRow}
-          accessibilityLabel={`播放分切 ${s.name}`} disabled={!!busy} onPress={() => { setSheet(null); playQueue(tracks(), i); }}>
-          <Text style={styles.segTime}>{fmtDur(s.from)}</Text><Text style={styles.segName}>{s.name}</Text>
-          <Text style={styles.segDur}>{fmtDur(s.to - s.from)}</Text>
-        </TouchableOpacity>)}
-        {segments?.length === 0 ? <Text style={styles.sheetHint}>未找到章节或简介时间轴，请在下方填写分切点。</Text> : null}
-        <TextInput accessibilityLabel="分切时间轴" multiline style={[styles.input, styles.timeline]} value={timeline} onChangeText={setTimeline}
-          placeholder={'00:00 第一首\n03:30 第二首'} placeholderTextColor={colors.text3} />
-        {button('应用时间轴', parseSegments)}
-        {segments?.length ? button('将分切保存为歌单', saveSegments) : null}
-        {splitMessage ? <Text style={styles.sheetHint}>{splitMessage}</Text> : null}
       </ScrollView> : null}
       {busy ? <ActivityIndicator color={colors.accent} style={{ marginVertical: 10 }} /> : null}
       {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}

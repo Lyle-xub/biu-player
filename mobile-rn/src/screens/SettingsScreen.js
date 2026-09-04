@@ -1,7 +1,6 @@
 /* Biu Player RN · 设置：只收 RN 端真实生效的项（桌面端的弹幕/背景模糊/桌面歌词等
  * RN 没有对应实现，不做摆设按钮）。
- * 在线音质：数据源 PlayerContext quality/setQuality（AsyncStorage biu.quality 持久化），
- * 作用于切歌后的取流档位（标准 = qn 32 省流，高品 = 默认最高可用档）。
+ * 在线播放清晰度：音画共用视频流，保留 biu.quality 以兼容旧设置。
  */
 import React from 'react';
 import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
@@ -9,12 +8,11 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors } from '../theme';
 import { usePlayer } from '../player/PlayerContext';
 import { IconBack } from '../components/icons';
+import RecommendationProfileCard from '../components/RecommendationProfileCard';
 import LanSyncCard from '../components/LanSyncCard';
+import CloudSyncCard from '../components/CloudSyncCard';
+import { PLAYBACK_QUALITIES as QUALITIES } from '../player/playbackQuality';
 
-const QUALITIES = [
-  { q: 0, label: '标准', desc: '480P 档整文件流，省流量' },
-  { q: 1, label: '高品', desc: '默认最高可用档，登录后可达 1080P' },
-];
 const LYRIC_EFFECTS = [
   { key: 'simple', label: '简单', desc: '默认效果：当前行放大，随进度从左向右变白，保留前后行模糊。' },
   { key: 'monet', label: '莫奈光效', desc: '柔边光带沿字形移动，保留柔光与景深，适合性能较好的设备。' },
@@ -37,7 +35,7 @@ export default function SettingsScreen({ navigation }) {
         </TouchableOpacity>
         <Text style={styles.title}>设置</Text>
       </View>
-      <ScrollView contentContainerStyle={styles.content}>
+      <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
         <Text style={styles.sectionTitle}>首页</Text>
         <View style={styles.card}>
           <Text style={styles.rowTitle}>个性推荐范围</Text>
@@ -57,24 +55,29 @@ export default function SettingsScreen({ navigation }) {
           </Text>
         </View>
 
+        <RecommendationProfileCard />
+
         <Text style={styles.sectionTitle}>播放</Text>
         <View style={styles.card}>
-          <Text style={styles.rowTitle}>在线音质</Text>
-          <Text style={styles.rowDesc}>对下一首起生效</Text>
-          <View style={styles.seg}>
+          <Text style={styles.rowTitle}>在线播放清晰度</Text>
+          <Text style={styles.rowDesc}>切歌或重新打开歌曲后生效，不影响直播</Text>
+          <View style={[styles.seg, styles.qualityOptions]}>
             {QUALITIES.map(({ q, label }) => (
               <TouchableOpacity
                 key={q}
-                style={[styles.segBtn, quality === q && styles.segBtnOn]}
+                accessibilityRole="radio" accessibilityLabel={label}
+                accessibilityState={{ checked: quality === q }}
+                style={[styles.segBtn, styles.qualityOption, quality === q && styles.segBtnOn]}
                 onPress={() => setQuality(q)}
               >
-                <Text style={[styles.segText, quality === q && styles.segTextOn]}>{label}</Text>
+                <Text numberOfLines={1} adjustsFontSizeToFit style={[styles.segText, quality === q && styles.segTextOn]}>{label}</Text>
               </TouchableOpacity>
             ))}
           </View>
           <Text style={styles.qualityDesc}>
-            {(QUALITIES.find((x) => x.q === quality) || QUALITIES[1]).desc}
+            {(QUALITIES.find((x) => x.q === quality) || QUALITIES[0]).desc}
           </Text>
+          <Text style={styles.qualityDesc}>实际清晰度取决于视频与账号权限；不支持所选档位时使用可用清晰度。</Text>
         </View>
 
         <Text style={styles.sectionTitle}>歌词</Text>
@@ -98,6 +101,7 @@ export default function SettingsScreen({ navigation }) {
 
         <Text style={styles.sectionTitle}>同步</Text>
         <LanSyncCard />
+        <CloudSyncCard />
 
         <Text style={styles.sectionTitle}>关于</Text>
         <View style={styles.card}>
@@ -141,6 +145,8 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   segBtnOn: { backgroundColor: colors.accentSoft },
+  qualityOptions: { flexWrap: 'nowrap', gap: 4 },
+  qualityOption: { flex: 1, minWidth: 0, height: 38 },
   segText: { color: colors.text2, fontSize: 13 },
   segTextOn: { color: colors.accent, fontWeight: '600' },
   qualityDesc: { color: colors.text3, fontSize: 11, marginTop: 10 },

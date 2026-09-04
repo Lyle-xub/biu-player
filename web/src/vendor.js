@@ -10,10 +10,21 @@ import '../../renderer/hot-comment-motion.js';
 import '../../renderer/player-sheet-motion.js';
 import BiuPlaybackSession from '../../renderer/playback-session.js';
 import BiuLibrarySync from '../../renderer/library-sync.js';
+import BiuSubtitles from '../../renderer/subtitles.js';
 import '../../renderer/split-decode.js';
+import BiuDaily from '../../renderer/daily-recommendation.js';
+import '../../renderer/daily-desktop.js';
+import BiuRecommendation from '../../renderer/recommendation-profile.js';
+import BiuProfilePresentation from '../../renderer/profile-presentation.js';
+import '../../renderer/recommendation-editor.js';
+import '../../renderer/recommendation-desktop.js';
+window.BiuDaily = BiuDaily;
+window.BiuRecommendation = BiuRecommendation;
+window.BiuProfilePresentation = BiuProfilePresentation;
 
 window.BiuPlaybackSession = BiuPlaybackSession;
 window.BiuLibrarySync = BiuLibrarySync;
+window.BiuSubtitles = BiuSubtitles;
 
 export const api = window.api;
 export const coverSVG = window.coverSVG;

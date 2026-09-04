@@ -2,7 +2,7 @@
   "expo": {
     "name": "Biu Player",
     "slug": "biu-player-mobile",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -17,12 +17,26 @@
         "backgroundColor": "#ffffff",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
-      }
+      },
+      "versionCode": 2
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#0b0d09",
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 140,
+          "resizeMode": "contain",
+          "dark": {
+            "backgroundColor": "#0b0d09",
+            "image": "./assets/splash-icon.png"
+          }
+        }
+      ],
       [
         "expo-audio",
         {
@@ -40,7 +54,15 @@
       "expo-image",
       "expo-sharing",
       "./plugins/withLanSync",
-      "expo-asset"
-    ]
+      "expo-asset",
+      [
+        "expo-dev-client",
+        {
+          "launchMode": "launcher"
+        }
+      ],
+      "expo-secure-store"
+    ],
+    "scheme": "biu-player"
   }
 }

@@ -3,10 +3,11 @@
  * onReady 后 verify() 弹出滑块；onSuccess 时 postMessage getValidate() 回 RN。
  * 带 jserror/console 转发与加载看门狗——渲染失败时把具体原因显示出来。
  */
-import React, { useMemo, useRef, useState } from 'react';
-import { Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { colors } from '../theme';
+import { Dialog } from './Dialog';
 
 const READY_TIMEOUT = 9000;
 
@@ -97,18 +98,17 @@ export default function GeetestModal({ visible, gt, challenge, onResult, onCance
   };
 
   const retry = () => { markStatus('loading'); setErrMsg(''); setRetryKey((k) => k + 1); armWatchdog(); };
+  useEffect(() => () => clearTimeout(timer.current), []);
 
   return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onCancel}
-      onShow={armWatchdog}>
-      <View style={styles.mask}>
-        <View style={styles.card}>
+    <Dialog visible={visible} onClose={onCancel}>
           <Text style={styles.title}>安全验证</Text>
           <View style={styles.webWrap}>
             <WebView
               key={`${html}-${retryKey}`}
               source={{ html, baseUrl: 'https://www.geetest.com/' }}
               onMessage={handleMessage}
+              onLoadStart={armWatchdog}
               javaScriptEnabled
               domStorageEnabled
               originWhitelist={['*']}
@@ -133,21 +133,11 @@ export default function GeetestModal({ visible, gt, challenge, onResult, onCance
           <TouchableOpacity style={styles.cancelBtn} onPress={onCancel} hitSlop={8}>
             <Text style={styles.cancelText}>取消</Text>
           </TouchableOpacity>
-        </View>
-      </View>
-    </Modal>
+    </Dialog>
   );
 }
 
 const styles = StyleSheet.create({
-  mask: {
-    flex: 1, backgroundColor: 'rgba(0,0,0,0.62)',
-    alignItems: 'center', justifyContent: 'center',
-  },
-  card: {
-    width: '88%', backgroundColor: colors.bgSoft, borderRadius: 20,
-    borderWidth: 1, borderColor: colors.cardBorder, padding: 18, alignItems: 'center', gap: 12,
-  },
   title: { color: colors.text, fontSize: 15, fontWeight: '600' },
   webWrap: {
     alignSelf: 'stretch', height: 340, borderRadius: 12, overflow: 'hidden',
@@ -155,7 +145,7 @@ const styles = StyleSheet.create({
   },
   web: { flex: 1, backgroundColor: 'transparent' },
   overlay: {
-    ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center',
+    ...StyleSheet.absoluteFill, alignItems: 'center', justifyContent: 'center',
     backgroundColor: '#12150e',
   },
   overlayText: { color: colors.text2, fontSize: 12, textAlign: 'center', paddingHorizontal: 24 },

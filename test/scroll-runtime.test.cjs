@@ -114,6 +114,9 @@ for (const file of ['renderer/app.js', 'web/src/legacy/controller.js']) {
     assert.equal(h.view.classList.contains('is-scrolling'), false);
     h.view.scrollTop = 4000; h.events.scroll(); h.rafs[1]();
     assert.equal(h.calls.loads, 1);
+    h.view.scrollTop = 0; h.view.scrollHeight = 400;
+    h.events.wheel({ deltaY: 80 }); h.rafs[2]();
+    assert.equal(h.calls.loads, 2, 'short result pages advance through wheel input');
     [...h.timers.values()][0]();
     assert.equal(h.view.classList.contains('is-scrolling'), false);
   });

@@ -13,9 +13,13 @@ export function trackKeyOf(track) {
 }
 
 export function segmentTracks(track, segments) {
-  return segments.map((s) => ({
+  return segments.filter((s) => Number.isFinite(s.from) && Number.isFinite(s.to) && s.to > s.from && s.from >= 0).map((s, index) => ({
     ...track, parentBvid: track.parentBvid || track.bvid,
     parentTitle: track.parentTitle || track.title, isSegment: true,
-    title: s.name, from: s.from, to: s.to, duration: s.to - s.from,
+    title: s.match?.title || String(s.name || '').trim() || `片段 ${index + 1}`,
+    up: s.match?.artist || track.up, pic: s.match?.pic || track.pic,
+    lyricRef: s.match && (s.match.id || s.match.songmid)
+      ? { source: s.match.lrcSource || s.match.source, id: s.match.id, songmid: s.match.songmid } : undefined,
+    from: s.from, to: s.to, duration: s.to - s.from,
   }));
 }

@@ -43,10 +43,11 @@ function harness(file) {
   const clock = { now: 100000 };
   const body = { dataset: { view: 'library' }, classList: { toggle() {} } };
   const context = vm.createContext({
-    $, api, state: { recommendations: [], ranking: [], recommendFreshIdx: 0 },
+    $, api, settings: { recommendMode: 'music' }, state: { recommendations: [], ranking: [], recommendFreshIdx: 0 },
     playHistory: [], console: { error() {} }, URL,
     location: { href: 'http://localhost/' }, history: { replaceState() {} },
-    window: { scrollTo() {} },
+    window: { scrollTo() {}, BiuRecommendation: require('../renderer/recommendation-profile') },
+    recommendationProfiles: { isStrict: async () => false, recommend: async () => [], observeFeed() {} },
     document: {
       body,
       querySelector: node,
@@ -61,7 +62,7 @@ function harness(file) {
     matchMedia: () => ({ matches: false }), setTimeout() {},
     setVideoTheater() {}, setLiveTheater() {}, setVideoMode() {}, closePanel() {},
     refreshLikeUI() {}, renderMyPlaylists: () => { metrics.my++; },
-    setShelfCover() {},
+    setShelfCover() {}, toast() {}, esc: (value) => String(value),
     publish() {}, renderRec: () => { metrics.rec++; },
   });
   function $(id) { return node(id); }
@@ -73,6 +74,67 @@ function harness(file) {
 }
 
 for (const file of ['renderer/app.js', 'web/src/legacy/controller.js']) {
+  test(`${file}: selected recommendation scope applies to initial and subsequent platform pages`, async () => {
+    const h = harness(file), modes = [];
+    h.api.recommendMusic = async (_page, _limit, mode) => { modes.push(mode); return [track('BV' + modes.length)]; };
+    h.context.settings.recommendMode = 'all';
+    await h.context.loadLibrary();
+    await h.context.loadMoreRecommendations();
+    h.context.settings.recommendMode = 'music';
+    await h.context.loadLibrary({ force: true });
+    assert.deepEqual(modes, ['all', 'all', 'music']);
+    assert.deepEqual(Array.from(h.context.state.recommendations, (t) => t.bvid), ['BV3']);
+  });
+
+  test(`${file}: strict custom pages stream without rebuilding cards and ignore stale callbacks`, async () => {
+    const h = harness(file), started = deferred(), remaining = deferred();
+    let publish;
+    h.context.recommendationProfiles.isStrict = async () => true;
+    h.context.recommendationProfiles.recommend = async (_page, _exclude, onBatch) => {
+      publish = onBatch;
+      onBatch([track('BVfirst')]); started.resolve();
+      await remaining.promise;
+      onBatch([track('BVsecond')]);
+      return [track('BVfirst'), track('BVsecond')];
+    };
+    const pending = h.context.loadLibrary();
+    await started.promise;
+    assert.deepEqual(Array.from(h.context.state.recommendations, (t) => t.bvid), ['BVfirst']);
+    h.node('.view-library').scrollTop = 300;
+    remaining.resolve(); await pending;
+    assert.deepEqual(Array.from(h.context.state.recommendations, (t) => t.bvid), ['BVfirst', 'BVsecond']);
+    assert.equal(h.metrics.rec, 2, 'final completion must not rebuild already streamed cards');
+    assert.equal(h.node('.view-library').scrollTop, 300);
+    const oldPublish = publish;
+    h.context.recommendationProfiles.recommend = async () => [track('BVnewProfile')];
+    await h.context.loadLibrary({ force: true });
+    oldPublish([track('BVstale')]);
+    assert.deepEqual(Array.from(h.context.state.recommendations, (t) => t.bvid), ['BVnewProfile']);
+  });
+
+  test(`${file}: strict custom profiles never display platform or ranking fallback, including empty pages`, async () => {
+    const h = harness(file), gate = deferred();
+    h.context.recommendationProfiles.isStrict = () => gate.promise;
+    h.context.recommendationProfiles.recommend = async () => [track('BVmatching')];
+    const loading = h.context.loadLibrary();
+    assert.equal(h.metrics.feed, 0); assert.equal(h.metrics.ranking, 0);
+    gate.resolve(true); await loading;
+    assert.deepEqual(Array.from(h.context.state.recommendations, (t) => t.bvid), ['BVmatching']);
+    h.context.recommendationProfiles.recommend = async () => [];
+    await h.context.loadMoreRecommendations();
+    assert.equal(h.context.state.recommendations.length, 1);
+    await h.context.loadLibrary({ force: true });
+    assert.equal(h.context.state.recommendations.length, 0);
+    assert.match(h.node('recLoader').textContent, /继续查找/);
+    assert.equal(h.metrics.feed, 0); assert.equal(h.metrics.ranking, 0);
+    h.context.recommendationProfiles.recommend = async () => { throw new Error('推荐请求暂时被 B 站限制'); };
+    await h.context.loadLibrary({ force: true });
+    assert.match(h.node('grid-rec').innerHTML, /B 站限制/);
+    h.context.recommendationProfiles.recommend = async () => [];
+    h.context.recommendationProfiles.isStrict = async () => false;
+    await h.context.loadLibrary({ force: true });
+    assert.equal(h.metrics.feed, 1);
+  });
   test(`${file}: returning after 60 seconds keeps local cards and appended recommendations`, async () => {
     const h = harness(file);
     await h.context.loadLibrary();

@@ -1,91 +1,128 @@
-# Biu Player
+<p align="center">
+  <img src="docs/images/banner.svg" alt="Biu Player · 把 B 站，听成你的音乐库" width="100%">
+</p>
 
-基于 B 站公开接口的桌面音乐播放器（Electron）。沉浸式暗色设计，封面取色驱动背景。
+<p align="center">
+  <strong>在电脑和手机上，发现、收藏、听见喜欢的音乐。</strong><br>
+  沉浸歌词 · 每日推荐 · 视频分切 · 跨设备同步
+</p>
 
-> 非官方项目，仅供学习与研究使用，与哔哩哔哩无任何官方关联。
-> 核心接口思路参考了 [wood3n/biu](https://github.com/wood3n/biu) 与
-> [SocialSisterYi/bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect)。
-> 歌词层级与转场动效思路参考了 [chthollyphile/folia-major](https://github.com/chthollyphile/folia-major) 的 Monet 视觉模式。
+<p align="center">
+  <a href="https://github.com/Lyle-xub/biu-player/releases/latest"><img src="https://img.shields.io/badge/下载最新版本-fb7299?style=for-the-badge&labelColor=181b14" alt="下载最新版本"></a>
+  <a href="https://github.com/Lyle-xub/biu-player/issues"><img src="https://img.shields.io/badge/反馈与建议-899c72?style=for-the-badge&labelColor=181b14" alt="反馈与建议"></a>
+</p>
 
-## 运行
+<p align="center"><sub>macOS · Apple Silicon &nbsp; / &nbsp; Android · arm64</sub></p>
+
+<br>
+
+## 一打开，就是喜欢的音乐
+
+从 B 站发现新歌，把喜欢的视频收入自己的音乐库。首页推荐可以选择音乐分区或全部分区，也能用自己的兴趣画像，找到更合口味的内容。
+
+<img src="docs/images/desktop-home.png" alt="Biu Player 桌面主页：我喜欢、每日推荐与歌单卡片" width="100%">
+
+<br>
+
+## 让歌词，跟着音乐呼吸
+
+封面取色、柔和光晕与逐行滚动，让注意力回到音乐本身。歌词自动优先匹配 QQ 音乐，再尝试网易云和视频字幕；也可以手动选歌、微调时间。
+
+<img src="docs/images/desktop-lyrics.png" alt="Biu Player 桌面歌词页：动态扫光、层次模糊与专辑封面" width="100%">
+
+<br>
+
+## 装进口袋，接着听
+
+同样的音乐库，也能带在身边。首页发现新歌，打开歌词沉浸听歌；底部播放栏随时接续播放。
+
+<table>
+  <tr>
+    <td width="50%" align="center"><strong>手机主页</strong></td>
+    <td width="50%" align="center"><strong>手机歌词</strong></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/images/mobile-home.png" alt="Android 实机主页：每日推荐、音乐信息流与毛玻璃播放栏" width="360"></td>
+    <td align="center"><img src="docs/images/mobile-lyrics.png" alt="Android 实机歌词页：逐字扫光、模糊层次与播放控制" width="360"></td>
+  </tr>
+</table>
+
+<p align="center"><sub>以上均为实际运行截图；手机端来自安装正式 APK 后的 Android 实机。</sub></p>
+
+<br>
+
+## 不止一个播放按钮
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>♫ &nbsp;每日一份新鲜感</h3>
+      <p>从「日推」视频中按兴趣挑选音乐。查看、调整自己的推荐画像，也可以保存多份不同口味。</p>
+    </td>
+    <td width="50%" valign="top">
+      <h3>♡ &nbsp;把喜欢收好</h3>
+      <p>我喜欢、自建歌单、B 站收藏夹和播放历史。编辑、删除、重排，让音乐库按照自己的习惯生长。</p>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top">
+      <h3>✂ &nbsp;长视频，也能一首首听</h3>
+      <p>把合集分成歌曲，查看音频波形、调整分段、识别歌名，再保存为可以连续播放的歌单。</p>
+    </td>
+    <td valign="top">
+      <h3>◉ &nbsp;想看，就回到视频</h3>
+      <p>在歌词和原视频之间切换，查看评论、弹幕，点赞、投币、收藏。还可以收听电台、观看直播。</p>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top">
+      <h3>⌁ &nbsp;同一个家，同一个音乐库</h3>
+      <p>手机和电脑登录相同账号、连接同一局域网，开启自动同步，即可同步喜欢、歌单和推荐画像。</p>
+    </td>
+    <td valign="top">
+      <h3>☁ &nbsp;通过 B 站视频云同步</h3>
+      <p>把音乐库加密保存到仅自己可见的 B 站视频中，让手机和电脑在不同网络下也能共享收藏与画像。</p>
+    </td>
+  </tr>
+</table>
+
+<p><sub>视频云同步是可选的实验功能；首次配置与桌面所需组件见 <a href="cloud-video/README.md">使用说明</a>。歌词和可播放清晰度以来源实际提供的内容为准。</sub></p>
+
+<br>
+
+## 开始听歌
+
+1. 在 [Releases](https://github.com/Lyle-xub/biu-player/releases/latest) 下载对应的安装包：Mac 选择 `.dmg`，Android 选择 `.apk`。
+2. 打开 Biu Player，登录 B 站账号，或先从音乐热榜开始听。
+3. 收藏喜欢的歌曲；需要跨设备使用时，在设置中开启同步。
+
+<p>手机支持后台播放、系统媒体控件，以及更轻量的默认歌词效果；桌面端还提供悬浮歌词窗口。</p>
+
+<details>
+<summary><strong>想从源码运行？</strong></summary>
+
+桌面端：
 
 ```bash
-npm install   # 若 electron 二进制缺失：cd node_modules/electron && node install.js
-npm start     # electron .
-npm run check # 检查主进程、preload 与渲染层语法
+npm install
+npm run build:web
+npm start
 ```
 
-也可以直接用浏览器打开 `renderer/index.html` 预览界面（无 window.bili 桥时自动降级为 mock 数据，不能播放）。
+移动端使用 Expo 开发构建。详细步骤见 [开发说明](docs/DEVELOPMENT.md) 和 [移动端说明](mobile-rn/README.md)。
 
-## 功能
+</details>
 
-- **歌单库**：「我喜欢」本地收藏 + B 站音乐区实时热榜（ranking/v2, rid=3）
-- **B 站登录**：应用内扫码登录，或打开 B 站官方手机验证码页；Cookie 仅保存在 Electron 会话中
-- **收藏夹**：登录后自动同步 B 站收藏夹，可直接播放
-- **电台**：音乐电台直播列表，点击即播放 HLS 直播流（内置 hls.js），整列表进入队列可连续切台
-- **搜索**：视频搜索（过滤 ≤60s 短视频），单曲 / 歌单 / UP 主 / 视频分区筛选
-- **播放页**
-  - 歌词模式：B 站 AI 字幕转时间轴歌词，莫奈风格扫光、层级缩放与柔化过渡，点击歌词跳转
-  - 原视频模式：直接播放 B 站音视频合一 MP4 流，支持弹幕、清晰度、与音频模式无缝续播
-  - 热评胶囊 + 热门评论列表、播放/弹幕/点赞/投币/收藏统计
-  - 封面取色驱动沉浸式背景
-- **播放控制**：播放/暂停、上一首/下一首、音量（持久化）、列表循环/单曲循环/随机播放
-- **切换动效**：页面前后层滑动、模糊和缩放过渡，播放页歌词/视频模式柔和切换，支持系统「减少动态效果」
-- **设置**（全部真实生效，localStorage 持久化）
-  - 在线音质：标准 / 高品 / 无损（无损优先 DASH FLAC 通道，需登录/大会员）
-  - 视频清晰度、弹幕开关、背景模糊度
-  - 桌面歌词：置顶悬浮窗，实时同步当前歌词行
-  - 局域网手动同步：与 React Native 手机端配对，双向合并我喜欢和自建歌单
-- **快捷键**：`1/2/3/4` 切视图 · `空格` 播放暂停 · `←/→` 快退/快进 5s · `↑/↓` 音量 · `Esc` 关面板
+<br>
 
-## 架构
+---
 
-```
-main.js        主进程：UA/Referer 伪装、buvid3 风控、WBI 签名、CDN 请求头注入、
-               扫码/验证码登录与 Cookie 管理、图片代理、桌面歌词窗口
-lan-sync.js    仅手动开启的局域网配对及同步服务（Node HTTP）
-preload.js     渲染层桥：window.bili.{get,image,auth*,win*,lyric*}
-lyric.html     桌面歌词悬浮窗（transparent + alwaysOnTop）
-renderer/
-  api.js       B 站接口封装；无桥时降级 mock 数据
-  app.js       全部交互逻辑与播放状态
-  library-sync.js  桌面/RN 共用的同步格式、校验与合并规则
-  vendor/hls.min.js  直播 HLS 播放
-```
+<p align="center">
+  <strong>Biu Player</strong><br>
+  <sub>非哔哩哔哩官方应用，与哔哩哔哩无官方关联。音乐与视频内容归原作者及平台所有。</sub>
+</p>
 
-## 与手机手动同步
-
-1. 电脑和手机连接同一 Wi-Fi，在电脑设置的「局域网同步」点击「手动同步」。
-2. 在手机设置的「同步」中输入电脑显示的地址（IP:端口）和 8 位配对码，点击「手动同步」。
-3. 配对后，保持手机同步设置页在前台，任一端都可再次点击同步。电脑可关闭会话，会话也会在 10 分钟后自动结束。
-
-同步范围为当前桌面账号的本地「我喜欢」和自建歌单。双向合并并去重，保留空歌单、封面、
-简介及分切时间；不传播删除。同一歌单 ID 的标题与顺序冲突保留各端已有值。
-B 站收藏夹仍通过登录同步，登录凭证、历史、设置和音视频文件不经过此功能。
-数据写入成功后才确认完成，断线或保存失败可重试。电脑使用原有 JSON 原子写入与备份，
-手机保存到 AsyncStorage 并立即刷新界面。经典桌面界面和 React 桌面界面均已接入。
-
-目前通过手动输入局域网 IPv4 地址连接，不使用自动发现。手机新版本需要重新构建安装，
-以包含 Android 本地 HTTP 和 iOS 局域网访问配置；macOS 若询问局域网访问，允许后再同步。
-可运行 `node --test test/lan-sync.test.cjs test/mobile-player.test.cjs` 验证同步与移动端回归。
-这些测试使用测试歌曲库及真实 loopback HTTP，尚未完成手机与电脑跨设备真机验证。
-
-## 接口要点
-
-- 播放地址主用 `x/player/wbi/playurl`（WBI 签名，`fnval=16` 取 DASH），
-  失败降级 `x/player/playurl` → `x/web-interface/playurl`；优先选 DASH 音频流
-- 扫码登录使用 `x/passport-login/web/qrcode/generate` + `poll`，手机验证码由 B 站官方页完成
-- 歌词来自 `x/player/v2` 的 AI 字幕（`subtitle_url`），无字幕的稿件显示提示
-- 原视频使用 `platform=html5&fnval=1` 请求音视频合一 MP4，由本地 `<video>` 直接播放
-- 直播流用 `live.bilibili.com/room/v1/playUrl/playUrl`（platform=h5 → m3u8）
-- 发往 `bilivideo.com / bilivideo.cn / hdslb.com / acgvideo.com` 的请求统一补
-  Referer/UA，否则 CDN 返回 403
-
-## 已知限制
-
-- 「跟随系统主题」未实现：本设计为深色沉浸式，无亮色主题
-- 无损/高码率音频受 B 站登录与大会员权限限制
-- **歌词（AI 字幕）通常需登录后才可获取**，且并非所有稿件都有；
-  时间轴为 AI 生成，可能与实际演唱略有偏差
-- HTML5 原视频流的实际清晰度受稿件、登录和大会员权限影响，接口会自动回退到可播档位
-- UP 主关注、B 站点赞等写操作未接入（需 CSRF 与完整登录态）
+<p align="center">
+  <sub>感谢 <a href="https://github.com/wood3n/biu">wood3n/biu</a>、<a href="https://github.com/SocialSisterYi/bilibili-API-collect">bilibili-API-collect</a> 的接口参考，<br>
+  以及 <a href="https://github.com/chthollyphile/folia-major">folia-major</a> 的莫奈歌词动效灵感。</sub>
+</p>

@@ -94,6 +94,7 @@ function ViewLibrary() {
             <h3>我喜欢</h3>
             <p>本地收藏</p>
           </div>
+          <div className="card side" id="dailyHome"><div className="cover" data-cover="8" /><h3>每日推荐</h3><p>为今天挑选</p></div>
           <div className="card side side-r" id="cardRank">
             <div className="cover" data-cover="5"><span className="count shelf-count"><span className="count-play"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></span><span className="count-label">B 站音乐区</span></span></div>
             <h3>音乐区热榜</h3>
@@ -482,6 +483,7 @@ export default function Shell() {
       <WinControls />
       <Topbar />
       <ViewLibrary />
+      <section className="view view-daily" id="dailyPage" aria-label="每日推荐" />
       <ViewFav />
       <ViewRadio />
       <ViewPlaylist />

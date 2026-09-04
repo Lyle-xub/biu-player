@@ -29,7 +29,18 @@ contextBridge.exposeInMainWorld('bili', {
   // 本地数据仓（likes / 自建歌单 / 历史）：主进程 JSON 文件，带原子写入与 .bak
   storeGet: (key) => ipcRenderer.invoke('store:get', key),
   storeSet: (key, val) => ipcRenderer.send('store:set', key, val),
-  lanSync: (scope) => ipcRenderer.invoke('lan-sync:manual', scope),
+  videoCloudStatus: () => ipcRenderer.invoke('video-cloud:status'),
+  videoCloudPreview: () => ipcRenderer.invoke('video-cloud:preview'),
+  videoCloudConfigure: (patch) => ipcRenderer.invoke('video-cloud:configure', patch),
+  videoCloudRun: (readOnly = false) => ipcRenderer.invoke('video-cloud:run', readOnly),
+  videoCloudExport: () => ipcRenderer.invoke('video-cloud:export'),
+  videoCloudImport: () => ipcRenderer.invoke('video-cloud:import'),
+  onVideoCloudStatus: (cb) => {
+    const listener = (_e, status) => cb(status);
+    ipcRenderer.on('video-cloud:status', listener);
+    return () => ipcRenderer.removeListener('video-cloud:status', listener);
+  },
+  lanSyncConfigure: (scope, enabled) => ipcRenderer.invoke('lan-sync:configure', scope, enabled),
   lanSyncStatus: () => ipcRenderer.invoke('lan-sync:status'),
   lanSyncStop: () => ipcRenderer.invoke('lan-sync:stop'),
   onLanSyncStatus: (cb) => {

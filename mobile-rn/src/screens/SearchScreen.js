@@ -155,7 +155,7 @@ export default function SearchScreen({ navigation }) {
             <TrackRow
               track={item}
               active={!!current && current.bvid === item.bvid}
-              onPress={() => playQueue(list, index)}
+              onPress={() => playQueue(list, index, 0, 'search')}
               onPressUp={item.mid ? () => navigation.navigate('Up', { mid: item.mid }) : undefined}
             />
           ))}

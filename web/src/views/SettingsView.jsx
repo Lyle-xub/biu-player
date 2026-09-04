@@ -1,30 +1,28 @@
-import React, { useRef } from 'react';
+import React, { useEffect, useRef } from 'react';
+import '../../../renderer/video-cloud-settings.js';
 import { useSlice } from '../store.js';
 
-const DEFAULT_SETTINGS = { quality: 1, vq: 80, danmaku: 1, syncHistory: 0, blur: 0, deskLyric: false };
+const DEFAULT_SETTINGS = { recommendMode: 'music', quality: 1, vq: 80, danmaku: 1, syncHistory: 0, blur: 0, deskLyric: false };
 const DEFAULT_AUTH = { isLogin: false };
 
 const QUALITY_OPTIONS = [[0, '标准'], [1, '高品'], [2, '无损']];
 const VQUALITY_OPTIONS = [[64, '720P'], [80, '1080P'], [120, '4K']];
 
-/* 设置弹窗：状态来自 store 'settings' / 'auth' slice（controller 发布），
- * 交互全部回调 window.biuActions；模糊度滑条拖动在组件内转为 setBlurPx。 */
+/* 设置弹窗：状态来自 controller 发布的 store，交互回调 window.biuActions。 */
 export function SettingsModal() {
   const s = { ...DEFAULT_SETTINGS, ...(useSlice('settings') || {}) };
   const auth = { ...DEFAULT_AUTH, ...(useSlice('auth') || {}) };
   const lan = useSlice('lanSync') || {};
   const A = () => window.biuActions;
-  const dragging = useRef(false);
-  const setFromEvent = (e) => {
-    const r = e.currentTarget.getBoundingClientRect();
-    const v = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
-    A().setBlurPx(Math.round(v * 40));
-  };
+  const profileHost = useRef(null);
+  const cloudHost = useRef(null);
+  useEffect(() => window.BiuVideoCloud?.mount(cloudHost.current), []);
+  useEffect(() => window.biuProfiles?.mount(profileHost.current), [auth.mid, auth.isLogin]);
   return (
     <div className="modal-mask" onClick={(e) => { if (e.target === e.currentTarget) window.biuUi?.closePanel(); }}>
-      <div className="modal">
-        <h3>设置</h3>
-        <div className="mrow">
+      <div className="modal settings-modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+        <header className="settings-heading"><h3 id="settingsTitle">设置</h3><button className="settings-close" type="button" aria-label="关闭设置" onClick={() => window.biuUi?.closePanel()}><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="m6 6 12 12M6 18 18 6" /></svg></button></header>
+        <div className="mrow settings-account">
           <div className="ml"><b>B 站账号</b><small id="authSubtitle">{auth.isLogin ? `UID ${auth.mid} · 已同步收藏夹` : '扫码或手机验证码安全登录'}</small></div>
           {!auth.isLogin && (
             <div className="mr auth-actions" id="authLoggedOut">
@@ -40,6 +38,20 @@ export function SettingsModal() {
             </div>
           )}
         </div>
+        <div className="settings-cards">
+        <section className="settings-card" aria-labelledby="settingsRecommendation"><h4 id="settingsRecommendation" className="settings-card-title">推荐与画像</h4>
+        <div ref={profileHost} />
+        <div className="mrow recommend-mode-row">
+          <div className="ml"><b>首页推荐范围</b><small>适用于个性推荐和自定义画像；默认仅推荐音乐分区。</small></div>
+          <div className="mr"><span className="mseg" role="radiogroup" aria-label="首页推荐范围">
+            {[['music', '音乐分区推荐'], ['all', '全部推荐']].map(([mode, label]) => (
+              <button key={mode} type="button" role="radio" aria-checked={s.recommendMode === mode}
+                className={s.recommendMode === mode ? 'on' : ''} onClick={() => A().setRecommendMode(mode)}>{label}</button>
+            ))}
+          </span></div>
+        </div>
+        </section>
+        <section className="settings-card" aria-labelledby="settingsPlayback"><h4 id="settingsPlayback" className="settings-card-title">播放与歌词</h4>
         <div className="mrow">
           <div className="ml"><b>在线音质</b><small>B 站音频流码率，无损需登录/大会员</small></div>
           <div className="mr"><span className="mseg" id="segQuality">
@@ -65,31 +77,23 @@ export function SettingsModal() {
           <div className="mr"><span className={`switch${s.syncHistory ? '' : ' off'}`} id="swSyncHistory" onClick={() => A().toggleSyncHistory()}></span></div>
         </div>
         <div className="mrow">
-          <div className="ml"><b>背景模糊度</b><small>沉浸式封面背景的模糊强度</small></div>
-          <div className="mr">
-            <span className="slider" id="slBlur"
-              onPointerDown={(e) => { e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); dragging.current = true; setFromEvent(e); }}
-              onPointerMove={(e) => { if (dragging.current) setFromEvent(e); }}
-              onPointerUp={() => { dragging.current = false; }}
-            ><i style={{ width: (s.blur / 40 * 100) + '%' }}></i></span>
-          </div>
-        </div>
-        <div className="mrow">
           <div className="ml"><b>桌面歌词</b><small>在屏幕上悬浮显示歌词</small></div>
           <div className="mr"><span className={`switch${s.deskLyric ? '' : ' off'}`} id="swLyric" onClick={() => A().toggleDeskLyric()}></span></div>
         </div>
+        </section>
+        <section className="settings-card" aria-labelledby="settingsSync"><h4 id="settingsSync" className="settings-card-title">数据与同步</h4>
         <div className="mrow lan-sync-row">
-          <div className="ml"><b>局域网同步</b><small>合并两端的我喜欢和自建歌单，自动去重，保留两端内容。</small>
-            <small role="status">{lan.error || (lan.active
-              ? lan.pending ? '已发起同步，等待手机响应。请保持手机同步设置页打开。'
-                : lan.lastSync ? `已同步 · ${lan.counts.likes} 首喜欢 · ${lan.counts.playlists} 个歌单。手机保持同步设置页打开，可再次发起。`
-                : '在手机设置中输入地址和配对码，然后点击手动同步。'
-              : '手机与电脑连接同一 Wi-Fi，点击手动同步开始配对。')}</small>
-            {lan.active && <small className="lan-sync-pair">{(lan.addresses || []).join(' / ') || '未检测到局域网，请连接 Wi-Fi 后重试'}
-              {'\n'}配对码：{lan.code}（10 分钟内有效）</small>}
+          <div className="ml"><b>局域网自动同步</b><small>默认开启。在同一 Wi-Fi 打开两端，登录相同账号后自动同步我喜欢、自建歌单、推荐画像及云同步密钥。</small>
+            <small role="status">{lan.error || (lan.enabled === false ? '自动同步已关闭'
+              : !lan.signedIn ? '登录后自动连接同一 Wi-Fi 内的同账号设备'
+              : lan.connected && lan.lastSync ? `已同步 · ${lan.counts.likes} 首喜欢 · ${lan.counts.playlists} 个歌单 · ${lan.counts.profiles || 0} 份画像`
+              : '正在等待同一 Wi-Fi 内的同账号设备，打开手机 App 即可同步')}</small>
           </div>
-          <div className="mr"><button className="btn-ghost" disabled={lan.busy} onClick={() => A().manualLanSync()}>手动同步</button>
-            {lan.active && <button className="btn-ghost" onClick={() => A().stopLanSync()}>关闭同步</button>}</div>
+          <div className="mr"><button className={`switch${lan.enabled === false ? ' off' : ''}`} type="button" role="switch"
+            aria-label="局域网自动同步" aria-checked={lan.enabled !== false} onClick={() => A().setLanSyncEnabled(lan.enabled === false)} /></div>
+        </div>
+        <div ref={cloudHost} />
+        </section>
         </div>
         <div className="mfoot">BIU PLAYER · v0.5.0 · 基于 BILIBILI 公开接口</div>
       </div>

@@ -2,6 +2,7 @@
  * endpoint 与参数与桌面端一致；返回结构与原 api 对象相同。
  */
 import * as client from './client';
+import { fetchSubtitles } from '../../../renderer/subtitles';
 
 /* ---------- 工具 ---------- */
 // 去掉搜索标题里的 <em class="keyword"> 高亮标签
@@ -25,6 +26,8 @@ export function toTrack(v) {
     aid: v.aid || v.id || 0,
     cid: v.cid || 0,
     title: stripEm(v.title),
+    tid: Number(v.tid || v.typeid) || 0, tags: v.tags || (typeof v.tag === 'string' ? v.tag.split(',') : []),
+    desc: String(v.desc || v.description || '').slice(0, 1500),
     up: (v.owner && v.owner.name) || v.author || '',
     mid: (v.owner && v.owner.mid) || v.mid || 0,
     duration: parseDur(v.duration),
@@ -49,6 +52,8 @@ function recommendationToTrack(item, detail) {
     duration: Number(item.duration || detail.duration || 0),
     pic: absImg(item.pic || detail.pic || ''),
     tid: detail.tid,
+    tags: detail.tags || (typeof item.tag === 'string' ? item.tag.split(',') : []),
+    desc: String(detail.desc || item.description || '').slice(0, 1500),
     tname: detail.tname || '音乐',
     recommendationReason: (item.rcmd_reason && item.rcmd_reason.content) || '',
     stat: item.stat || detail.stat || null,
@@ -69,7 +74,7 @@ async function jget(url, opts) {
 // 音乐区排行（首页推荐流不可用时的兜底列表）
 export async function ranking() {
   const data = await jget('https://api.bilibili.com/x/web-interface/ranking/v2?rid=3&ps=100');
-  return (data.list || []).map(toTrack).filter((t) => t.duration > 30);
+  return (data.list || []).map(toTrack);
 }
 
 // B 站首页的真实个性推荐。该接口依赖当前账号 Cookie，并直接保留服务端推荐顺序。
@@ -87,7 +92,7 @@ export async function personalizedRecommendations(freshIdx = 0, limit = 12) {
   return (data.item || [])
     .filter((item) => {
       if (item.goto !== 'av' || !item.bvid || !item.owner
-        || Number(item.duration || 0) <= 30 || seen.has(item.bvid)) return false;
+        || seen.has(item.bvid)) return false;
       seen.add(item.bvid);
       return true;
     })
@@ -111,6 +116,8 @@ export async function personalizedMusicRecommendations(freshIdx = 0, limit = 20)
         cid: detail.cid || item.cid,
         mid: detail.owner?.mid || item.mid,
         tid: detail.tid,
+    tags: detail.tags || (typeof item.tag === 'string' ? item.tag.split(',') : []),
+    desc: String(detail.desc || item.description || '').slice(0, 1500),
         tname: detail.tname || '音乐',
       });
     });
@@ -118,7 +125,7 @@ export async function personalizedMusicRecommendations(freshIdx = 0, limit = 20)
   return music;
 }
 
-// 视频搜索（筛掉 60 秒以内的短视频），返回 { list, numPages, page }
+// 视频搜索（不按时长排除短视频），返回 { list, numPages, page }
 // order: '' 综合 / click 最多播放 / pubdate 最新发布 / dm 最多弹幕 / stow 最多收藏
 // duration: 0 全部 / 1 <10 分钟 / 2 10-30 / 3 30-60 / 4 60+
 export async function search(keyword, order = '', duration = 0, page = 1) {
@@ -130,7 +137,7 @@ export async function search(keyword, order = '', duration = 0, page = 1) {
   const list = (data.result || [])
     .filter((v) => v.type === 'video')
     .map(toTrack)
-    .filter((t) => t.bvid && t.duration > 60);
+    .filter((t) => t.bvid);
   return { list, numPages: data.numPages || 1, page: data.page || page };
 }
 
@@ -355,12 +362,25 @@ export async function videoDownloadInfo(bvid, cid, quality) {
   };
 }
 
-/* ---------- 分切（移植自 renderer/api.js mixSplitDetect：B 站章节 view_points 优先，
- * 其次简介时间轴文本；纯接口 + 文本解析，无需音频解码。
- * 桌面端另有基于 Web Audio 的本地音频分析分切（splitAnalyzeAudio）——
- * Expo 环境拿不到 PCM，RN 端未移植。） ---------- */
+/* ---------- 分切：B 站章节 / 简介检测；音频分析与指纹在 SplitPanel 的本地 WebView 运行。 ---------- */
 export function parseTimestampLines(text, totalDuration) {
   const segs = [];
+  // CUE uses mm:ss:frames (75 frames/second), not hh:mm:ss.
+  if (/^\s*TRACK\s+\d+\s+AUDIO/im.test(text) && /^\s*INDEX\s+01\s+/im.test(text)) {
+    let title = '', trackNumber = '';
+    String(text).split(/\r?\n/).forEach((line) => {
+      const track = line.match(/^\s*TRACK\s+(\d+)\s+AUDIO/i);
+      if (track) { trackNumber = track[1]; title = ''; return; }
+      const name = line.match(/^\s*TITLE\s+"?(.+?)"?\s*$/i);
+      if (name && trackNumber) title = name[1];
+      const index = line.match(/^\s*INDEX\s+01\s+(\d+):(\d{2}):(\d{2})/i);
+      if (index && trackNumber && +index[2] < 60 && +index[3] < 75) {
+        segs.push({ from: +index[1] * 60 + +index[2] + +index[3] / 75, name: title || `曲目 ${trackNumber}` });
+      }
+    });
+    const sorted = segs.filter((s) => !totalDuration || s.from < totalDuration).sort((a, b) => a.from - b.from);
+    return sorted.map((s, i) => ({ ...s, to: sorted[i + 1]?.from ?? (totalDuration || s.from + 180) })).filter((s) => s.to > s.from);
+  }
   String(text || '').split(/\r?\n/).forEach((raw) => {
     const line = raw.trim();
     const m = line.match(/(\d{1,3})[:：](\d{1,2})(?:[:：](\d{1,2}))?/);
@@ -432,6 +452,22 @@ export async function favFolders(mid) {
   }));
 }
 
+export async function favFolderInfo(mediaId) {
+  const data = await jget(`https://api.bilibili.com/x/v3/fav/folder/info?media_id=${mediaId}`);
+  return { id: mediaId, title: data.title || '', desc: data.intro || '' };
+}
+
+export async function favFolderEdit(mediaId, title, intro) {
+  if (!mediaId || !String(title || '').trim()) throw new Error('收藏夹名称不能为空');
+  const r = await client.post('https://api.bilibili.com/x/v3/fav/folder/edit', {
+    media_id: mediaId, title: title.trim(), intro: String(intro || '').trim(),
+  });
+  if (r.status !== 200) throw new Error('收藏夹保存失败：HTTP ' + r.status);
+  const data = JSON.parse(r.body);
+  if (data.code !== 0) throw new Error(data.message || '收藏夹保存失败');
+  return true;
+}
+
 // 收藏夹内容（分页），稿件映射为 track；已失效视频（attr=1）直接过滤
 export async function favItems(mediaId, page = 1, ps = 40) {
   const data = await jget(
@@ -453,12 +489,12 @@ export async function favItems(mediaId, page = 1, ps = 40) {
 }
 
 /* ---------- 歌词候选（QQ / 网易云双源，后续歌词功能用） ---------- */
-export async function searchSongCandidates(name) {
+export async function searchSongCandidates(name, { source, limit = 6 } = {}) {
   if (!name) return [];
   const fetchNetease = async () => {
     try {
       const r = await client.get('https://music.163.com/api/search/get/web?s='
-        + encodeURIComponent(name) + '&type=1&limit=6&offset=0');
+        + encodeURIComponent(name) + `&type=1&limit=${limit}&offset=0`);
       if (r.status !== 200) return [];
       return (((JSON.parse(r.body).result || {}).songs) || []).map((s) => ({
         title: s.name,
@@ -473,7 +509,7 @@ export async function searchSongCandidates(name) {
   const fetchQQ = async () => {
     try {
       const r = await client.get('https://c.y.qq.com/soso/fcgi-bin/client_search_cp?w='
-        + encodeURIComponent(name) + '&format=json&p=1&n=6&t=0',
+        + encodeURIComponent(name) + `&format=json&p=1&n=${limit}&t=0`,
         { referer: 'https://y.qq.com/' });
       if (r.status !== 200) return [];
       const list = ((JSON.parse(r.body).data || {}).song || {}).list || [];
@@ -490,7 +526,9 @@ export async function searchSongCandidates(name) {
       })).filter((s) => s.title);
     } catch (e) { return []; }
   };
-  const [ne, qq] = await Promise.all([fetchNetease(), fetchQQ()]);
+  const [ne, qq] = await Promise.all([
+    source === 'qq' ? [] : fetchNetease(), source === 'netease' ? [] : fetchQQ(),
+  ]);
   return [...qq, ...ne];
 }
 
@@ -573,12 +611,13 @@ export async function lyricForMatch(match) {
   return null;
 }
 
-// 单曲歌词搜索：网易云搜索 → 按时长挑歌 → 拉 LRC；命中失败返回 null，调用方可回退 AI 字幕
+// 单曲歌词搜索：QQ 优先，未命中可用歌词再查网易云；两源失败由调用方回退字幕。
 export async function searchLyric(title, artist, durationSec) {
   if (!title) return null;
   try {
-    // B 站标题噪音多：去书名号/方括号/画质与"官方/MV"等修饰词
-    let q = String(title)
+    // 优先使用书名号内的歌名；没有明确歌名时再清洗视频标题。
+    const songTitle = String(title).match(/《([^《》]+)》/)?.[1].trim();
+    let q = songTitle || String(title)
       .replace(/【[^】]*】/g, ' ')
       .replace(/\[[^\]]*\]/g, ' ')
       .replace(/[《》「」]/g, ' ')
@@ -586,65 +625,36 @@ export async function searchLyric(title, artist, durationSec) {
       .replace(/(官方|完整版|无损|高音质|音质|歌词版|字幕版)/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
-    if (q.length < 2) q = String(title).trim();
+    if (!songTitle && q.length < 2) q = String(title).trim();
     const queries = [q];
     if (artist && !q.includes(artist)) queries.push(`${q} ${artist}`);
-    let songs = [];
-    for (const query of queries) {
-      const r = await client.get('https://music.163.com/api/search/get/web?s='
-        + encodeURIComponent(query) + '&type=1&limit=8&offset=0');
-      if (r.status !== 200) continue;
-      const d = JSON.parse(r.body);
-      songs = (d.result && d.result.songs) || [];
-      if (songs.length) break;
+    for (const source of ['qq', 'netease']) {
+      let songs = [];
+      for (const query of queries) {
+        songs = await searchSongCandidates(query, { source, limit: 8 });
+        if (songs.length) break;
+      }
+      if (!songs.length) continue;
+      // 容忍 10s 取最接近者，否则仅接受搜索首项时长差不超过 15s。
+      let pick = songs[0];
+      if (durationSec > 0) {
+        const near = songs.filter((s) => Math.abs(s.duration - durationSec) <= 10)
+          .sort((a, b) => Math.abs(a.duration - durationSec) - Math.abs(b.duration - durationSec));
+        if (near.length) pick = near[0];
+        else if (Math.abs(pick.duration - durationSec) > 15) continue;
+      }
+      const lines = await lyricForMatch(pick);
+      if (lines?.length) return lines;
     }
-    if (!songs.length) return null;
-    // 时长相近优先（容忍 10s；全不匹配且差距 >15s 视为搜错，放弃）
-    let pick = songs[0];
-    if (durationSec > 0) {
-      const near = songs
-        .filter((s) => Math.abs((s.duration || 0) / 1000 - durationSec) <= 10)
-        .sort((a, b) => Math.abs(a.duration / 1000 - durationSec) - Math.abs(b.duration / 1000 - durationSec));
-      if (near.length) pick = near[0];
-      else if (Math.abs((pick.duration || 0) / 1000 - durationSec) > 15) return null;
-    }
-    const r2 = await client.get(`https://music.163.com/api/song/lyric?id=${pick.id}&lv=1`);
-    if (r2.status !== 200) return null;
-    const d2 = JSON.parse(r2.body);
-    if (d2.nolyric || d2.pureMusic || !d2.lrc || !d2.lrc.lyric) return null;
-    const lines = parseLrc(d2.lrc.lyric);
-    return lines.length >= 3 ? lines : null;
+    return null;
   } catch (e) {
     return null;
   }
 }
 
-// AI 字幕歌词：x/player/v2 → subtitle_url → 时间轴（B 站字幕列表需登录）
+// 旧播放器字幕优先；无可用字幕时回退新版 Protobuf 接口，沿用当前登录态。
 export async function subtitles(bvid, cid) {
-  if (!bvid || !cid) return null;
-  const q = `bvid=${encodeURIComponent(bvid)}&cid=${cid}`;
-  let data;
-  try {
-    data = await jget('https://api.bilibili.com/x/player/wbi/v2?' + q, { wbi: true });
-  } catch (e) {
-    try {
-      data = await jget('https://api.bilibili.com/x/player/v2?' + q);
-    } catch (e2) { return null; }
-  }
-  const subs = data.subtitle && data.subtitle.subtitles;
-  if (!subs || !subs.length) return null;
-  const sub = subs.find((s) => /zh|chi|中文/i.test(s.lan || '')) || subs[0];
-  const url = absImg(sub.subtitle_url || '');
-  if (!url) return null;
-  const r = await client.get(url);
-  if (r.status !== 200) return null;
-  try {
-    const json = JSON.parse(r.body);
-    const lines = (json.body || [])
-      .filter((l) => l && l.content)
-      .map((l) => ({ from: +l.from || 0, to: +l.to || 0, text: String(l.content).trim() }));
-    return lines.length ? lines : null;
-  } catch (e) { return null; }
+  return fetchSubtitles(client.get, bvid, cid);
 }
 
 /* ---------- 直播电台（移植自 renderer/api.js：rooms / livePlayUrl） ---------- */
@@ -658,6 +668,32 @@ export async function rooms(page = 1) {
     pic: absImg(r.cover || r.system_cover || ''), area: r.area_v2_name,
     roomid: r.roomid, isLive: true, duration: 0,
   }));
+}
+
+// 已关注且正在直播的主播，沿用当前账号 Cookie。
+export async function followedLives() {
+  const data = await jget('https://api.live.bilibili.com/xlive/web-ucenter/v1/xfetter/GetWebList?hit_ab=false');
+  const seen = new Set();
+  return ((data && (data.rooms || data.list)) || [])
+    .filter((r) => {
+      const id = String(r.roomid || '');
+      if (!id || Number(r.live_status) !== 1 || seen.has(id)) return false;
+      seen.add(id); return true;
+    })
+    .map((r) => ({
+      roomid: r.roomid, title: r.title, up: r.uname, online: r.online || 0,
+      pic: absImg(r.cover_from_user || r.keyframe || r.cover || r.face || ''),
+      face: absImg(r.face || ''), area: r.area_v2_name || r.area_name,
+      isLive: true, duration: 0,
+    }));
+}
+
+// 与桌面端一致，读取最近弹幕供播放页轮询。
+export async function liveDanmaku(roomid) {
+  if (!roomid) return [];
+  const data = await jget(`https://api.live.bilibili.com/xlive/web-room/v1/dM/gethistory?roomid=${encodeURIComponent(roomid)}&room_type=0`);
+  return ((data && data.room) || []).filter((item) => typeof item.text === 'string' && item.text.trim())
+    .map((item) => ({ text: item.text, nickname: item.nickname || '', uid: item.uid, timeline: item.timeline }));
 }
 
 // 直播间 HLS 地址：getRoomPlayInfo，优先 fMP4 再退 TS
@@ -696,10 +732,16 @@ async function progressiveVideoInfo(bvid, cid, quality) {
     { url: 'https://api.bilibili.com/x/player/playurl?' + base + '&type=mp4&fnval=1&fourk=1' + (quality ? `&qn=${quality}` : '') },
   ];
   let lastErr = new Error('无可用视频地址');
+  let fallback;
   for (const att of attempts) {
     try {
       const data = await jget(att.url, att.wbi ? { wbi: true } : undefined); // eslint-disable-line no-await-in-loop
-      if (data?.durl?.length === 1 && data.durl[0].url) return data;
+      if (data?.durl?.length === 1 && data.durl[0].url) {
+        if (!quality || Number(data.quality) === Number(quality)) return data;
+        // Some HTML5 responses ignore qn. Try the remaining endpoints before accepting a lower quality.
+        fallback ||= data;
+        continue;
+      }
       if (data?.durl?.length > 1) throw new Error('该视频返回多段媒体，暂不支持整文件播放或下载');
       lastErr = new Error('接口未返回整文件流（可能触发风控）');
     } catch (e) {
@@ -707,6 +749,7 @@ async function progressiveVideoInfo(bvid, cid, quality) {
     }
     console.warn('[bili.videoUrl] 取流尝试失败：', String((lastErr && lastErr.message) || lastErr));
   }
+  if (fallback) return fallback;
   throw lastErr;
 }
 

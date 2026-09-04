@@ -1,10 +1,13 @@
 /* Biu Player · 主进程 */
-const { app, BrowserWindow, ipcMain, net, session, protocol, dialog, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, net, session, protocol, dialog, nativeImage, safeStorage, Tray, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const QRCode = require('qrcode');
 const { createLanSync } = require('./lan-sync');
+const { createVideoCloudSync } = require('./video-cloud-sync');
+const { createVideoRuntime } = require('./cloud-video-runtime');
+const { createBiliVideoApi } = require('./cloud-video-bili');
 
 // 桌面 Chrome UA + B 站页面 Referer（CDN 无 Referer 会 403）
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
@@ -19,9 +22,39 @@ protocol.registerSchemesAsPrivileged([{
 }]);
 
 let mainWin = null;
+let cloudTray = null, keepCloudRunning = false, quitting = false;
 let lyricWin = null; // 桌面歌词悬浮窗
 let loginWin = null; // B 站官方验证码登录窗
 let buvid3 = ''; // 匿名访客标识：搜索 / playurl 接口风控需要
+// One local writer per userData directory, including repeated launches from Finder/CLI.
+const primaryInstance = app.requestSingleInstanceLock();
+if (!primaryInstance) app.quit();
+app.on('second-instance', () => { if(app.isReady())showMainWindow(); });
+app.on('before-quit', () => { quitting = true; });
+
+function showMainWindow() {
+  if(!mainWin || mainWin.isDestroyed())createWindow();
+  if(mainWin.isMinimized())mainWin.restore();
+  mainWin.show();mainWin.focus();
+}
+function updateCloudBackground(status) {
+  if(quitting)return;
+  keepCloudRunning=!!(status.signedIn && status.enabled || status.busy);
+  if(keepCloudRunning && !cloudTray) {
+    const icon=nativeImage.createFromPath(path.join(__dirname,'renderer/assets/icon.png')).resize({width:18,height:18});
+    cloudTray=new Tray(icon);
+    cloudTray.setToolTip('Biu Player · 云同步后台运行');
+    cloudTray.setContextMenu(Menu.buildFromTemplate([
+      {label:'打开 Biu Player',click:showMainWindow},
+      {type:'separator'},
+      {label:'完全退出',click:()=>app.quit()},
+    ]));
+    cloudTray.on('click',showMainWindow);
+  } else if(!keepCloudRunning && cloudTray) {
+    cloudTray.destroy();cloudTray=null;
+    if(!mainWin && BrowserWindow.getAllWindows().length===0)app.quit();
+  }
+}
 
 /* ---------- WBI 签名（参考 wood3n/biu：/x/player/wbi/playurl 等接口需要） ---------- */
 const MIXIN_TAB = [46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
@@ -167,7 +200,8 @@ async function biliFetch(url, opts = {}) {
     finalUrl = base + '?' + (await signWbi(query));
   }
   const cookie = await cookieHeader(opts.cookie);
-  return fetchWithFallback(finalUrl, {
+  return (opts.noFallback ? net.fetch : fetchWithFallback)(finalUrl, {
+    ...(opts.signal ? { signal: opts.signal } : {}),
     method: opts.method || 'GET',
     credentials: 'include',
     headers: {
@@ -262,11 +296,18 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
     },
   });
-  // React 重构版 UI：BIU_WEB_UI=1 或 renderer 缺位时加载 web-dist；默认仍走旧版 renderer
-  const useWebUi = process.env.BIU_WEB_UI === '1' ||
-    !fs.existsSync(path.join(__dirname, 'renderer/index.html'));
+  // 发布包默认使用当前 React 界面；源码未构建时回退旧界面，BIU_WEB_UI=0 可显式选择旧版。
+  const useWebUi = process.env.BIU_WEB_UI !== '0'
+    && fs.existsSync(path.join(__dirname, 'web-dist/index.html'));
   mainWin.loadFile(path.join(__dirname, useWebUi ? 'web-dist/index.html' : 'renderer/index.html'));
+  mainWin.on('closed', () => {
+    mainWin=null;
+    lyricWin?.close();loginWin?.close();
+  });
+}
 
+app.whenReady().then(() => {
+  if (!primaryInstance) return;
   // 渲染层右上角三个圆形按钮 → 窗口控制
   ipcMain.on('win:min', () => mainWin.minimize());
   ipcMain.on('win:max', () => {
@@ -274,9 +315,6 @@ function createWindow() {
     else mainWin.maximize();
   });
   ipcMain.on('win:close', () => mainWin.close());
-}
-
-app.whenReady().then(() => {
   // 开发态 Dock 图标（打包后由 app bundle 提供）
   if (process.platform === 'darwin' && !app.isPackaged) {
     // Dock 按整张画布缩放；为满幅图标补上约 10% 的透明边距，与系统图标视觉大小一致。
@@ -389,7 +427,8 @@ app.whenReady().then(() => {
   ipcMain.handle('bili:get', async (_e, url, opts = {}) => {
     try {
       const res = await biliFetch(url, opts);
-      return { status: res.status, body: await res.text() };
+      return { status: res.status, body: opts.responseType === 'bytes'
+        ? Array.from(new Uint8Array(await res.arrayBuffer())) : await res.text() };
     } catch (e) {
       return { status: -1, body: String(e) };
     }
@@ -452,27 +491,87 @@ app.whenReady().then(() => {
     scheduleBiuStoreWrite();
   });
 
-  const lanSync = createLanSync({
-    readLibrary: (scope) => {
+  const savedSync = readBiuStore();
+  if (!savedSync['biu-lan-device']) savedSync['biu-lan-device'] = require('node:crypto').randomUUID();
+  let lanScope = '';
+  let lanEnabled = savedSync['biu-lan-auto'] !== false;
+  scheduleBiuStoreWrite();
+  const readSyncLibrary = (scope) => {
       const suffix = scope ? `@${scope}` : '';
       const saved = readBiuStore();
-      return { version: 1, likes: saved[`biu-likes${suffix}`] || [], playlists: saved[`biu-playlists${suffix}`] || [] };
-    },
-    writeLibrary: (scope, library) => {
+      return { version: 1, likes: saved[`biu-likes${suffix}`] || [], playlists: saved[`biu-playlists${suffix}`] || [],
+        recommendation: require('./renderer/recommendation-profile').normalize(saved[`biu-recommendation-profiles${suffix}`]) };
+    };
+  const writeSyncLibrary = (scope, library, base) => {
       const suffix = scope ? `@${scope}` : '';
       const before = readBiuStore();
       biuStoreCache = { ...before, [`biu-likes${suffix}`]: library.likes, [`biu-playlists${suffix}`]: library.playlists };
+      if (library.recommendation) biuStoreCache[`biu-recommendation-profiles${suffix}`] = library.recommendation;
       if (!flushBiuStore()) { biuStoreCache = before; throw new Error('电脑保存失败，请检查磁盘空间后重试'); }
-      mainWin?.webContents.send('lan-sync:library', { scope, library });
-    },
+      if(mainWin && !mainWin.isDestroyed())mainWin.webContents.send('lan-sync:library', { scope, library, base });
+    };
+  const lanSync = createLanSync({
+    deviceId: savedSync['biu-lan-device'],
+    readLibrary: readSyncLibrary,
+    writeLibrary: writeSyncLibrary,
+    cloudKeyStatus: scope => videoCloud.lanKeyStatus(scope),
+    exchangeCloudKey: (value, scope, isActive) => videoCloud.exchangeLanRecovery(value, scope, isActive),
     onStatus: (status) => {
       if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('lan-sync:status', status);
     },
   });
-  ipcMain.handle('lan-sync:manual', (_e, scope) => lanSync.manual(scope));
+  const cloudSource = app.isPackaged ? path.join(process.resourcesPath, 'cloud-video') : path.join(__dirname, 'cloud-video');
+  const cloudRuntime = createVideoRuntime({ source: cloudSource, directory: path.join(app.getPath('userData'), 'video-cloud-runtime') });
+  const cloudApi = createBiliVideoApi({
+    request: (url, options) => biliFetch(url, { ...options, noFallback: options?.method && options.method !== 'GET' }),
+    uploadFetch: (url, options) => net.fetch(url, { ...options, headers: { ...options.headers, 'User-Agent': UA, Referer: REFERER } }),
+    csrf: async () => (await session.defaultSession.cookies.get({ url: REFERER })).find(c => c.name === 'bili_jct')?.value || '',
+    coverFile: path.join(cloudSource, 'cover.png'),
+  });
+  const videoCloud = createVideoCloudSync({
+    directory: path.join(app.getPath('userData'), 'video-cloud'), api: cloudApi, runtime: cloudRuntime,
+    auth: getAuthStatus, readLibrary: readSyncLibrary, writeLibrary: writeSyncLibrary,
+    protect: text => { if (!safeStorage.isEncryptionAvailable()) throw new Error('系统密钥保护不可用'); return safeStorage.encryptString(text).toString('base64'); },
+    unprotect: text => safeStorage.decryptString(Buffer.from(text, 'base64')),
+    onStatus: status => { updateCloudBackground(status);if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('video-cloud:status', status); },
+  });
+  ipcMain.handle('video-cloud:status', () => videoCloud.status());
+  ipcMain.handle('video-cloud:preview', () => videoCloud.loadPreview());
+  ipcMain.handle('video-cloud:configure', (_event, patch) => videoCloud.configure({ enabled: patch?.enabled, ...(patch?.intervalHours === undefined ? {} : { intervalHours: patch.intervalHours }) }));
+  ipcMain.handle('video-cloud:run', (_event, readOnly = false) => videoCloud.run(readOnly === true, readOnly !== true).then(() => videoCloud.status()));
+  ipcMain.handle('video-cloud:export', async () => {
+    const recovery = videoCloud.exportRecovery();
+    const result = await dialog.showSaveDialog(mainWin, { title: '保存视频云同步恢复密钥', defaultPath: 'Biu-云同步恢复密钥.json', filters: [{name:'恢复密钥',extensions:['json']}] });
+    if (!result.canceled && result.filePath) fs.writeFileSync(result.filePath, JSON.stringify(recovery), {mode:0o600});
+    return { canceled: result.canceled };
+  });
+  ipcMain.handle('video-cloud:import', async () => {
+    const result = await dialog.showOpenDialog(mainWin, { title: '导入其他设备的云同步恢复密钥', properties:['openFile'], filters:[{name:'恢复密钥',extensions:['json']}] });
+    if (result.canceled) return videoCloud.status();
+    const file=result.filePaths[0];
+    if (fs.statSync(file).size > 8192) throw new Error('恢复密钥文件过大');
+    return videoCloud.importRecovery(JSON.parse(fs.readFileSync(file,'utf8')));
+  });
+  app.on('before-quit', () => videoCloud.stop());
+  ipcMain.handle('lan-sync:configure', (_e, scope, enabled) => {
+    if (!/^\d{0,20}$/.test(String(scope))) throw new Error('同步账号无效');
+    lanScope = String(scope);
+    videoCloud.setAccount(lanScope).catch(() => {});
+    if (typeof enabled === 'boolean') {
+      const before = readBiuStore()['biu-lan-auto'];
+      readBiuStore()['biu-lan-auto'] = enabled;
+      if (!flushBiuStore()) { readBiuStore()['biu-lan-auto'] = before; throw new Error('同步设置保存失败，请检查磁盘空间'); }
+      lanEnabled = enabled;
+    }
+    return lanSync.configure(lanScope, lanEnabled);
+  });
   ipcMain.handle('lan-sync:status', () => lanSync.status());
-  ipcMain.handle('lan-sync:stop', () => lanSync.stop());
-  app.on('before-quit', () => lanSync.stop());
+  ipcMain.handle('lan-sync:stop', () => { lanScope = ''; lanSync.stop(); videoCloud.setAccount('').catch(() => {}); });
+  // Re-advertise after an interface change or a transient discovery failure.
+  const lanRetry = setInterval(() => lanSync.configure(lanScope, lanEnabled).catch(() => {}), 15000);
+  lanRetry.unref();
+  app.on('before-quit', () => { clearInterval(lanRetry); lanSync.stop(); });
+  lanSync.configure('', lanEnabled);
 
   // 网易云听歌识曲：vendored afp WASM 指纹 → interface.music.163.com 匹配
   // payload: { pcm: ArrayBuffer（Float32 单声道 @48000Hz）, from, len }（from/len 单位：秒）
@@ -709,11 +808,11 @@ app.whenReady().then(() => {
   createWindow();
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    showMainWindow();
   });
 });
 
 app.on('window-all-closed', () => {
   if (lyricWin) { lyricWin.close(); lyricWin = null; }
-  app.quit(); // 单窗口播放器，关闭即退出
+  if(!keepCloudRunning)app.quit();
 });

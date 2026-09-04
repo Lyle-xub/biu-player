@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="430" viewBox="0 0 1440 430" role="img" aria-labelledby="title desc">
+  <title id="title">Biu Player</title><desc id="desc">把 B 站，听成你的音乐库。音乐、歌词与喜欢，都在这里。</desc>
+  <defs>
+    <radialGradient id="olive"><stop stop-color="#b9b77d" stop-opacity=".3"/><stop offset="1" stop-color="#b9b77d" stop-opacity="0"/></radialGradient>
+    <radialGradient id="pink"><stop stop-color="#fb7299" stop-opacity=".3"/><stop offset="1" stop-color="#fb7299" stop-opacity="0"/></radialGradient>
+    <linearGradient id="card" x2="1" y2="1"><stop stop-color="#ffffff" stop-opacity=".12"/><stop offset="1" stop-color="#ffffff" stop-opacity=".02"/></linearGradient>
+    <clipPath id="round"><rect width="1440" height="430" rx="28"/></clipPath>
+  </defs>
+  <g clip-path="url(#round)">
+    <rect width="1440" height="430" fill="#141710"/>
+    <ellipse cx="120" cy="80" rx="650" ry="460" fill="url(#olive)"/>
+    <ellipse cx="1130" cy="300" rx="430" ry="420" fill="url(#pink)"/>
+    <g fill="none" stroke="#eeeecc" stroke-opacity=".09">
+      <circle cx="1200" cy="206" r="120"/><circle cx="1200" cy="206" r="190"/><circle cx="1200" cy="206" r="260"/>
+    </g>
+    <circle cx="85" cy="76" r="6" fill="#fb7299"/>
+    <text x="108" y="83" fill="#dce0d1" font-family="Arial,sans-serif" font-size="17" letter-spacing="5">MUSIC, WITH YOU.</text>
+    <text x="78" y="206" fill="#f8f8f2" font-family="Arial,sans-serif" font-size="88" font-weight="700" letter-spacing="-4">Biu Player</text>
+    <text x="83" y="271" fill="#e0e2d6" font-family="PingFang SC,Microsoft YaHei,sans-serif" font-size="31" letter-spacing="3">把 B 站，听成你的音乐库。</text>
+    <text x="84" y="357" fill="#9ca48e" font-family="Arial,sans-serif" font-size="14" letter-spacing="4">LISTEN  /  DISCOVER  /  SYNC</text>
+    <g transform="translate(995 53) rotate(8 136 160)">
+      <rect width="270" height="323" rx="12" fill="url(#card)" stroke="#ffffff" stroke-opacity=".2"/>
+      <rect x="15" y="15" width="240" height="240" rx="5" fill="#20271c"/>
+      <circle cx="135" cy="135" r="85" fill="#343d2a"/>
+      <g fill="none" stroke="#b8c698" stroke-opacity=".33"><circle cx="135" cy="135" r="69"/><circle cx="135" cy="135" r="55"/><circle cx="135" cy="135" r="40"/></g>
+      <circle cx="135" cy="135" r="23" fill="#fb7299"/>
+      <circle cx="135" cy="135" r="5" fill="#20271c"/>
+      <text x="22" y="291" fill="#e1e3d8" font-family="Arial,sans-serif" font-size="14" letter-spacing="3">YOUR DAILY SOUND</text>
+    </g>
+  </g>
+</svg>

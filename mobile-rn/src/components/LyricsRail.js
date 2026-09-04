@@ -269,12 +269,13 @@ export default function LyricsRail({ lines, activeIndex, onSeek, height, width, 
   const time = useLyricClock(position, playing, clockRevision);
   const { width: windowWidth, fontScale } = useWindowDimensions();
   const lyricFont = clamp(windowWidth * 0.034, 30, 48);
-  const [layout, setLayout] = useState({ lines, width, lyricFont, fontScale, simple, revision: 0, heights: {} });
+  const requestedAnchor = clamp(activeIndex, 0, Math.max(0, lines.length - 1));
+  const [layout, setLayout] = useState({ lines, width, lyricFont, fontScale, simple, revision: 0, heights: {}, anchor: requestedAnchor });
   // Reset before committing rows, not in a passive effect that can erase onLayout
   // results. Remount the rows so even unchanged heights are reported for this layout.
   if (layout.lines !== lines || layout.width !== width || layout.lyricFont !== lyricFont
     || layout.fontScale !== fontScale || layout.simple !== simple) {
-    setLayout({ lines, width, lyricFont, fontScale, simple, revision: layout.revision + 1, heights: {} });
+    setLayout({ lines, width, lyricFont, fontScale, simple, revision: layout.revision + 1, heights: {}, anchor: requestedAnchor });
   }
   const { heights } = layout; // index -> 未缩放布局高（含 padding）
   const seekRef = useRef(onSeek);
@@ -292,7 +293,12 @@ export default function LyricsRail({ lines, activeIndex, onSeek, height, width, 
   const n = linesWithTokens.length;
   // 整数锚点：一行唱的过程中不变 → 各行 target 不变 → 列表静止；
   // 只有切行时 anchor 变 → RailLine 以 420ms EASE_SCROLL 平滑滚动一次
-  const anchor = clamp(activeIndex, 0, Math.max(0, n - 1));
+  // Measure the destination offscreen before moving there. A seek must not hide
+  // the entire rail while newly visible rows report their wrapped heights.
+  const anchor = layout.anchor;
+  if (anchor !== requestedAnchor && linesWithTokens.every((_, i) => Math.abs(i - requestedAnchor) > WINDOW || heights[i] > 0)) {
+    setLayout((previous) => ({ ...previous, anchor: requestedAnchor }));
+  }
   const layoutReady = linesWithTokens.every((_, i) => Math.abs(i - anchor) > WINDOW || heights[i] > 0);
 
   const targets = useMemo(() => {
@@ -329,7 +335,7 @@ export default function LyricsRail({ lines, activeIndex, onSeek, height, width, 
   const rows = (
     <View style={{ flex: 1, opacity: layoutReady ? 1 : 0 }} pointerEvents={layoutReady ? 'auto' : 'none'}>
       {linesWithTokens.map((line, i) => {
-        if (Math.abs(i - anchor) > WINDOW + 2) return null;
+        if (Math.abs(i - anchor) > WINDOW + 2 && Math.abs(i - requestedAnchor) > WINDOW + 2) return null;
         const state = i === activeIndex ? 'active' : i < activeIndex ? 'passed' : 'waiting';
         return (
           <RailLine

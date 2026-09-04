@@ -1,8 +1,8 @@
-/* Shared wire format for desktop and RN. Merge is additive: absence is not a deletion. */
+/* Shared wire format for desktop and RN. First contact merges; snapshots track deletions. */
 (function (root, factory) {
-  if (typeof module === 'object' && module.exports) module.exports = factory();
-  else root.BiuLibrarySync = factory();
-})(typeof window === 'object' ? window : this, function () {
+  if (typeof module === 'object' && module.exports) module.exports = factory(require('./recommendation-profile'));
+  else root.BiuLibrarySync = factory(root.BiuRecommendation);
+})(typeof window === 'object' ? window : this, function (recommendation) {
   const MAX_TRACKS = 20000;
   const object = (v) => v && typeof v === 'object' && !Array.isArray(v);
   const text = (v, max = 2048) => typeof v === 'string' && v.length <= max;
@@ -51,7 +51,8 @@
       return out;
     });
     if (new Set(playlists.map((p) => String(p.id))).size !== playlists.length) throw new Error('歌单标识重复');
-    return { version: 1, likes, playlists };
+    return { version: 1, likes, playlists,
+      ...(v.recommendation === undefined ? {} : { recommendation: recommendation.syncState(v.recommendation) }) };
   }
   function merge(a, b) {
     const local = normalize(a), remote = normalize(b);
@@ -61,7 +62,43 @@
       playlists.set(String(p.id), existing
         ? { ...p, ...existing, tracks: unique([...existing.tracks, ...p.tracks], trackKey) } : p);
     });
-    return normalize({ version: 1, likes: unique([...local.likes, ...remote.likes], trackKey), playlists: [...playlists.values()] });
+    return normalize({ version: 1, likes: unique([...local.likes, ...remote.likes], trackKey), playlists: [...playlists.values()],
+      recommendation: recommendation.reconcile(undefined, local.recommendation, remote.recommendation) });
+  }
+  // First contact is additive. Later exchanges compare with the last shared copy,
+  // so a removal is distinguishable from a song the other device has never seen.
+  function reconcile(base, local, remote) {
+    if (!base) return merge(local, remote);
+    base = normalize(base); local = normalize(local); remote = normalize(remote);
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    function list(before, left, right, key, combine) {
+      const b = new Map(before.map((v) => [key(v), v]));
+      const l = new Map(left.map((v) => [key(v), v]));
+      const r = new Map(right.map((v) => [key(v), v]));
+      const keys = (values) => values.map(key);
+      // Prefer a changed remote order; otherwise keep the local order.
+      const order = same(keys(before).filter((k) => r.has(k)), keys(right))
+        ? [...l.keys(), ...r.keys()] : [...r.keys(), ...l.keys()];
+      return [...new Set(order)].flatMap((k) => {
+        if (b.has(k) && (!l.has(k) || !r.has(k))) return [];
+        if (!l.has(k)) return [r.get(k)];
+        if (!r.has(k)) return [l.get(k)];
+        return [combine ? combine(b.get(k), l.get(k), r.get(k))
+          : same(b.get(k), r.get(k)) ? l.get(k) : r.get(k)];
+      });
+    }
+    const playlists = list(base.playlists, local.playlists, remote.playlists, (p) => String(p.id), (b, l, r) => {
+      const result = { ...l };
+      for (const field of ['title', 'desc', 'cover', 'createdAt']) {
+        if (b && !same(b[field], r[field])) {
+          if (r[field] === undefined) delete result[field]; else result[field] = r[field];
+        }
+      }
+      result.tracks = list(b?.tracks || [], l.tracks, r.tracks, trackKey);
+      return result;
+    });
+    return normalize({ version: 1, likes: list(base.likes, local.likes, remote.likes, trackKey), playlists,
+      recommendation: recommendation.reconcile(base.recommendation, local.recommendation, remote.recommendation) });
   }
   function privateIPv4(address) {
     const parts = String(address).split('.');
@@ -75,5 +112,5 @@
     if (!match || !privateIPv4(match[1]) || +match[2] < 1 || +match[2] > 65535) throw new Error('请输入电脑显示的局域网地址和端口，例如 192.168.1.10:43821');
     return `http://${match[1]}:${Number(match[2])}`;
   }
-  return { normalize, merge, trackKey, privateIPv4, endpoint };
+  return { normalize, merge, reconcile, trackKey, privateIPv4, endpoint };
 });

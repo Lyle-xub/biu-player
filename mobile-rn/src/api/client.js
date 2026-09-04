@@ -131,7 +131,7 @@ async function ensureBuvid() {
 }
 
 /* ---------- 统一请求：UA/Referer/Cookie/超时，opts.wbi 时签名 ---------- */
-async function biliFetch(url, opts = {}) {
+export async function biliFetch(url, opts = {}) {
   await initClient();
   if (!opts.skipBuvid) await ensureBuvid();
   const u = new URL(url);
@@ -147,10 +147,15 @@ async function biliFetch(url, opts = {}) {
     ...(opts.headers || {}),
   };
   const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (opts.signal?.aborted) abort();
+  opts.signal?.addEventListener('abort', abort, { once: true });
   const timer = setTimeout(() => controller.abort(), opts.timeout || 10000);
   try {
     const res = await fetch(url, {
       method: opts.method || 'GET',
+      // Keep the application's explicit Cookie header as the only source.
+      credentials: 'omit',
       headers,
       body: opts.body,
       signal: controller.signal,
@@ -159,14 +164,36 @@ async function biliFetch(url, opts = {}) {
     return res;
   } finally {
     clearTimeout(timer);
+    opts.signal?.removeEventListener('abort', abort);
   }
 }
 
 // 与桌面端 window.bili.get 同形：{ status, body }，调用方自行 JSON.parse
+let searchQueue = Promise.resolve(), nextSearchAt = 0, searchBlockedUntil = 0;
 export async function get(url, opts = {}) {
   try {
+    const isSearch = /^https:\/\/api\.bilibili\.com\/x\/web-interface\/(?:wbi\/)?search\//.test(url);
+    if (isSearch) {
+      // Pace starts without waiting for earlier responses; completed pages still
+      // display immediately. A server rejection pauses subsequent search calls.
+      searchQueue = searchQueue.then(async () => {
+        const delay = nextSearchAt - Date.now();
+        if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+        nextSearchAt = Date.now() + 750;
+      });
+      await searchQueue;
+      if (Date.now() < searchBlockedUntil) return { status: 429, body: '搜索请求冷却中，请稍后重试' };
+    }
     const res = await biliFetch(url, opts);
-    return { status: res.status, body: await res.text() };
+    // 412 is not a rate-limit instruction. Do not turn one rejected page into
+    // a fabricated 429 for every later search; honor an explicit Retry-After.
+    if (isSearch && (res.status === 429 || (res.status === 412 && res.headers.get('retry-after')))) {
+      const retry = res.headers.get('retry-after');
+      const delay = retry && /^\d+$/.test(retry) ? Number(retry) * 1000 : Date.parse(retry) - Date.now();
+      searchBlockedUntil = Date.now() + (Number.isFinite(delay) && delay > 0 ? delay : 60000);
+    }
+    return { status: res.status, body: opts.responseType === 'bytes'
+      ? Array.from(new Uint8Array(await res.arrayBuffer())) : await res.text() };
   } catch (e) {
     const aborted = e && (e.name === 'AbortError' || /aborted|timeout/i.test(String(e.message || e)));
     return { status: -1, body: aborted ? '请求超时，请检查网络' : String(e.message || e) };
@@ -307,5 +334,6 @@ export async function logout() {
 
 // 供播放器使用：CDN 必须带 Referer 否则 403
 export const streamHeaders = () => ({ Referer: REFERER, 'User-Agent': UA });
+export const cloudCsrf = async () => { await initClient(); return jar.bili_jct || ''; };
 // 封面图请求头（hdslb.com 同样需要 Referer）
 export const imageHeaders = streamHeaders;

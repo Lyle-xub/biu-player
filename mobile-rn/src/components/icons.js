@@ -80,6 +80,30 @@ export const IconBack = ({ size = 22, color }) => (
   </I>
 );
 
+export const IconEdit = ({ size = 20, color }) => (
+  <I size={size} color={color}>
+    <Path d="m15 4 5 5M4 20l5-1L21 7a2.1 2.1 0 0 0-4-4L5 15Z" {...stroke(color)} />
+  </I>
+);
+
+export const IconTrash = ({ size = 20, color }) => (
+  <I size={size} color={color}>
+    <Path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7" {...stroke(color)} />
+  </I>
+);
+
+export const IconCheck = ({ size = 20, color }) => (
+  <I size={size} color={color}>
+    <Path d="m5 12 4.5 4.5L19 7" {...stroke(color)} />
+  </I>
+);
+
+export const IconReorder = ({ size = 20, color }) => (
+  <I size={size} color={color}>
+    <Path d="M4 6h9M4 12h9M4 18h9m3-9 3-3 3 3M19 6v12m-3-3 3 3 3-3" {...stroke(color)} />
+  </I>
+);
+
 export const IconNote = ({ size = 14, color }) => (
   <I size={size} color={color}>
     <Path d="M9 18V6l10-2.5V15" {...stroke(color)} />

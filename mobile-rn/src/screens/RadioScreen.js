@@ -1,7 +1,7 @@
 /* Biu Player RN · 电台：B 站直播音乐电台（parent_area_id=5），双栏网格 + 触底翻页
- * 播放走 PlayerContext 的 isLive 分支（expo-video HLS，仅音频）。
+ * 播放走 PlayerContext 的 isLive 分支（expo-video HLS），点击进入直播播放页。
  */
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator, FlatList, RefreshControl, StyleSheet, Text, TouchableOpacity, View,
 } from 'react-native';
@@ -12,6 +12,7 @@ import { initClient } from '../api/client';
 import { usePlayer } from '../player/PlayerContext';
 import { IconRadio } from '../components/icons';
 import RemoteImage from '../components/RemoteImage';
+import FollowedLives from '../components/FollowedLives';
 
 function RoomCard({ room, active, onPress }) {
   return (
@@ -35,7 +36,7 @@ function RoomCard({ room, active, onPress }) {
   );
 }
 
-export default function RadioScreen() {
+export default function RadioScreen({ navigation }) {
   const { playQueue, current, playing } = usePlayer();
   const [list, setList] = useState([]);
   const [page, setPage] = useState(1);
@@ -43,25 +44,46 @@ export default function RadioScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const request = useRef(0);
+  const busy = useRef(false);
+  const [hasMore, setHasMore] = useState(true);
+  const watch = (rooms, index) => {
+    playQueue(rooms, index);
+    navigation.navigate('Player');
+  };
 
   const load = useCallback(async (p = 1) => {
-    if (p === 1) setLoading(true); else setLoadingMore(true);
+    if (p > 1 && busy.current) return;
+    const token = ++request.current;
+    busy.current = true;
+    if (p === 1) { setLoading(true); setRefreshKey((key) => key + 1); } else setLoadingMore(true);
     setError(null);
     try {
       const rooms = await bili.rooms(p);
+      if (token !== request.current) return;
       setList((prev) => (p === 1 ? rooms : [...prev, ...rooms.filter((r) => !prev.some((x) => x.roomid === r.roomid))]));
       setPage(p);
+      setHasMore(rooms.length > 0);
     } catch (e) {
+      if (token !== request.current) return;
       setError(String(e.message || e));
       if (p === 1) setList([]);
     } finally {
-      setLoading(false);
-      setRefreshing(false);
-      setLoadingMore(false);
+      if (token === request.current) {
+        busy.current = false;
+        setLoading(false);
+        setRefreshing(false);
+        setLoadingMore(false);
+      }
     }
   }, []);
 
-  useEffect(() => { initClient().then(() => load(1)); }, [load]);
+  useEffect(() => {
+    let cancelled = false;
+    initClient().then(() => { if (!cancelled) load(1); });
+    return () => { cancelled = true; request.current++; };
+  }, [load]);
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -70,48 +92,40 @@ export default function RadioScreen() {
         <Text style={styles.headerTitle}>音乐电台</Text>
         <Text style={styles.headerHint}>B 站直播 · 电台分区</Text>
       </View>
-      {loading && !refreshing ? (
-        <ActivityIndicator color={colors.accent} style={{ marginTop: 48 }} />
-      ) : error ? (
-        <View style={styles.center}>
-          <Text style={styles.hint}>{error}</Text>
-          <TouchableOpacity style={styles.retryBtn} onPress={() => load(1)}>
-            <Text style={styles.retryText}>重试</Text>
-          </TouchableOpacity>
-        </View>
-      ) : (
-        <FlatList
-          data={list}
-          numColumns={2}
-          columnWrapperStyle={{ gap: 12 }}
-          keyExtractor={(r) => String(r.roomid)}
-          renderItem={({ item, index: i }) => (
-            <View style={{ flex: 1 }}>
-              <RoomCard
-                room={item}
-                active={!!current && current.isLive && current.roomid === item.roomid && playing}
-                onPress={() => playQueue(list, i)}
-              />
-            </View>
-          )}
-          contentContainerStyle={styles.listContent}
-          refreshControl={(
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={() => { setRefreshing(true); load(1); }}
-              tintColor={colors.accent}
+      <FlatList
+        data={loading && !refreshing ? [] : list}
+        ListHeaderComponent={<FollowedLives onSelect={watch} refreshKey={refreshKey} />}
+        numColumns={2}
+        columnWrapperStyle={{ gap: 12 }}
+        keyExtractor={(r) => String(r.roomid)}
+        renderItem={({ item, index: i }) => (
+          <View style={{ flex: 1 }}>
+            <RoomCard
+              room={item}
+              active={!!current && current.isLive && current.roomid === item.roomid && playing}
+              onPress={() => watch(list, i)}
             />
-          )}
-          onEndReachedThreshold={0.4}
-          onEndReached={() => { if (!loadingMore && list.length) load(page + 1); }}
-          ListEmptyComponent={(
-            <View style={styles.center}><Text style={styles.hint}>暂时没有正在直播的电台</Text></View>
-          )}
-          ListFooterComponent={loadingMore
-            ? <ActivityIndicator color={colors.accent} style={{ marginVertical: 14 }} />
-            : null}
-        />
-      )}
+          </View>
+        )}
+        contentContainerStyle={styles.listContent}
+        refreshControl={(
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => { setRefreshing(true); load(1); }}
+            tintColor={colors.accent}
+          />
+        )}
+        onEndReachedThreshold={0.4}
+        onEndReached={() => { if (!loading && !loadingMore && !error && hasMore && list.length) load(page + 1); }}
+        ListEmptyComponent={loading ? <ActivityIndicator color={colors.accent} style={{ marginTop: 48 }} />
+          : !error ? <View style={styles.center}><Text style={styles.hint}>暂时没有正在直播的电台</Text></View> : null}
+        ListFooterComponent={error ? <TouchableOpacity style={styles.center} accessibilityRole="button"
+          accessibilityLabel="重试电台列表" onPress={() => load(list.length ? page + 1 : 1)}>
+          <Text style={styles.hint}>{error}</Text><Text style={styles.retryText}>点击重试</Text>
+        </TouchableOpacity> : loadingMore
+          ? <ActivityIndicator color={colors.accent} style={{ marginVertical: 14 }} />
+          : null}
+      />
     </SafeAreaView>
   );
 }
@@ -154,9 +168,5 @@ const styles = StyleSheet.create({
   online: { color: colors.text3, fontSize: 10 },
   center: { alignItems: 'center', marginTop: 64, gap: 14, paddingHorizontal: 32 },
   hint: { color: colors.text2, fontSize: 13, textAlign: 'center' },
-  retryBtn: {
-    paddingHorizontal: 22, height: 36, borderRadius: 999,
-    backgroundColor: colors.accentSoft, justifyContent: 'center',
-  },
   retryText: { color: colors.accent, fontSize: 13, fontWeight: '600' },
 });

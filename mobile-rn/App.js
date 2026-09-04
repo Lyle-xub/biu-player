@@ -1,6 +1,6 @@
 /* Biu Player RN · 入口：底部 tab（首页/电台/搜索/我的）+ 播放页 stack + 迷你播放条
  * 转场（native-stack 原生转场，全部跑原生驱动）：
- * - 普通页面：ios_from_right（iOS 风格右滑推入，Android 上也是右推）+ 全宽手势返回
+ * - 普通页面：Android 保留完整路由至侧滑结束；iOS 使用原生侧滑
  * - 播放页 / 视频页（全屏媒体）：iOS = slide_from_bottom 底部升起 + 下滑手势关闭；
  *   Android = 透明原生路由 + Animated 升降，退出动画完成后再移除路由
  * - tab 切换：fade 轻淡 crossfade；tab 图标选中态轻微 scale 弹性
@@ -12,14 +12,22 @@ import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
+import { isRunningInExpoGo } from 'expo';
+import * as SplashScreen from 'expo-splash-screen';
 import { BlurTargetView, BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
+import Svg, { Defs, RadialGradient, Rect, Stop } from 'react-native-svg';
 import { colors } from './src/theme';
 import { PlayerProvider } from './src/player/PlayerContext';
+import { LanSyncProvider } from './src/store/LanSyncProvider';
+import { CloudSyncProvider } from './src/store/CloudSyncProvider';
 import { mediaScreenOptions } from './src/player/useMediaTransition';
 import MiniBar from './src/components/MiniBar';
+import { OverlayProvider } from './src/components/Overlay';
+import PageTransition, { pageScreenOptions } from './src/components/PageTransition';
 import { IconHome, IconRadio, IconSearch, IconUser } from './src/components/icons';
 import HomeScreen from './src/screens/HomeScreen';
+import DailyScreen from './src/screens/DailyScreen';
 import RadioScreen from './src/screens/RadioScreen';
 import SearchScreen from './src/screens/SearchScreen';
 import MineScreen from './src/screens/MineScreen';
@@ -31,6 +39,12 @@ import HistoryScreen from './src/screens/HistoryScreen';
 import LocalPlaylistScreen from './src/screens/LocalPlaylistScreen';
 import PlaylistDetailScreen from './src/screens/PlaylistDetailScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
+
+// 等启动遮罩完成布局且 Logo 加载后再交接，避免露出空白帧。
+SplashScreen.preventAutoHideAsync().catch(() => {});
+if (!isRunningInExpoGo()) {
+  SplashScreen.setOptions({ duration: 350, fade: true });
+}
 
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
@@ -56,6 +70,50 @@ const TAB_ICONS = {
 };
 const TAB_LABELS = { Home: '首页', Radio: '电台', Search: '搜索', Mine: '我的' };
 
+function StartupGlow() {
+  const opacity = useRef(new Animated.Value(1)).current;
+  const [laidOut, setLaidOut] = useState(false);
+  const [imageReady, setImageReady] = useState(false);
+  const [visible, setVisible] = useState(true);
+  useEffect(() => {
+    if (!laidOut || !imageReady) return;
+    SplashScreen.hideAsync().catch(() => {});
+    const animation = Animated.timing(opacity, {
+      toValue: 0, delay: 450, duration: 650, useNativeDriver: true,
+    });
+    animation.start(({ finished }) => { if (finished) setVisible(false); });
+    return () => animation.stop();
+  }, [laidOut, imageReady, opacity]);
+  if (!visible) return null;
+  return (
+    <Animated.View
+      pointerEvents="none"
+      onLayout={() => setLaidOut(true)}
+      style={[StyleSheet.absoluteFill, styles.startup, { opacity }]}
+    >
+      <View style={styles.startupGlow}>
+        <Svg width="100%" height="100%" viewBox="0 0 360 360">
+          <Defs>
+            <RadialGradient id="bootGlow" cx="50%" cy="50%" r="50%">
+              <Stop offset="0" stopColor="#f87ca0" stopOpacity={0.38} />
+              <Stop offset="0.3" stopColor="#f1608f" stopOpacity={0.22} />
+              <Stop offset="0.62" stopColor="#e74b81" stopOpacity={0.047} />
+              <Stop offset="1" stopColor="#e74b81" stopOpacity={0} />
+            </RadialGradient>
+          </Defs>
+          <Rect width="360" height="360" fill="url(#bootGlow)" />
+        </Svg>
+      </View>
+      <Animated.Image
+        source={require('./assets/splash-icon.png')}
+        onLoadEnd={() => setImageReady(true)}
+        resizeMode="contain"
+        style={styles.startupLogo}
+      />
+    </Animated.View>
+  );
+}
+
 function AmbientBackground() {
   return (
     <View pointerEvents="none" style={StyleSheet.absoluteFill}>
@@ -73,6 +131,19 @@ function AmbientBackground() {
       />
     </View>
   );
+}
+
+function screenLayout({ children, options, route, navigation }) {
+  const media = route.name === 'Player' || route.name === 'Video';
+  if (media && options.presentation === 'transparentModal') return children;
+  const content = (
+    <View style={styles.app}>
+      <AmbientBackground />
+      {children}
+    </View>
+  );
+  if (route.name === 'Tabs' || media) return content;
+  return <PageTransition navigation={navigation}>{content}</PageTransition>;
 }
 
 // tab 图标：选中态轻微 scale 弹性（spring，原生驱动）
@@ -141,10 +212,24 @@ function GlassTabBar({ active, blurTarget, navigate }) {
 function Tabs() {
   const blurTargetRef = useRef(null);
   const tabNavigationRef = useRef(null);
+  const lastHomePressRef = useRef(null);
   const [activeTab, setActiveTab] = useState('Home');
   const reportTab = useCallback((navigation, name) => {
     tabNavigationRef.current = navigation;
     setActiveTab(name);
+  }, []);
+  const navigateTab = useCallback((name) => {
+    const navigation = tabNavigationRef.current;
+    if (!navigation) return;
+    const now = Date.now();
+    const doublePress = name === 'Home' && lastHomePressRef.current !== null
+      && now - lastHomePressRef.current <= 300;
+    lastHomePressRef.current = name === 'Home' && !doublePress ? now : null;
+    navigation.navigate(name);
+    if (doublePress) {
+      const home = navigation.getState().routes.find((route) => route.name === 'Home');
+      if (home) navigation.emit({ type: 'homeDoublePress', target: home.key });
+    }
   }, []);
   return (
     <View style={styles.tabsWrap}>
@@ -167,7 +252,7 @@ function Tabs() {
       <GlassTabBar
         active={activeTab}
         blurTarget={blurTargetRef}
-        navigate={(name) => tabNavigationRef.current?.navigate(name)}
+        navigate={navigateTab}
       />
     </View>
   );
@@ -177,21 +262,22 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <PlayerProvider>
+        <CloudSyncProvider>
+        <LanSyncProvider>
         <NavigationContainer theme={navTheme}>
           <StatusBar style="light" />
           <View style={styles.app}>
-            <AmbientBackground />
+            <OverlayProvider>
             <Stack.Navigator
+              screenLayout={screenLayout}
               screenOptions={{
                 headerShown: false,
-                contentStyle: { backgroundColor: 'transparent' },
-                // 普通页面：iOS 风格右滑推入 + 全宽手势返回（iOS 上即默认交互手势转场）
-                animation: 'ios_from_right',
-                gestureEnabled: true,
-                fullScreenGestureEnabled: true,
+                ...pageScreenOptions,
               }}
             >
-              <Stack.Screen name="Tabs" component={Tabs} />
+              <Stack.Screen name="Tabs" component={Tabs} options={{
+                presentation: 'card', animation: 'none', contentStyle: { backgroundColor: colors.bg },
+              }} />
               {/* 媒体页共用升降转场，Android 在动画完成前保留路由。 */}
               <Stack.Screen
                 name="Player"
@@ -204,14 +290,19 @@ export default function App() {
                 component={VideoScreen}
                 options={mediaScreenOptions}
               />
+              <Stack.Screen name="Daily" component={DailyScreen} />
               <Stack.Screen name="Likes" component={LikesScreen} />
               <Stack.Screen name="History" component={HistoryScreen} />
               <Stack.Screen name="LocalPlaylist" component={LocalPlaylistScreen} />
               <Stack.Screen name="PlaylistDetail" component={PlaylistDetailScreen} />
               <Stack.Screen name="Settings" component={SettingsScreen} />
             </Stack.Navigator>
+            <StartupGlow />
+            </OverlayProvider>
           </View>
         </NavigationContainer>
+        </LanSyncProvider>
+        </CloudSyncProvider>
       </PlayerProvider>
     </SafeAreaProvider>
   );
@@ -219,6 +310,9 @@ export default function App() {
 
 const styles = StyleSheet.create({
   app: { flex: 1, backgroundColor: colors.bg },
+  startup: { zIndex: 100, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center' },
+  startupGlow: { position: 'absolute', width: 360, height: 360 },
+  startupLogo: { width: 140, height: 140 },
   tabsWrap: { flex: 1, backgroundColor: 'transparent' },
   tabContent: { flex: 1 },
   tabBar: {
