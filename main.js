@@ -521,7 +521,7 @@ app.whenReady().then(() => {
     },
   });
   const cloudSource = app.isPackaged ? path.join(process.resourcesPath, 'cloud-video') : path.join(__dirname, 'cloud-video');
-  const cloudRuntime = createVideoRuntime({ source: cloudSource, directory: path.join(app.getPath('userData'), 'video-cloud-runtime') });
+  const cloudRuntime = createVideoRuntime({ source: cloudSource, runtime: app.isPackaged ? path.join(cloudSource, 'runtime') : path.join(__dirname, 'dist/cloud-runtime') });
   const cloudApi = createBiliVideoApi({
     request: (url, options) => biliFetch(url, { ...options, noFallback: options?.method && options.method !== 'GET' }),
     uploadFetch: (url, options) => net.fetch(url, { ...options, headers: { ...options.headers, 'User-Agent': UA, Referer: REFERER } }),

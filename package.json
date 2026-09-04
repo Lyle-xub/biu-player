@@ -1,6 +1,6 @@
 {
   "name": "biu-player",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "基于 B 站公开接口的桌面音乐播放器",
   "main": "main.js",
   "scripts": {
@@ -11,8 +11,9 @@
     "start:web": "BIU_WEB_UI=1 electron .",
     "check": "node --check main.js && node --check preload.js && node --check renderer/api.js && node --check renderer/playback-session.js && node --check renderer/app.js && node --check video-cloud-sync.js && node --check cloud-video-bili.js && node --check cloud-video-runtime.js && node --check renderer/video-cloud-settings.js",
     "test": "node --test test/*.test.cjs",
-    "dist": "electron-builder --mac",
-    "dist:win": "npm run build:web && scripts\\build-windows-native.cmd && electron-builder --win --x64"
+    "dist": "npm run build:web && npm run build:cloud && electron-builder --mac",
+    "dist:win": "npm run build:web && npm run build:cloud && electron-builder --win --x64",
+    "build:cloud": "node scripts/build-cloud-runtime.cjs"
   },
   "build": {
     "appId": "com.biu.player",
@@ -44,14 +45,18 @@
       ],
       "icon": "build/icon.png",
       "hardenedRuntime": true,
-      "signIgnore": ["\\.lproj/locale\\.pak$"],
+      "signIgnore": [
+        "\\.lproj/locale\\.pak$"
+      ],
       "notarize": false
     },
     "win": {
-      "target": ["nsis", "zip"],
+      "target": [
+        "nsis",
+        "zip"
+      ],
       "icon": "build/icon.png",
-      "artifactName": "Biu-Player-${version}-windows-${arch}.${ext}",
-      "extraResources": [{ "from": "dist/windows-native/wirehair.dll", "to": "cloud-video/wirehair.dll" }]
+      "artifactName": "Biu-Player-${version}-windows-${arch}.${ext}"
     },
     "nsis": {
       "artifactName": "Biu-Player-${version}-windows-${arch}-Setup.${ext}",
@@ -69,6 +74,10 @@
           "!**/__pycache__/**",
           "!**/*.md"
         ]
+      },
+      {
+        "from": "dist/cloud-runtime",
+        "to": "cloud-video/runtime"
       }
     ]
   },

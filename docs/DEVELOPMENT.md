@@ -27,7 +27,7 @@ npm ci
 npm run dist:win -- --publish never
 ```
 
-构建命令会先编译 React 页面与视频云同步 DLL，再生成 NSIS 安装包和 ZIP。输出位于 `dist/`；Windows 安装包目前未配置代码签名。
+构建命令会先编译 React 页面，并下载、校验和准备完整的视频云同步组件，再生成安装包。输出位于 `dist/`；Windows 安装包目前未配置代码签名。
 也可以在 GitHub Actions 手动运行 `Windows release`，填写已有 Release 标签；流程会在 Windows 上检查 DLL、启动应用，再上传这两种安装文件与校验值。
 
 ## 手机端
@@ -53,7 +53,7 @@ npx expo run:android
 - `renderer/recommendation-profile.js`、`renderer/daily-recommendation.js`：画像与每日推荐。
 - `lan-sync.js`、`mobile-rn/src/store/lanSync.js`：局域网发现、连接与同步。
 
-桌面视频云同步需要 Python 3.12+ 和 FFmpeg。Windows 发布包附带 Wirehair DLL；macOS / Linux 首次使用还需要 C++ 编译器。首次启用会在应用数据目录创建独立 Python 环境。手机端使用原生模块，无需 Python 或 FFmpeg。
+macOS（Apple Silicon）和 Windows（x64）安装包内置 Python、FFmpeg、证书及同步依赖，用户无需另外安装，也不会在首次使用时下载依赖。源码运行先执行 `npm run build:cloud`；构建机器需要联网和 C++ 编译器，Windows 需要 Visual Studio C++ Build Tools。依赖版本和下载校验值固定在构建脚本中，许可证随组件分发。手机端使用原生模块。
 
 在设置中创建视频云同步后，通过恢复密钥配对其他设备；同账号的局域网自动同步也能交换密钥。恢复密钥和登录信息只保存在设备上，不要提交到仓库。
 

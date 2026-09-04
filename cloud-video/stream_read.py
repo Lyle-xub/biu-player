@@ -5,6 +5,7 @@ are deliberately not checked; this is a snapshot reader, not a whole-video audit
 """
 import argparse
 import json
+import os
 import queue
 import subprocess
 import tempfile
@@ -68,7 +69,7 @@ def restore(source,key,output,expected,mode='stream',rate=0,timeout=120,on_event
 
     try:
         # Small probe and one decode thread avoid buffering seconds of video.
-        command=['ffmpeg','-v','error','-probesize','32768','-analyzeduration','0',
+        command=[os.environ.get('BIU_FFMPEG','ffmpeg'),'-v','error','-probesize','32768','-analyzeduration','0',
             '-threads','1','-i','pipe:0','-an','-vf','fps=4,scale=640:360',
             '-threads','1','-f','rawvideo','-pix_fmt','gray','pipe:1']
         with tempfile.TemporaryFile() as err:

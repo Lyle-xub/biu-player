@@ -3,16 +3,14 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs'), vm = require('node:vm'), path = require('node:path');
 const { EventEmitter } = require('node:events');
 
-test('cloud runtime uses bundled Windows DLL and venv paths while retaining the macOS compiler flow', async () => {
+test('both platforms use only bundled components, ignoring host Python settings', async () => {
   for (const platform of ['win32', 'darwin']) {
     const windows = platform === 'win32', paths = windows ? path.win32 : path.posix;
     const source = windows ? 'C:\\Program Files\\Biu\\cloud-video' : '/Applications/Biu/cloud-video';
-    const directory = windows ? 'C:\\Users\\Test\\Biu' : '/Users/test/Biu';
-    const calls = [], writes = [], module = { exports: {} };
-    const native = paths.join(source, 'wirehair.dll');
-    let dllExists = true;
+    const calls = [], module = { exports: {} };
+    let complete = true;
     const mocks = {
-      'node:fs': { existsSync: (p) => p === native && dllExists, mkdirSync() {}, writeFileSync: (p) => writes.push(p) },
+      'node:fs': { existsSync: () => complete },
       'node:path': paths,
       'node:child_process': { spawn(bin, args, options) {
         calls.push({ bin, args, options });
@@ -24,20 +22,19 @@ test('cloud runtime uses bundled Windows DLL and venv paths while retaining the 
       } },
     };
     vm.runInNewContext(fs.readFileSync(require.resolve('../cloud-video-runtime'), 'utf8'), {
-      module, require: (name) => mocks[name], process: { platform, env: { PATH: windows ? 'C:\\Python;C:\\ffmpeg' : '/usr/bin' } },
+      module, require: name => mocks[name], process: { platform, env: { PATH: '', PYTHONHOME: '/invalid' } },
       setTimeout, clearTimeout,
     });
-    const runtime = module.exports.createVideoRuntime({ source, directory });
-    await runtime.ensure(undefined, () => {});
-    assert.ok(calls.some((c) => c.bin === paths.join(directory, windows ? 'venv/Scripts/python.exe' : 'venv/bin/python')));
-    assert.equal(calls.some((c) => c.bin === 'c++'), !windows);
-    assert.ok(calls.every((c) => c.options.windowsHide && c.options.env.PYTHONUTF8 === '1'));
-    assert.equal(writes[0], paths.join(directory, 'ready-v1'));
-    if (windows) {
-      assert.equal(calls[0].options.env.PATH, 'C:\\Python;C:\\ffmpeg');
-      assert.ok(calls.some((c) => c.bin === 'python' && c.args.includes('venv')));
-      dllExists = false;
-      await assert.rejects(runtime.ensure(undefined, () => {}), /DLL/);
-    }
+    const runtime = module.exports.createVideoRuntime({ source });
+    await runtime.ensure();
+    await runtime.ensure();
+    assert.equal(calls.length, 2, 'prepare once; no pip, venv or compiler');
+    assert.equal(calls[0].bin, paths.join(source, windows ? 'runtime/ffmpeg.exe' : 'runtime/ffmpeg'));
+    assert.equal(calls[1].bin, paths.join(source, windows ? 'runtime/python/python.exe' : 'runtime/python/bin/python3'));
+    assert.ok(calls[1].args.includes('-E') && calls[1].args.includes('-s'));
+    assert.ok(calls.every(c => c.options.windowsHide && c.options.env.BIU_FFMPEG === calls[0].bin));
+    assert.equal(calls[1].options.env.PATH, '');
+    complete = false;
+    await assert.rejects(module.exports.createVideoRuntime({ source }).ensure(), /缺少内置同步组件/);
   }
 });

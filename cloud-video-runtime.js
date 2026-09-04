@@ -2,13 +2,15 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 
-function createVideoRuntime({ source, directory }) {
+function createVideoRuntime({ source, runtime = path.join(source, 'runtime') }) {
   const windows = process.platform === 'win32';
-  const env = { ...process.env, PYTHONUTF8: '1', ...(!windows && { PATH: `${process.env.PATH || ''}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin` }) };
-  const python = path.join(directory, windows ? 'venv/Scripts/python.exe' : 'venv/bin/python');
-  const hostPython = windows ? 'python' : ['/opt/homebrew/bin/python3','/usr/local/bin/python3'].find(p=>fs.existsSync(p)) || 'python3';
-  const native = windows ? path.join(source, 'wirehair.dll')
-    : path.join(directory, process.platform === 'darwin' ? 'libwirehair.dylib' : 'libwirehair.so');
+  const python = path.join(runtime, windows ? 'python/python.exe' : 'python/bin/python3');
+  const ffmpeg = path.join(runtime, windows ? 'ffmpeg.exe' : 'ffmpeg');
+  const native = path.join(runtime, windows ? 'wirehair.dll' : 'libwirehair.dylib');
+  const certificate = path.join(runtime, windows ? 'python/Lib/site-packages/certifi/cacert.pem' : 'python/lib/python3.12/site-packages/certifi/cacert.pem');
+  const env = { ...process.env, BIU_WIREHAIR: native, BIU_FFMPEG: ffmpeg, SSL_CERT_FILE: certificate };
+  // Ignore host Python settings and user-installed modules; never install at runtime.
+  const pythonArgs = ['-E', '-s', '-B', '-X', 'utf8'];
   let preparing;
   function command(bin, args, signal, input, onLine = () => {}, extraEnv = {}) {
     return new Promise((resolve, reject) => {
@@ -26,42 +28,30 @@ function createVideoRuntime({ source, directory }) {
       });
       child.stderr.on('data', chunk => { error = (error + chunk.toString()).slice(-4000); });
       child.stdin.on('error', () => {});
-      child.once('error', () => { settled = true; clearTimeout(deadline);signal?.removeEventListener('abort', cancel); reject(new Error(windows ? '无法启动同步组件，请安装 Python 3.12+ 和 FFmpeg，并加入 PATH' : '无法启动同步组件，请安装 Python 3.12+、FFmpeg 和 C++ 编译器')); });
+      child.once('error', () => { settled = true; clearTimeout(deadline);signal?.removeEventListener('abort', cancel); reject(new Error('无法启动内置同步组件，请重新安装完整版本')); });
       child.once('close', code => {
         clearTimeout(deadline);
         signal?.removeEventListener('abort', cancel);
         if (settled) return;
-        if (code !== 0) reject(new Error(signal?.aborted ? '同步已停止' : '同步组件执行失败，请检查 Python、FFmpeg 和磁盘空间'));
+        if (code !== 0) reject(new Error(signal?.aborted ? '同步已停止' : '内置同步组件执行失败，请检查磁盘空间或重新安装完整版本'));
         else resolve();
       });
       child.stdin.end(input || '');
     });
   }
-  async function ensure(signal, log) {
+  async function ensure(signal) {
     if (preparing) return preparing;
     preparing = (async () => {
-      fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-      if (windows && !fs.existsSync(native)) throw new Error('安装包缺少视频同步 DLL，请重新安装完整版本');
-      await command('ffmpeg', ['-version'], signal);
-      if (!fs.existsSync(python)) {
-        log({ type: 'setup', message: '首次启用：正在准备视频同步组件' });
-        try { await command(hostPython, ['-c', 'import sys; assert sys.version_info >= (3,12)'], signal); }
-        catch(e) { if(signal?.aborted)throw e;throw new Error('视频云同步需要 Python 3.12 或更高版本'); }
-        await command(hostPython, ['-m', 'venv', path.join(directory, 'venv')], signal);
-      }
-      if (!fs.existsSync(path.join(directory, 'ready-v1'))) {
-        await command(python, ['-m', 'pip', 'install', '--disable-pip-version-check', '-r', path.join(source, 'requirements.txt')], signal);
-        if (!windows) await command('c++', ['-std=c++11', '-O2', ...(process.platform === 'darwin' ? ['-dynamiclib'] : ['-shared', '-fPIC']), '-I', source,
-          ...['wirehair.cpp', 'WirehairCodec.cpp', 'WirehairTools.cpp', 'gf256.cpp'].map(f => path.join(source, 'wirehair', f)), '-o', native], signal);
-        fs.writeFileSync(path.join(directory, 'ready-v1'), '1');
-      }
-    })().finally(() => { preparing = null; });
+      if (![python, ffmpeg, native, certificate].every(p => fs.existsSync(p))) throw new Error('缺少内置同步组件，请安装完整版本；源码运行请先执行 npm run build:cloud');
+      await command(ffmpeg, ['-version'], signal);
+      await command(python, [...pythonArgs, '-c', 'import ctypes,os,cryptography,numpy,PIL,reedsolo,certifi; assert ctypes.CDLL(os.environ["BIU_WIREHAIR"]).wirehair_init_(2)==0'], signal);
+    })().catch(error => { preparing = null; throw error; });
     return preparing;
   }
   async function run(request, signal, onEvent) {
     await ensure(signal, onEvent);
     let result, failure;
-    try { await command(python, [path.join(source, 'worker.py')], signal, JSON.stringify(request), line => {
+    try { await command(python, [...pythonArgs, path.join(source, 'worker.py')], signal, JSON.stringify(request), line => {
       let event; try { event = JSON.parse(line); } catch { return; }
       if (event.type === 'result') result = event;
       else if (event.type === 'error') failure = event.message;
