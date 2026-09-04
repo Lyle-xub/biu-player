@@ -5,3 +5,10 @@ test/*.png
 mobile/data/
 web-dist/
 cloud-video/__pycache__/
+mobile-rn/AGENTS.md
+mobile-rn/CLAUDE.md
+.env
+.env.*
+*.p12
+*.pfx
+*.mobileprovision

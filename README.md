@@ -47,8 +47,6 @@
   </tr>
 </table>
 
-<p align="center"><sub>以上均为实际运行截图；手机端来自安装正式 APK 后的 Android 实机。</sub></p>
-
 <br>
 
 ## 不止一个播放按钮
@@ -86,8 +84,6 @@
   </tr>
 </table>
 
-<p><sub>视频云同步是可选的实验功能；首次配置与桌面所需组件见 <a href="cloud-video/README.md">使用说明</a>。歌词和可播放清晰度以来源实际提供的内容为准。</sub></p>
-
 <br>
 
 ## 开始听歌
@@ -109,7 +105,7 @@ npm run build:web
 npm start
 ```
 
-移动端使用 Expo 开发构建。详细步骤见 [开发说明](docs/DEVELOPMENT.md) 和 [移动端说明](mobile-rn/README.md)。
+移动端使用 Expo 开发构建。详细步骤见 [开发说明](docs/DEVELOPMENT.md)。
 
 </details>
 

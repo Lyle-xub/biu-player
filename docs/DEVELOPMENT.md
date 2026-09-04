@@ -14,7 +14,7 @@ npm run check
 源码尚未构建时回退到 `renderer/` 界面；`BIU_WEB_UI=0 npm start` 可显式使用旧界面。
 Electron 的主进程与桥接入口为 `main.js`、`preload.js`。
 
-macOS 打包使用 electron-builder；项目配置包含维护者的 Developer ID，其他开发者需使用自己的签名设置。
+macOS 打包使用 electron-builder，自动查找本机可用的签名证书；请在本机配置签名，不要将证书身份写入仓库。
 
 ```bash
 npm run dist -- --arm64
@@ -52,7 +52,9 @@ npx expo run:android
 - `renderer/library-sync.js`：双端音乐库的合并格式。
 - `renderer/recommendation-profile.js`、`renderer/daily-recommendation.js`：画像与每日推荐。
 - `lan-sync.js`、`mobile-rn/src/store/lanSync.js`：局域网发现、连接与同步。
-- [视频云同步](../cloud-video/README.md)：桌面依赖、首次配对、协议与边界。
-- [移动端说明](../mobile-rn/README.md)：设备配置和平台注意事项。
+
+桌面视频云同步需要 Python 3.12+ 和 FFmpeg。Windows 发布包附带 Wirehair DLL；macOS / Linux 首次使用还需要 C++ 编译器。首次启用会在应用数据目录创建独立 Python 环境。手机端使用原生模块，无需 Python 或 FFmpeg。
+
+在设置中创建视频云同步后，通过恢复密钥配对其他设备；同账号的局域网自动同步也能交换密钥。恢复密钥和登录信息只保存在设备上，不要提交到仓库。
 
 构建目录、登录数据、恢复密钥和签名文件不应提交到仓库。

@@ -44,24 +44,14 @@
       ],
       "icon": "build/icon.png",
       "hardenedRuntime": true,
-      "signIgnore": [
-        "\\.lproj/locale\\.pak$"
-      ],
+      "signIgnore": ["\\.lproj/locale\\.pak$"],
       "notarize": false
     },
     "win": {
-      "target": [
-        "nsis",
-        "zip"
-      ],
+      "target": ["nsis", "zip"],
       "icon": "build/icon.png",
       "artifactName": "Biu-Player-${version}-windows-${arch}.${ext}",
-      "extraResources": [
-        {
-          "from": "dist/windows-native/wirehair.dll",
-          "to": "cloud-video/wirehair.dll"
-        }
-      ]
+      "extraResources": [{ "from": "dist/windows-native/wirehair.dll", "to": "cloud-video/wirehair.dll" }]
     },
     "nsis": {
       "artifactName": "Biu-Player-${version}-windows-${arch}-Setup.${ext}",
@@ -76,7 +66,8 @@
         "to": "cloud-video",
         "filter": [
           "**/*",
-          "!**/__pycache__/**"
+          "!**/__pycache__/**",
+          "!**/*.md"
         ]
       }
     ]
