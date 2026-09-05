@@ -39,10 +39,10 @@ const isIOS = Platform?.OS === 'ios';
 // shadow when the glyph fill is fully transparent, so keep the lyric fill and
 // draw the soft shadow behind it. A faint fill is enough for glow-only copies.
 const glyphStyle = (color, radius = 0, shadowOnly = false) => (isIOS && radius > 0 ? {
-  color: shadowOnly ? 'rgba(255,255,255,0.06)' : color,
+  color: shadowOnly ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.16)',
   textShadowColor: color,
   textShadowOffset: { width: 0, height: 0 },
-  textShadowRadius: radius,
+  textShadowRadius: radius * 1.35,
 } : { color });
 
 /* ---------- 整数锚点与行级函数（切行才滚动，参考 react-native-spotify-lyrics） ---------- */
@@ -232,6 +232,25 @@ const SweepWord = React.memo(function SweepWord({ token, font, textStyle, state,
     [timed, time, token, xs, edge]);
   const glow = useMemo(() => timed ? time.interpolate(glowFrames(token, lineEnd)) : 0,
     [timed, time, token, lineEnd]);
+  // CALayer masks can cache their contents on iOS, which makes the moving
+  // gradient look like the simple fill. Keep that fill, then add an explicit
+  // CoreText glow that travels glyph by glyph on the native animation clock.
+  const iosGlyphGlow = useMemo(() => {
+    if (!isIOS || !active || !grapes.length) return [];
+    const step = (token.t1 - token.t0) / grapes.length;
+    return grapes.map((text, i) => {
+      const start = token.t0 + step * i;
+      const peak = start + Math.max(0.035, step * 0.42);
+      const end = Math.max(peak + 0.12, Math.min(lineEnd, token.t0 + step * (i + 1) + 0.42));
+      return {
+        text,
+        left: xs[i],
+        opacity: time.interpolate({
+          inputRange: [start, peak, end], outputRange: [0, 1, 0], extrapolate: 'clamp',
+        }),
+      };
+    });
+  }, [active, grapes, lineEnd, time, token.t0, token.t1, xs]);
 
   if (/^\s+$/.test(token.text)) return <View style={{ width: font * 0.3 * grapes.length }} />;
 
@@ -273,6 +292,14 @@ const SweepWord = React.memo(function SweepWord({ token, font, textStyle, state,
               start={{ x: 0, y: 0.5 }} end={{ x: 1, y: 0.5 }} style={{ flex: 1 }} />
           </Animated.View>
         </MaskedView>
+        {iosGlyphGlow.map((glyph, i) => (
+          <Animated.Text key={`ios-glow-${i}`} pointerEvents="none" numberOfLines={1}
+            style={[textStyle, {
+              position: 'absolute', left: glyph.left, top: 0, opacity: glyph.opacity,
+              color: '#fff', textShadowColor: 'rgba(255,255,255,0.98)',
+              textShadowOffset: { width: 0, height: 0 }, textShadowRadius: font * 0.28,
+            }]}>{glyph.text}</Animated.Text>
+        ))}
       </> : null}
     </View>
   );

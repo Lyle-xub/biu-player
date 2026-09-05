@@ -1700,10 +1700,11 @@ test('iOS lyrics use native glyph shadows for simple blur and Monet glow', async
   await act(async () => { tree = create(React.createElement(Lyrics,
     { lines, activeIndex: 0, position: 1, playing: false, width: 390, height: 500, effect: 'simple' })); });
   const styles = () => tree.root.findAllByType('Text').flatMap((node) => Array.isArray(node.props.style) ? node.props.style.flat() : [node.props.style]).filter(Boolean);
-  assert.ok(styles().some((style) => style.textShadowRadius >= 2 && style.color === 'transparent'), 'default neighbouring lines are actually softened on iOS');
+  assert.ok(styles().some((style) => style.textShadowRadius >= 2 && style.color === 'rgba(255,255,255,0.16)'), 'default neighbouring lines retain a faint fill under the CoreText blur');
   await act(async () => tree.update(React.createElement(Lyrics,
     { lines, activeIndex: 0, position: 1, playing: false, width: 390, height: 500, effect: 'monet' })));
-  assert.ok(styles().some((style) => style.textShadowRadius >= 8 && style.color === 'transparent'), 'Monet renders a visible wide glow on iOS');
+  const movingGlow = tree.root.findAllByType('AnimatedText').flatMap((node) => Array.isArray(node.props.style) ? node.props.style.flat() : [node.props.style]).filter(Boolean);
+  assert.ok(movingGlow.some((style) => style.textShadowRadius >= 8 && style.color === '#fff' && style.opacity), 'Monet renders a visible glyph-by-glyph moving glow on iOS');
   assert.ok(styles().some((style) => style.textShadowRadius >= 1), 'Monet keeps unsung and neighbouring glyph blur on iOS');
   await act(async () => tree.unmount());
 });
