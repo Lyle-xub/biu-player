@@ -4,9 +4,9 @@ const INTERLUDE_MIN_GAP = 3;
 const INTERLUDE_TEXT = '......';
 
 /* ---------- 词级时间轴合成（沿用 buildLineTokens） ---------- */
-// The app entry installs Intl.Segmenter before App loads so Hermes follows the
-// same semantic word boundaries as desktop. These fallbacks remain for tests
-// and unusual runtimes that load this module outside the app entry.
+// iOS uses the native Natural Language tokenizer above to match desktop's
+// semantic word boundaries. These fallbacks cover Android, tests and runtimes
+// where the native helper is unavailable.
 const lyricGraphemeSegmenter = typeof Intl !== 'undefined' && Intl.Segmenter
   ? new Intl.Segmenter('zh', { granularity: 'grapheme' }) : null;
 const lyricWordSegmenter = typeof Intl !== 'undefined' && Intl.Segmenter
