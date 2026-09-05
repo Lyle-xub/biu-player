@@ -10,7 +10,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.biuplayer.mobile",
-      "buildNumber": "6"
+      "buildNumber": "7"
     },
     "android": {
       "package": "com.biuplayer.mobile",

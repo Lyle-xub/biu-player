@@ -35,10 +35,11 @@ const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const EASE_SCROLL = Easing.bezier(0.22, 0.61, 0.36, 1);
 const isIOS = Platform?.OS === 'ios';
 
-// React Native's View filter blur is unreliable on iOS. Text shadows are
-// rendered by CoreText, so use a shadow-only glyph there for a true soft line.
+// React Native's View filter blur is unreliable on iOS. CoreText also skips the
+// shadow when the glyph fill is fully transparent, so keep the lyric fill and
+// draw the soft shadow behind it. A faint fill is enough for glow-only copies.
 const glyphStyle = (color, radius = 0, shadowOnly = false) => (isIOS && radius > 0 ? {
-  color: shadowOnly ? 'transparent' : color,
+  color: shadowOnly ? 'rgba(255,255,255,0.06)' : color,
   textShadowColor: color,
   textShadowOffset: { width: 0, height: 0 },
   textShadowRadius: radius,
@@ -190,7 +191,7 @@ function SimpleLine({ line, state, time, textStyle, blur, lineFilter }) {
   }, [rows, time, line.from, line.to]);
   const color = state === 'passed' ? '#fff' : TOKEN_BASE;
   return <View style={lineFilter}>
-    <Text style={[textStyle, glyphStyle(color, blur, true)]}
+    <Text style={[textStyle, glyphStyle(color, blur)]}
       onTextLayout={(e) => {
         const next = e.nativeEvent.lines.filter((row) => row.width > 0).map(({ x, y, width, height }) => ({ x, y, width, height }));
         setRows((prev) => JSON.stringify(prev) === JSON.stringify(next) ? prev : next);
@@ -238,7 +239,7 @@ const SweepWord = React.memo(function SweepWord({ token, font, textStyle, state,
     <View style={styles.wordBlock}>
       <View style={!isIOS && active ? { filter: [{ blur: UNSUNG_BLUR }] } : undefined}>
         <Text onLayout={(e) => setWidth(e.nativeEvent.layout.width)}
-          style={[textStyle, glyphStyle(baseColor, baseBlur, !active && blur > 0)]}>{token.text}</Text>
+          style={[textStyle, glyphStyle(baseColor, baseBlur)]}>{token.text}</Text>
       </View>
       {timed && measureGlyphs ? <View pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants"
           style={[StyleSheet.absoluteFill, { opacity: 0 }]}>
