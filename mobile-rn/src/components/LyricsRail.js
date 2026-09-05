@@ -20,8 +20,9 @@ const UNSUNG_BLUR = 1.2;        // 活跃行未唱词微糊（px）
 const TOKEN_BASE = 'rgba(255,255,255,0.45)'; // 活跃行未唱词基色
 const INACTIVE_COLOR = 'rgba(255,255,255,0.72)'; // 非活跃行灰白（再乘 tone.opacity 压暗）
 
-/* folia-major MonetWordSweep 光晕常量（glowShadow 公式；渲染改为词级模糊副本层） */
-const GLOW_BLUR_SCALE = 0.3;          // 柔光层模糊半径 ≈ 字号 × 0.3（folia 双层 0.28/0.65 的折中）
+/* folia-major MonetWordSweep 光晕常量（glowShadow 的紧光与宽光双层） */
+const GLOW_RADIUS_ONE = 0.28;
+const GLOW_RADIUS_TWO = 0.65;
 
 /* folia 光带前沿：edgeSoftness = clamp(font×0.45, 6, 16)px 柔边（resolveMonetSweepEdgeSoftness） */
 const sweepEdge = (font) => clamp(font * 0.45, 6, 16);
@@ -44,6 +45,13 @@ const glyphStyle = (color, radius = 0, shadowOnly = false) => (isIOS && radius >
   textShadowOffset: { width: 0, height: 0 },
   textShadowRadius: radius * 1.35,
 } : { color });
+
+const iosGlowStyle = (radius, alpha) => ({
+  color: 'rgba(255,255,255,0.025)',
+  textShadowColor: `rgba(255,255,255,${alpha})`,
+  textShadowOffset: { width: 0, height: 0 },
+  textShadowRadius: radius,
+});
 
 /* ---------- 整数锚点与行级函数（切行才滚动，参考 react-native-spotify-lyrics） ---------- */
 // d = |i − anchor|（anchor = activeIndex 整数）的函数
@@ -219,6 +227,7 @@ const SweepWord = React.memo(function SweepWord({ token, font, textStyle, state,
   const baseColor = state === 'passed' ? '#fff' : TOKEN_BASE;
   const baseBlur = isIOS ? Math.max(blur, active ? UNSUNG_BLUR : 0) : 0;
   const padding = font * 0.5;
+  const glowPadding = font * 0.72;
   const full = width || grapes.reduce((sum, ch) => sum + estimateCharWidth(ch, font), 0);
 
   const xs = useMemo(() => {
@@ -232,25 +241,6 @@ const SweepWord = React.memo(function SweepWord({ token, font, textStyle, state,
     [timed, time, token, xs, edge]);
   const glow = useMemo(() => timed ? time.interpolate(glowFrames(token, lineEnd)) : 0,
     [timed, time, token, lineEnd]);
-  // CALayer masks can cache their contents on iOS, which makes the moving
-  // gradient look like the simple fill. Keep that fill, then add an explicit
-  // CoreText glow that travels glyph by glyph on the native animation clock.
-  const iosGlyphGlow = useMemo(() => {
-    if (!isIOS || !active || !grapes.length) return [];
-    const step = (token.t1 - token.t0) / grapes.length;
-    return grapes.map((text, i) => {
-      const start = token.t0 + step * i;
-      const peak = start + Math.max(0.035, step * 0.42);
-      const end = Math.max(peak + 0.12, Math.min(lineEnd, token.t0 + step * (i + 1) + 0.42));
-      return {
-        text,
-        left: xs[i],
-        opacity: time.interpolate({
-          inputRange: [start, peak, end], outputRange: [0, 1, 0], extrapolate: 'clamp',
-        }),
-      };
-    });
-  }, [active, grapes, lineEnd, time, token.t0, token.t1, xs]);
 
   if (/^\s+$/.test(token.text)) return <View style={{ width: font * 0.3 * grapes.length }} />;
 
@@ -275,11 +265,20 @@ const SweepWord = React.memo(function SweepWord({ token, font, textStyle, state,
           ))}
         </View> : null}
       {active ? <>
-        <Animated.View pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants"
+        {isIOS ? <Animated.View pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants"
+          style={{ position: 'absolute', top: -glowPadding, bottom: -glowPadding,
+            left: -glowPadding, right: -glowPadding, opacity: glow }}>
+          {/* Both shadows use the complete shaped word. Per-glyph Text nodes clip
+              CoreText shadows into visible rectangular tiles on iOS. */}
+          <Text style={[textStyle, iosGlowStyle(font * GLOW_RADIUS_TWO, 0.42),
+            { padding: glowPadding }]}>{token.text}</Text>
+          <Text style={[textStyle, iosGlowStyle(font * GLOW_RADIUS_ONE, 0.88),
+            { position: 'absolute', left: 0, top: 0, right: 0, padding: glowPadding }]}>{token.text}</Text>
+        </Animated.View> : <Animated.View pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants"
           style={{ position: 'absolute', top: -padding, bottom: -padding, left: -padding, right: -padding,
-            padding, opacity: glow, ...(!isIOS ? { filter: [{ blur: font * GLOW_BLUR_SCALE }] } : {}) }}>
-          <Text style={[textStyle, isIOS ? glyphStyle('rgba(255,255,255,0.95)', font * GLOW_BLUR_SCALE, true) : { color: '#fff' }]}>{token.text}</Text>
-        </Animated.View>
+            padding, opacity: glow, filter: [{ blur: font * GLOW_RADIUS_ONE }] }}>
+          <Text style={[textStyle, { color: '#fff' }]}>{token.text}</Text>
+        </Animated.View>}
         <MaskedView pointerEvents="none" androidRenderingMode="hardware"
           accessibilityElementsHidden importantForAccessibility="no-hide-descendants"
           style={{ position: 'absolute', left: 0, right: 0, top: -padding, bottom: -padding }}
@@ -292,14 +291,6 @@ const SweepWord = React.memo(function SweepWord({ token, font, textStyle, state,
               start={{ x: 0, y: 0.5 }} end={{ x: 1, y: 0.5 }} style={{ flex: 1 }} />
           </Animated.View>
         </MaskedView>
-        {iosGlyphGlow.map((glyph, i) => (
-          <Animated.Text key={`ios-glow-${i}`} pointerEvents="none" numberOfLines={1}
-            style={[textStyle, {
-              position: 'absolute', left: glyph.left, top: 0, opacity: glyph.opacity,
-              color: '#fff', textShadowColor: 'rgba(255,255,255,0.98)',
-              textShadowOffset: { width: 0, height: 0 }, textShadowRadius: font * 0.28,
-            }]}>{glyph.text}</Animated.Text>
-        ))}
       </> : null}
     </View>
   );

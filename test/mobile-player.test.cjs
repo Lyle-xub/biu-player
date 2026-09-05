@@ -1693,7 +1693,7 @@ test('default lyrics fill left to right across wrapped rows with native timing, 
   await act(async () => tree.unmount());
 });
 
-test('iOS lyrics use native glyph shadows for simple blur and Monet glow', async () => {
+test('iOS lyrics use native glyph shadows without clipping Monet glow into glyph tiles', async () => {
   const Lyrics = loader({ ...lyricMocks, 'react-native': { ...rn, Platform: { OS: 'ios' } } })('src/components/LyricsRail.js').default;
   const lines = [{ from: 0, to: 4, text: '正在播放' }, { from: 4, to: 8, text: '下一句歌词' }];
   let tree;
@@ -1703,8 +1703,9 @@ test('iOS lyrics use native glyph shadows for simple blur and Monet glow', async
   assert.ok(styles().some((style) => style.textShadowRadius >= 2 && style.color === 'rgba(255,255,255,0.16)'), 'default neighbouring lines retain a faint fill under the CoreText blur');
   await act(async () => tree.update(React.createElement(Lyrics,
     { lines, activeIndex: 0, position: 1, playing: false, width: 390, height: 500, effect: 'monet' })));
-  const movingGlow = tree.root.findAllByType('AnimatedText').flatMap((node) => Array.isArray(node.props.style) ? node.props.style.flat() : [node.props.style]).filter(Boolean);
-  assert.ok(movingGlow.some((style) => style.textShadowRadius >= 8 && style.color === '#fff' && style.opacity), 'Monet renders a visible glyph-by-glyph moving glow on iOS');
+  assert.equal(tree.root.findAllByType('AnimatedText').length, 0, 'Monet never rasterizes each glyph into a clipped shadow tile');
+  const monetShadows = styles().filter((style) => style.color === 'rgba(255,255,255,0.025)' && style.textShadowRadius >= 8);
+  assert.ok(monetShadows.length >= 2, 'Monet renders tight and wide whole-word CoreText glow layers on iOS');
   assert.ok(styles().some((style) => style.textShadowRadius >= 1), 'Monet keeps unsung and neighbouring glyph blur on iOS');
   await act(async () => tree.unmount());
 });
