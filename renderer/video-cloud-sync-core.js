@@ -38,7 +38,7 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
   function status() {
     return {scope,signedIn:!!scope,enabled:!!config?.enabled,intervalHours:config?.intervalHours || 3,busy:!!running,
       lastSync:config?.lastSync || 0,nextRun:config?.nextRun || 0,hasKey:!!config?.secret,
-      bvid:config?.pending?.archive.bvid || config?.activeBvid || '',pending:!!config?.pending,
+      bvid:config?.pending?.archive.bvid || config?.activeBvid || config?.archive?.bvid || '',pending:!!config?.pending,
       preview,decoded,error,progress,logs:logs.slice(-140)};
   }
   const publish = () => onStatus(status());
@@ -247,7 +247,8 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
       if(config.secret && key().toString('hex')!==value.key)return {conflict:true,recovery:null};
       if(!config.secret) {
         const before=config;
-        config={...config,secret:protect(value.key),channel,imported:true,nextRun:now()};
+        config={...config,secret:protect(value.key),channel,imported:true,nextRun:now(),
+          activeBvid:/^BV\w+$/.test(value.bvid || '')?value.bvid:(config.activeBvid || '')};
         try{save();}catch(e){config=before;throw e;}
         error='';emit({type:'key',message:'已从同账号局域网设备同步云同步密钥'});schedule();
       }
@@ -259,7 +260,8 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
     await ensureAccount(scope);stop();if(running)await running.catch(()=>{});
     const channel=crypto.createHash('sha256').update(Buffer.from(value.key,'hex')).digest('hex').slice(0,16);
     if(channel!==value.channel)throw new Error('恢复文件校验失败');
-    config={enabled:false,intervalHours:config?.intervalHours || 3,device:crypto.randomUUID(),heads:{},slots:{},sequence:0,lastSync:0,nextRun:now(),secret:protect(value.key),channel,imported:true};
+    config={enabled:false,intervalHours:config?.intervalHours || 3,device:crypto.randomUUID(),heads:{},slots:{},sequence:0,lastSync:0,nextRun:now(),secret:protect(value.key),channel,imported:true,
+      activeBvid:/^BV\w+$/.test(value.bvid || '')?value.bvid:''};
     save();decoded='';preview='';error='';publish();return status();
   }
   return {status,setAccount,configure,run,stop,resume,loadPreview,exportRecovery,importRecovery,lanKeyStatus,exchangeLanRecovery};

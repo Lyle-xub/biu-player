@@ -27,7 +27,7 @@ test('default off; intervals persist; import shares one BV, next writes edit and
   const b=backend(),a=device(t,b);await a.service.setAccount('123');assert.equal(a.service.status().enabled,false);
   await a.service.configure({enabled:true,intervalHours:24});await a.service.run();assert.equal(b.count,1);
   const c=device(t,b,lib([2]));await c.service.setAccount('123');await c.service.importRecovery(a.service.exportRecovery());
-  assert.equal(c.service.status().enabled,false);await c.service.configure({enabled:true});await c.service.run();
+  assert.equal(c.service.status().enabled,false);assert.equal(c.service.status().bvid,'BVshared');await c.service.configure({enabled:true});await c.service.run();
   assert.equal(b.count,1);assert.equal(b.edits,1);assert.equal(b.archive.meta.parts.length,2);
   assert.deepEqual(c.library.likes.map(x=>x.bvid),['BV2','BV1']);
   a.library=lib([1,3]);await a.service.run();assert.equal(b.count,1);assert.equal(b.edits,2);assert.equal(b.archive.meta.parts.length,2);

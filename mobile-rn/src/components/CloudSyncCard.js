@@ -43,7 +43,7 @@ export default function CloudSyncCard() {
     <View style={styles.actions}><Action label="立即同步" onPress={()=>sync.run(false)} disabled={disabled||!sync.enabled||sync.busy}/><Action label="读取云端" onPress={()=>sync.run(true)} disabled={disabled||!sync.hasKey||sync.busy}/></View>
     {!!sync.lastSync&&<Text style={styles.desc}>最近成功 · {date(sync.lastSync)}</Text>}
     {!!sync.enabled&&!!sync.nextRun&&<Text style={styles.desc}>下次检查 · {date(sync.nextRun)}</Text>}
-    {!!preview&&<Preview url={preview}/>}
+    {!!sync.bvid&&(preview?<Preview url={preview}/>:<View style={[styles.video,styles.videoLoading]}><Text style={styles.desc}>正在加载同步视频…</Text></View>)}
     <TouchableOpacity accessibilityRole="button" accessibilityState={{expanded:details}} onPress={()=>setDetails(!details)} style={styles.detailsButton}><Text style={styles.desc}>{details?'收起同步详情':'查看同步详情'}</Text></TouchableOpacity>
     {details&&<View style={styles.log}>
       {!!sync.bvid&&<Text selectable style={styles.logText}>{sync.bvid}</Text>}
@@ -68,6 +68,7 @@ const styles=StyleSheet.create({
   actions:{flexDirection:'row',flexWrap:'wrap',gap:8,marginTop:12},button:{paddingHorizontal:14,paddingVertical:10,borderRadius:20,borderWidth:1,borderColor:colors.cardBorder},
   buttonText:{color:colors.text2,fontSize:12},disabled:{opacity:.4},
   video:{aspectRatio:16/9,borderRadius:14,overflow:'hidden',marginTop:14,backgroundColor:colors.bgSoft},
+  videoLoading:{alignItems:'center',justifyContent:'center'},
   detailsButton:{alignSelf:'flex-start',paddingVertical:4},log:{padding:12,borderRadius:12,backgroundColor:colors.bgSoft,marginTop:8},logText:{fontSize:11,lineHeight:18,color:colors.text3},
   note:{fontSize:11,lineHeight:18,color:colors.text3,marginTop:14},
 });
