@@ -37,7 +37,7 @@ function loader(mocks = {}) {
   return load;
 }
 
-const motion = loader()('src/player/lyricMotion.js');
+const motion = loader({ 'biu-lyric-monet': {} })('src/player/lyricMotion.js');
 const trackModel = loader()('src/player/track.js');
 
 test('desktop and mobile recommendations, ranking and search retain short videos', async () => {
@@ -1645,11 +1645,14 @@ test('Monet uses static hardware glyph masks and one native clock across words, 
   const clock = animationCalls.at(-1);
   assert.equal(clock.config.useNativeDriver, true);
   assert.equal(clock.config.isInteraction, false);
-  assert.equal(clock.config.toValue, 1.6);
+  assert.equal(clock.config.toValue, 3601);
+  assert.equal(clock.config.duration, 3600000, 'the native clock runs continuously instead of restarting at each sample');
   clock.value.setValue(1.28); // Native frame between React updates.
   const moving = animatedAt(front(masks[0]));
+  const timingsBeforeSample = animationCalls.length;
   await act(async () => tree.update(render(1.25, true)));
   assert.equal(animatedAt(front(masks[0])), moving, 'a late sample does not snap back from the rendered frame');
+  assert.equal(animationCalls.length, timingsBeforeSample, 'an agreeing playback sample leaves the clock untouched');
   await act(async () => tree.update(render(1.2, true, 1)));
   assert.equal(front(masks[0]).source.value, 1.2, 'even a 50ms explicit backward seek applies immediately');
   await act(async () => appStateListeners.forEach((fn) => fn('background')));

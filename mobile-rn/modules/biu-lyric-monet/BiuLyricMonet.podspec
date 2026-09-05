@@ -12,6 +12,6 @@ Pod::Spec.new do |s|
   s.static_framework = true
   s.dependency 'ExpoModulesCore'
   s.source_files = 'ios/**/*.swift'
-  s.frameworks = 'UIKit', 'CoreGraphics'
+  s.frameworks = 'UIKit', 'CoreGraphics', 'NaturalLanguage'
   s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES' }
 end

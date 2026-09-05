@@ -9,7 +9,7 @@ import {
 import MaskedView from '@react-native-masked-view/masked-view';
 import { LinearGradient } from 'expo-linear-gradient';
 import MonetGlowView from 'biu-lyric-monet';
-import { buildLineTokens, splitLyricGraphemes, sweepFrames, glowFrames, LYRIC_CLOCK_AHEAD, shouldResetLyricClock } from '../player/lyricMotion';
+import { buildLineTokens, splitLyricGraphemes, sweepFrames, glowFrames, shouldResetLyricClock } from '../player/lyricMotion';
 export { buildLineTokens, attachLyricInterludes } from '../player/lyricMotion';
 
 const FOCUS_RATIO = 0.46;       // 活跃行垂直中心在容器高 ×0.46
@@ -24,6 +24,7 @@ const INACTIVE_COLOR = 'rgba(255,255,255,0.72)'; // 非活跃行灰白（再乘 
 /* folia-major MonetWordSweep 光晕常量（glowShadow 的紧光与宽光双层） */
 const GLOW_RADIUS_ONE = 0.28;
 const GLOW_RADIUS_TWO = 0.65;
+const CLOCK_RUNWAY_SECONDS = 60 * 60;
 
 /* folia 光带前沿：edgeSoftness = clamp(font×0.45, 6, 16)px 柔边（resolveMonetSweepEdgeSoftness） */
 const sweepEdge = (font) => clamp(font * 0.45, 6, 16);
@@ -71,6 +72,8 @@ function gapBetween(a, b, f) {
 function useLyricClock(position, playing, revision) {
   const time = useRef(new Animated.Value(position)).current;
   const previous = useRef(null);
+  const animation = useRef(null);
+  const clockRunning = useRef(false);
   const [foreground, setForeground] = useState(AppState.currentState !== 'background' && AppState.currentState !== 'inactive');
   useEffect(() => {
     const listener = AppState.addEventListener('change', (state) => setForeground(state === 'active'));
@@ -79,21 +82,44 @@ function useLyricClock(position, playing, revision) {
   const running = playing && foreground;
   useLayoutEffect(() => {
     const sample = { pos: position, ts: performance.now(), playing: running, revision };
-    time.stopAnimation();
-    if (shouldResetLyricClock(previous.current, sample)) time.setValue(position);
+    const reset = shouldResetLyricClock(previous.current, sample);
     previous.current = sample;
-    if (running) {
-      Animated.timing(time, { toValue: position + LYRIC_CLOCK_AHEAD, duration: LYRIC_CLOCK_AHEAD * 1000,
-        easing: Easing.linear, useNativeDriver: true, isInteraction: false }).start();
+    if (!running) {
+      animation.current?.stop();
+      time.stopAnimation();
+      time.setValue(position);
+      clockRunning.current = false;
+      return;
     }
-    return () => time.stopAnimation();
+    // Keep one long native clock running between player samples. Recreating a
+    // 600ms timing every 250ms made the sweep hesitate even when samples agreed.
+    if (!clockRunning.current || reset) {
+      animation.current?.stop();
+      time.stopAnimation();
+      time.setValue(position);
+      animation.current = Animated.timing(time, {
+        toValue: position + CLOCK_RUNWAY_SECONDS,
+        duration: CLOCK_RUNWAY_SECONDS * 1000,
+        easing: Easing.linear,
+        useNativeDriver: true,
+        isInteraction: false,
+      });
+      clockRunning.current = true;
+      animation.current.start(({ finished } = {}) => {
+        if (finished) clockRunning.current = false;
+      });
+    }
   }, [position, running, revision, time]);
+  useEffect(() => () => {
+    animation.current?.stop();
+    time.stopAnimation();
+  }, [time]);
   return time;
 }
 
 /* ---------- 单行：target 仅在切行（或行高测出）时变化，420ms 平滑滚动一次 ---------- */
 const RailLine = React.memo(function RailLine({
-  line, target, font, state, onPress, onMeasure, time, simple, measureGlyphs, layoutReady,
+  line, target, font, state, glowTail, onPress, onMeasure, time, simple, measureGlyphs, layoutReady,
 }) {
   const anims = useRef({
     tx: new Animated.Value(target.tx),
@@ -155,7 +181,7 @@ const RailLine = React.memo(function RailLine({
         : <View style={[styles.wordRow, lineFilter]}>
           {tokens.map((token, i) => (
             <SweepWord key={`${i}:${token.text}:${font}`} token={token} font={font} textStyle={textStyle}
-              state={state} lineEnd={line.to} time={time} measureGlyphs={measureGlyphs} blur={blur} />
+              state={state} glowTail={glowTail} lineEnd={line.to} time={time} measureGlyphs={measureGlyphs} blur={blur} />
           ))}
         </View>}
       </TouchableOpacity>
@@ -164,6 +190,7 @@ const RailLine = React.memo(function RailLine({
 }, (prev, next) => (
   prev.line === next.line
   && prev.state === next.state
+  && prev.glowTail === next.glowTail
   && prev.font === next.font
   && prev.time === next.time
   && prev.simple === next.simple
@@ -211,13 +238,14 @@ function SimpleLine({ line, state, time, textStyle, blur, lineFilter }) {
 
 // Prefix measurements retain kerning/shaping, unlike separate per-character Text nodes.
 // The same whole-word Text supplies the base, mask content and glow, preventing drift.
-const SweepWord = React.memo(function SweepWord({ token, font, textStyle, state, lineEnd, time, measureGlyphs, blur }) {
+const SweepWord = React.memo(function SweepWord({ token, font, textStyle, state, glowTail, lineEnd, time, measureGlyphs, blur }) {
   const grapes = useMemo(() => splitLyricGraphemes(token.text), [token.text]);
   const [width, setWidth] = useState(0);
   const [offsets, setOffsets] = useState([]);
   const edge = sweepEdge(font);
   const timed = token.timed && Number.isFinite(token.t0) && Number.isFinite(token.t1) && token.t1 > token.t0;
   const active = state === 'active' && timed;
+  const glowing = active || (glowTail && timed);
   const baseColor = state === 'passed' ? '#fff' : TOKEN_BASE;
   const baseBlur = isIOS ? Math.max(blur, active ? UNSUNG_BLUR : 0) : 0;
   const padding = font * 0.5;
@@ -258,8 +286,7 @@ const SweepWord = React.memo(function SweepWord({ token, font, textStyle, state,
               style={[textStyle, { position: 'absolute' }]}>{grapes.slice(0, i + 1).join('')}</Text>
           ))}
         </View> : null}
-      {active ? <>
-        {isIOS ? <Animated.View pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants"
+      {glowing ? (isIOS ? <Animated.View pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants"
           style={{ position: 'absolute', top: -glowPadding, bottom: -glowPadding,
             left: -glowPadding, right: -glowPadding, opacity: glow }}>
           <MonetGlowView style={StyleSheet.absoluteFill} text={token.text} fontSize={font}
@@ -269,7 +296,8 @@ const SweepWord = React.memo(function SweepWord({ token, font, textStyle, state,
           style={{ position: 'absolute', top: -padding, bottom: -padding, left: -padding, right: -padding,
             padding, opacity: glow, filter: [{ blur: font * GLOW_RADIUS_ONE }] }}>
           <Text style={[textStyle, { color: '#fff' }]}>{token.text}</Text>
-        </Animated.View>}
+        </Animated.View>) : null}
+      {active ?
         <MaskedView pointerEvents="none" androidRenderingMode="hardware"
           accessibilityElementsHidden importantForAccessibility="no-hide-descendants"
           style={{ position: 'absolute', left: 0, right: 0, top: -padding, bottom: -padding }}
@@ -282,7 +310,7 @@ const SweepWord = React.memo(function SweepWord({ token, font, textStyle, state,
               start={{ x: 0, y: 0.5 }} end={{ x: 1, y: 0.5 }} style={{ flex: 1 }} />
           </Animated.View>
         </MaskedView>
-      </> : null}
+      : null}
     </View>
   );
 });
@@ -367,6 +395,7 @@ export default function LyricsRail({ lines, activeIndex, onSeek, height, width, 
             target={targets[i] || { tx: 0, ty: -200, scale: 0.85, opacity: 0, blur: 6 }}
             font={lyricFont}
             state={state}
+            glowTail={!simple && i === activeIndex - 1}
             time={time}
             simple={simple}
             layoutReady={layoutReady}

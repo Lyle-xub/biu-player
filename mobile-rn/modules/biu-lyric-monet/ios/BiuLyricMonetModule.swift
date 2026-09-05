@@ -1,9 +1,39 @@
 import ExpoModulesCore
+import NaturalLanguage
 import UIKit
 
 public final class BiuLyricMonetModule: Module {
   public func definition() -> ModuleDefinition {
     Name("BiuLyricMonet")
+
+    Function("segmentWords") { (text: String) -> [String] in
+      guard !text.isEmpty else { return [] }
+      var result: [String] = []
+      func append(_ value: Substring, wordLike: Bool) {
+        guard !value.isEmpty else { return }
+        result.append(String(value))
+        result.append(wordLike ? "1" : "0")
+      }
+      func appendSeparators(_ range: Range<String.Index>) {
+        text[range].indices.forEach { index in
+          let next = text.index(after: index)
+          append(text[index..<next], wordLike: false)
+        }
+      }
+
+      let tokenizer = NLTokenizer(unit: .word)
+      tokenizer.string = text
+      tokenizer.setLanguage(.simplifiedChinese)
+      var cursor = text.startIndex
+      tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
+        if cursor < range.lowerBound { appendSeparators(cursor..<range.lowerBound) }
+        append(text[range], wordLike: true)
+        cursor = range.upperBound
+        return true
+      }
+      if cursor < text.endIndex { appendSeparators(cursor..<text.endIndex) }
+      return result
+    }
 
     View(BiuLyricMonetView.self) {
       Prop("text") { (view, value: String) in view.text = value }

@@ -1,8 +1,12 @@
+import { segmentLyricWords } from 'biu-lyric-monet';
+
 const INTERLUDE_MIN_GAP = 3;
 const INTERLUDE_TEXT = '......';
 
 /* ---------- 词级时间轴合成（沿用 buildLineTokens） ---------- */
-// Hermes 可能没有 Intl.Segmenter，回退 Array.from 字素
+// The app entry installs Intl.Segmenter before App loads so Hermes follows the
+// same semantic word boundaries as desktop. These fallbacks remain for tests
+// and unusual runtimes that load this module outside the app entry.
 const lyricGraphemeSegmenter = typeof Intl !== 'undefined' && Intl.Segmenter
   ? new Intl.Segmenter('zh', { granularity: 'grapheme' }) : null;
 const lyricWordSegmenter = typeof Intl !== 'undefined' && Intl.Segmenter
@@ -37,7 +41,8 @@ export function fallbackLyricWordSegments(text) {
 }
 
 export function buildLineTokens(text, from, to) {
-  const segments = lyricWordSegmenter
+  const nativeSegments = segmentLyricWords?.(text);
+  const segments = nativeSegments?.length ? nativeSegments : lyricWordSegmenter
     ? Array.from(lyricWordSegmenter.segment(text))
     : fallbackLyricWordSegments(text);
   const timedGraphemes = segments.reduce(
@@ -150,8 +155,8 @@ export function glowFrames(token, lineEnd) {
   return { inputRange, outputRange: inputRange.map((t) => glowAt(t, token, lineEnd) * 0.88), extrapolate: 'clamp' };
 }
 
-// Bridge normal 250ms playback samples with a bounded native clock, tolerating delayed
-// samples without stopping every 300ms. A stalled source can only advance 600ms.
+// Predict where a normal 250ms playback sample should be. The UI owns a
+// continuous native clock; this bound is only used to recognize real drift.
 export const LYRIC_CLOCK_AHEAD = 0.6;
 export function lyricTimeAt(clock, now) {
   return clock.pos + (clock.playing ? clamp((now - clock.ts) / 1000, 0, LYRIC_CLOCK_AHEAD) : 0);
