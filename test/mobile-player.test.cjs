@@ -119,6 +119,8 @@ test('Monet sweep crosses glyph interiors continuously, clears the last glyph an
   const tokens = motion.buildLineTokens('Hello，世界！', 1, 5);
   assert.equal(tokens.map((t) => t.text).join(''), 'Hello，世界！');
   assert.ok(Math.abs(tokens.filter((t) => t.timed).at(-1).t1 - 5) < 1e-8);
+  assert.deepEqual(motion.fallbackLyricWordSegments('正在播放这首歌，OK').map((t) => t.segment),
+    ['正在播放', '这首歌', '，', 'OK'], 'Hermes fallback keeps glow on shaped word runs instead of isolated glyph tiles');
 });
 
 test('segment track identities distinguish two songs from one video; invalid ranges are rejected', () => {
@@ -1526,6 +1528,7 @@ function interpolationAt(config, time) {
 const animatedAt = (node) => interpolationAt(node.config, node.source.value);
 const lyricMocks = {
   'react-native': rn,
+  'biu-lyric-monet': 'MonetGlow',
   '@react-native-masked-view/masked-view': ({ maskElement, children, ...props }) =>
     React.createElement('Mask', { ...props, maskElement }, maskElement, children),
   'expo-linear-gradient': { LinearGradient: 'Gradient' },
@@ -1704,8 +1707,10 @@ test('iOS lyrics use native glyph shadows without clipping Monet glow into glyph
   await act(async () => tree.update(React.createElement(Lyrics,
     { lines, activeIndex: 0, position: 1, playing: false, width: 390, height: 500, effect: 'monet' })));
   assert.equal(tree.root.findAllByType('AnimatedText').length, 0, 'Monet never rasterizes each glyph into a clipped shadow tile');
-  const monetShadows = styles().filter((style) => style.color === 'rgba(255,255,255,0.025)' && style.textShadowRadius >= 8);
-  assert.ok(monetShadows.length >= 2, 'Monet renders tight and wide whole-word CoreText glow layers on iOS');
+  const nativeGlow = tree.root.findAllByType('MonetGlow');
+  assert.equal(nativeGlow.map((node) => node.props.text).join(''), '正在播放');
+  assert.ok(nativeGlow.every((node) => node.props.tightRadius >= 8 && node.props.wideRadius >= 19),
+    'Monet renders tight and wide whole-word glow in the native iOS layer');
   assert.ok(styles().some((style) => style.textShadowRadius >= 1), 'Monet keeps unsung and neighbouring glyph blur on iOS');
   await act(async () => tree.unmount());
 });

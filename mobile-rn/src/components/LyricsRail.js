@@ -8,6 +8,7 @@ import {
 } from 'react-native';
 import MaskedView from '@react-native-masked-view/masked-view';
 import { LinearGradient } from 'expo-linear-gradient';
+import MonetGlowView from 'biu-lyric-monet';
 import { buildLineTokens, splitLyricGraphemes, sweepFrames, glowFrames, LYRIC_CLOCK_AHEAD, shouldResetLyricClock } from '../player/lyricMotion';
 export { buildLineTokens, attachLyricInterludes } from '../player/lyricMotion';
 
@@ -45,13 +46,6 @@ const glyphStyle = (color, radius = 0, shadowOnly = false) => (isIOS && radius >
   textShadowOffset: { width: 0, height: 0 },
   textShadowRadius: radius * 1.35,
 } : { color });
-
-const iosGlowStyle = (radius, alpha) => ({
-  color: 'rgba(255,255,255,0.025)',
-  textShadowColor: `rgba(255,255,255,${alpha})`,
-  textShadowOffset: { width: 0, height: 0 },
-  textShadowRadius: radius,
-});
 
 /* ---------- 整数锚点与行级函数（切行才滚动，参考 react-native-spotify-lyrics） ---------- */
 // d = |i − anchor|（anchor = activeIndex 整数）的函数
@@ -268,12 +262,9 @@ const SweepWord = React.memo(function SweepWord({ token, font, textStyle, state,
         {isIOS ? <Animated.View pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants"
           style={{ position: 'absolute', top: -glowPadding, bottom: -glowPadding,
             left: -glowPadding, right: -glowPadding, opacity: glow }}>
-          {/* Both shadows use the complete shaped word. Per-glyph Text nodes clip
-              CoreText shadows into visible rectangular tiles on iOS. */}
-          <Text style={[textStyle, iosGlowStyle(font * GLOW_RADIUS_TWO, 0.42),
-            { padding: glowPadding }]}>{token.text}</Text>
-          <Text style={[textStyle, iosGlowStyle(font * GLOW_RADIUS_ONE, 0.88),
-            { position: 'absolute', left: 0, top: 0, right: 0, padding: glowPadding }]}>{token.text}</Text>
+          <MonetGlowView style={StyleSheet.absoluteFill} text={token.text} fontSize={font}
+            lineHeight={font * 1.18} padding={glowPadding}
+            tightRadius={font * GLOW_RADIUS_ONE} wideRadius={font * GLOW_RADIUS_TWO} />
         </Animated.View> : <Animated.View pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants"
           style={{ position: 'absolute', top: -padding, bottom: -padding, left: -padding, right: -padding,
             padding, opacity: glow, filter: [{ blur: font * GLOW_RADIUS_ONE }] }}>

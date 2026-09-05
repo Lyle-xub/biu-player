@@ -14,13 +14,32 @@ export function splitLyricGraphemes(text) {
   return Array.from(text);
 }
 
+// Hermes on iOS does not consistently expose Intl.Segmenter. Keeping every CJK
+// grapheme as its own word turns the two Folia glow shadows into visible tiles.
+// Group neighbouring glyphs into short word-like runs while retaining punctuation
+// and enough break opportunities for wrapped lyric lines.
+export function fallbackLyricWordSegments(text) {
+  const result = [];
+  let run = [];
+  const flush = () => {
+    while (run.length) result.push({ segment: run.splice(0, 4).join(''), isWordLike: true });
+  };
+  splitLyricGraphemes(text).forEach((grapheme) => {
+    if (/^\s$/u.test(grapheme) || /^\p{P}$/u.test(grapheme)) {
+      flush();
+      result.push({ segment: grapheme, isWordLike: false });
+    } else {
+      run.push(grapheme);
+    }
+  });
+  flush();
+  return result;
+}
+
 export function buildLineTokens(text, from, to) {
   const segments = lyricWordSegmenter
     ? Array.from(lyricWordSegmenter.segment(text))
-    : splitLyricGraphemes(text).map((ch) => ({
-      segment: ch,
-      isWordLike: !/^\s$/.test(ch) && !/^\p{P}$/u.test(ch),
-    }));
+    : fallbackLyricWordSegments(text);
   const timedGraphemes = segments.reduce(
     (sum, seg) => sum + (seg.isWordLike ? splitLyricGraphemes(seg.segment).length : 0), 0);
   const unit = timedGraphemes > 0 ? Math.max(0, to - from) / timedGraphemes : 0;
