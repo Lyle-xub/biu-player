@@ -215,6 +215,27 @@ test('remote covers request bounded CDN images and rotate hosts when a fetch fai
     'https://covers.example/a.jpg');
 });
 
+test('account avatars use HTTPS without changing login state or CDN signatures', async (t) => {
+  const originalFetch = global.fetch;
+  t.after(() => { global.fetch = originalFetch; });
+  const client = loader({ '@react-native-async-storage/async-storage': {
+    getItem: async () => JSON.stringify({ buvid3: 'visitor' }), setItem: async () => {},
+  } })('src/api/client.js');
+  let face;
+  global.fetch = async () => ({ status: 200, headers: { get: () => null },
+    text: async () => JSON.stringify({ code: 0, data: { isLogin: true, mid: 123, uname: '测试', face } }),
+  });
+  for (const prefix of ['http:', '', 'https:']) {
+    face = `${prefix}//i0.hdslb.com/bfs/face/avatar.jpg?signature=a%2Fb%2Bc`;
+    const account = await client.authStatus();
+    assert.equal(account.face, 'https://i0.hdslb.com/bfs/face/avatar.jpg?signature=a%2Fb%2Bc');
+    assert.equal(account.isLogin, true);
+    assert.equal(account.mid, 123);
+  }
+  face = '';
+  assert.deepEqual(await client.authStatus(), { isLogin: true, mid: 123, uname: '测试', face: '', vipType: 0 });
+});
+
 test('online playback tries to match the selected quality before falling back', async () => {
   const normalize = loader()('src/player/playbackQuality.js').normalizePlaybackQuality;
   assert.equal(normalize('0'), 32);
@@ -1246,6 +1267,53 @@ test('player publishes system media metadata, seeks within segments and advances
   await act(async () => tree.unmount());
 });
 
+test('reordered segments ignore old native progress and end events until their seek lands', async (t) => {
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  const listeners = {};
+  let replacements = 0;
+  const player = { playing: false, status: 'readyToPlay', currentTime: 0, duration: 180,
+    play() { this.playing = true; }, pause() { this.playing = false; },
+    async replaceAsync() { replacements++; this.currentTime = 0; } };
+  const load = loader({
+    'expo-audio': { setAudioModeAsync: async () => {} },
+    'expo-video': { useVideoPlayer: () => player },
+    expo: {
+      useEvent: (_, name) => name === 'playingChange' ? { isPlaying: player.playing } : { status: player.status },
+      useEventListener: (_, name, fn) => { listeners[name] = fn; },
+    },
+    '@react-native-async-storage/async-storage': storage,
+    'src/api/bili': { videoUrl: async () => 'https://cdn/mix.mp4' },
+    'src/api/client': { streamHeaders: () => ({}) },
+  });
+  const { PlayerProvider, usePlayer } = load('src/player/PlayerContext.js');
+  let context, tree;
+  function Probe() { context = usePlayer(); return null; }
+  await act(async () => { tree = create(React.createElement(PlayerProvider, null, React.createElement(Probe))); });
+  const tracks = trackModel.segmentTracks({ bvid: 'BVmix', cid: 10, title: 'Mix' }, [
+    { from: 0, to: 30, name: 'First' }, { from: 60, to: 90, name: 'Middle' }, { from: 120, to: 150, name: 'Last' },
+  ]);
+  try {
+    await act(async () => context.playQueue(tracks, 2));
+    await act(async () => listeners.timeUpdate({ currentTime: 120.25 }));
+    const synced = [tracks[2], tracks[0], tracks[1]].map((track) => ({ ...track }));
+    await act(async () => context.playQueue(synced, 1));
+    assert.equal(replacements, 1, 'segments reuse the same native video');
+    assert.equal(context.current.title, 'First');
+    assert.equal(player.currentTime, 0);
+    now += 3000; // A slow native seek outlasts the ordinary scrubber's hold.
+    await act(async () => listeners.timeUpdate({ currentTime: 125.25 }));
+    assert.equal(context.current.title, 'First', 'an old tick must not skip the clicked segment');
+    await act(async () => listeners.playToEnd());
+    assert.equal(context.current.title, 'First', 'an old end event must not skip the pending seek');
+    await act(async () => listeners.timeUpdate({ currentTime: 0.25 }));
+    assert.equal(context.position, 0.25);
+    await act(async () => listeners.timeUpdate({ currentTime: 30 }));
+    assert.equal(context.current.title, 'Middle', 'real completion follows the newly synced playlist order');
+    assert.equal(player.currentTime, 60);
+  } finally { await act(async () => tree.unmount()); }
+});
+
 test('background automatic transitions keep the media service active through loading, repeat and segments', async () => {
   const listeners = {}, urls = [];
   const nextUrl = deferred();
@@ -1310,6 +1378,7 @@ test('background automatic transitions keep the media service active through loa
   )));
   const pausesBeforeSegment = pauses;
   background = true;
+  await act(async () => listeners.timeUpdate({ currentTime: 20.25 }));
   await act(async () => { listeners.timeUpdate({ currentTime: 40 }); listeners.playToEnd(); });
   assert.equal(context.index, 1);
   assert.equal(player.currentTime, 40);
@@ -1376,6 +1445,7 @@ test('mini player ring, queue controls and persisted playback modes share actual
   const ring = () => tree.root.findAllByType('Circle').find((n) => n.props.strokeDashoffset !== undefined);
   const circumference = ring().props.strokeDasharray[0];
   assert.equal(ring().props.opacity, 0, 'an unplayed track has no stray progress dot');
+  await act(async () => listeners.timeUpdate({ currentTime: 20.25 }));
   await act(async () => listeners.timeUpdate({ currentTime: 25 }));
   assert.equal(ring().props.strokeDashoffset, circumference * 0.75, 'ring uses segment-relative progress');
   assert.equal(ring().props.rotation, -90, 'progress starts at twelve o’clock');
@@ -1399,6 +1469,7 @@ test('mini player ring, queue controls and persisted playback modes share actual
   player.play();
   for (let i = 0; i < 2; i++) {
     const before = urls.length;
+    await act(async () => listeners.timeUpdate({ currentTime: 20.25 }));
     await act(async () => { listeners.timeUpdate({ currentTime: 40 }); listeners.playToEnd(); });
     assert.equal(urls.length, before, 'segment repeat seeks without reloading or blanking the video');
     assert.equal(context.index, 0); assert.equal(player.currentTime, 20); assert.equal(context.position, 0);
@@ -1413,6 +1484,7 @@ test('mini player ring, queue controls and persisted playback modes share actual
   assert.equal(context.index, 2, 'shuffle picks another entry instead of always following list order');
   await act(async () => { await context.prev(); });
   assert.equal(context.index, 0, 'shuffle previous returns to the actual last song');
+  await act(async () => listeners.timeUpdate({ currentTime: 20.25 }));
   await act(async () => { listeners.timeUpdate({ currentTime: 40 }); listeners.playToEnd(); });
   assert.equal(context.index, 2, 'automatic next also follows shuffle mode');
   await click(tree, '播放模式：随机播放');
@@ -1618,6 +1690,21 @@ test('default lyrics fill left to right across wrapped rows with native timing, 
   assert.deepEqual(fills(), [-90]);
   await act(async () => tree.update(render(5, 1, 'monet'))); assert.ok(tree.root.findAllByType('Mask').length);
   await act(async () => tree.update(render(5, 1, 'simple'))); assert.equal(tree.root.findAllByType('Mask').length, 0);
+  await act(async () => tree.unmount());
+});
+
+test('iOS lyrics use native glyph shadows for simple blur and Monet glow', async () => {
+  const Lyrics = loader({ ...lyricMocks, 'react-native': { ...rn, Platform: { OS: 'ios' } } })('src/components/LyricsRail.js').default;
+  const lines = [{ from: 0, to: 4, text: '正在播放' }, { from: 4, to: 8, text: '下一句歌词' }];
+  let tree;
+  await act(async () => { tree = create(React.createElement(Lyrics,
+    { lines, activeIndex: 0, position: 1, playing: false, width: 390, height: 500, effect: 'simple' })); });
+  const styles = () => tree.root.findAllByType('Text').flatMap((node) => Array.isArray(node.props.style) ? node.props.style.flat() : [node.props.style]).filter(Boolean);
+  assert.ok(styles().some((style) => style.textShadowRadius >= 2 && style.color === 'transparent'), 'default neighbouring lines are actually softened on iOS');
+  await act(async () => tree.update(React.createElement(Lyrics,
+    { lines, activeIndex: 0, position: 1, playing: false, width: 390, height: 500, effect: 'monet' })));
+  assert.ok(styles().some((style) => style.textShadowRadius >= 8 && style.color === 'transparent'), 'Monet renders a visible wide glow on iOS');
+  assert.ok(styles().some((style) => style.textShadowRadius >= 1), 'Monet keeps unsung and neighbouring glyph blur on iOS');
   await act(async () => tree.unmount());
 });
 

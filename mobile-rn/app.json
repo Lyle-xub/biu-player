@@ -9,7 +9,8 @@
     "backgroundColor": "#0b0d09",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.biuplayer.mobile"
+      "bundleIdentifier": "com.biuplayer.mobile",
+      "buildNumber": "5"
     },
     "android": {
       "package": "com.biuplayer.mobile",
@@ -54,6 +55,7 @@
       "expo-image",
       "expo-sharing",
       "./plugins/withLanSync",
+      "./plugins/withSceneLifecycle",
       "expo-asset",
       [
         "expo-dev-client",

@@ -4,7 +4,7 @@
  */
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
-  Animated, AppState, Easing, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View,
+  Animated, AppState, Easing, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View,
 } from 'react-native';
 import MaskedView from '@react-native-masked-view/masked-view';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -33,6 +33,16 @@ const estimateCharWidth = (ch, font) => {
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const EASE_SCROLL = Easing.bezier(0.22, 0.61, 0.36, 1);
+const isIOS = Platform?.OS === 'ios';
+
+// React Native's View filter blur is unreliable on iOS. Text shadows are
+// rendered by CoreText, so use a shadow-only glyph there for a true soft line.
+const glyphStyle = (color, radius = 0, shadowOnly = false) => (isIOS && radius > 0 ? {
+  color: shadowOnly ? 'transparent' : color,
+  textShadowColor: color,
+  textShadowOffset: { width: 0, height: 0 },
+  textShadowRadius: radius,
+} : { color });
 
 /* ---------- 整数锚点与行级函数（切行才滚动，参考 react-native-spotify-lyrics） ---------- */
 // d = |i − anchor|（anchor = activeIndex 整数）的函数
@@ -119,8 +129,8 @@ const RailLine = React.memo(function RailLine({
     line.interlude && { letterSpacing: font * 0.32 },
   ];
 
-  // 行级模糊：filter 是 View style prop（Text 不支持），包一层 View；切行时随滚动一起过渡
-  const lineBlur = target.blur >= 0.15 ? { filter: [{ blur: Math.round(target.blur * 10) / 10 }] } : null;
+  const blur = target.blur >= 0.15 ? Math.round(target.blur * 10) / 10 : 0;
+  const lineFilter = !isIOS && blur ? { filter: [{ blur }] } : null;
 
   return (
     <Animated.View
@@ -138,11 +148,11 @@ const RailLine = React.memo(function RailLine({
       ]}
     >
       <TouchableOpacity activeOpacity={1} onPress={onPress} disabled={!!line.interlude}>
-        {simple ? <SimpleLine line={line} state={state} time={time} textStyle={textStyle} blur={lineBlur} />
-        : <View style={[styles.wordRow, lineBlur]}>
+        {simple ? <SimpleLine line={line} state={state} time={time} textStyle={textStyle} blur={blur} lineFilter={lineFilter} />
+        : <View style={[styles.wordRow, lineFilter]}>
           {tokens.map((token, i) => (
             <SweepWord key={`${i}:${token.text}:${font}`} token={token} font={font} textStyle={textStyle}
-              state={state} lineEnd={line.to} time={time} measureGlyphs={measureGlyphs} />
+              state={state} lineEnd={line.to} time={time} measureGlyphs={measureGlyphs} blur={blur} />
           ))}
         </View>}
       </TouchableOpacity>
@@ -165,7 +175,7 @@ const RailLine = React.memo(function RailLine({
 
 // Native text layout supplies visual rows, so a wrapped lyric finishes the first
 // row before filling the next. Only the active lyric has a single static mask.
-function SimpleLine({ line, state, time, textStyle, blur }) {
+function SimpleLine({ line, state, time, textStyle, blur, lineFilter }) {
   const [rows, setRows] = useState([]);
   const fills = useMemo(() => {
     const total = rows.reduce((sum, row) => sum + row.width, 0);
@@ -178,8 +188,9 @@ function SimpleLine({ line, state, time, textStyle, blur }) {
       return { ...row, fill: time.interpolate({ inputRange: [from, to], outputRange: [-row.width, 0], extrapolate: 'clamp' }) };
     });
   }, [rows, time, line.from, line.to]);
-  return <View style={blur}>
-    <Text style={[textStyle, { color: state === 'passed' ? '#fff' : TOKEN_BASE }]}
+  const color = state === 'passed' ? '#fff' : TOKEN_BASE;
+  return <View style={lineFilter}>
+    <Text style={[textStyle, glyphStyle(color, blur, true)]}
       onTextLayout={(e) => {
         const next = e.nativeEvent.lines.filter((row) => row.width > 0).map(({ x, y, width, height }) => ({ x, y, width, height }));
         setRows((prev) => JSON.stringify(prev) === JSON.stringify(next) ? prev : next);
@@ -197,13 +208,15 @@ function SimpleLine({ line, state, time, textStyle, blur }) {
 
 // Prefix measurements retain kerning/shaping, unlike separate per-character Text nodes.
 // The same whole-word Text supplies the base, mask content and glow, preventing drift.
-const SweepWord = React.memo(function SweepWord({ token, font, textStyle, state, lineEnd, time, measureGlyphs }) {
+const SweepWord = React.memo(function SweepWord({ token, font, textStyle, state, lineEnd, time, measureGlyphs, blur }) {
   const grapes = useMemo(() => splitLyricGraphemes(token.text), [token.text]);
   const [width, setWidth] = useState(0);
   const [offsets, setOffsets] = useState([]);
   const edge = sweepEdge(font);
   const timed = token.timed && Number.isFinite(token.t0) && Number.isFinite(token.t1) && token.t1 > token.t0;
   const active = state === 'active' && timed;
+  const baseColor = state === 'passed' ? '#fff' : TOKEN_BASE;
+  const baseBlur = isIOS ? Math.max(blur, active ? UNSUNG_BLUR : 0) : 0;
   const padding = font * 0.5;
   const full = width || grapes.reduce((sum, ch) => sum + estimateCharWidth(ch, font), 0);
 
@@ -223,9 +236,9 @@ const SweepWord = React.memo(function SweepWord({ token, font, textStyle, state,
 
   return (
     <View style={styles.wordBlock}>
-      <View style={active ? { filter: [{ blur: UNSUNG_BLUR }] } : undefined}>
+      <View style={!isIOS && active ? { filter: [{ blur: UNSUNG_BLUR }] } : undefined}>
         <Text onLayout={(e) => setWidth(e.nativeEvent.layout.width)}
-          style={[textStyle, { color: state === 'passed' ? '#fff' : TOKEN_BASE }]}>{token.text}</Text>
+          style={[textStyle, glyphStyle(baseColor, baseBlur, !active && blur > 0)]}>{token.text}</Text>
       </View>
       {timed && measureGlyphs ? <View pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants"
           style={[StyleSheet.absoluteFill, { opacity: 0 }]}>
@@ -244,8 +257,8 @@ const SweepWord = React.memo(function SweepWord({ token, font, textStyle, state,
       {active ? <>
         <Animated.View pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants"
           style={{ position: 'absolute', top: -padding, bottom: -padding, left: -padding, right: -padding,
-            padding, opacity: glow, filter: [{ blur: font * GLOW_BLUR_SCALE }] }}>
-          <Text style={[textStyle, { color: '#fff' }]}>{token.text}</Text>
+            padding, opacity: glow, ...(!isIOS ? { filter: [{ blur: font * GLOW_BLUR_SCALE }] } : {}) }}>
+          <Text style={[textStyle, isIOS ? glyphStyle('rgba(255,255,255,0.95)', font * GLOW_BLUR_SCALE, true) : { color: '#fff' }]}>{token.text}</Text>
         </Animated.View>
         <MaskedView pointerEvents="none" androidRenderingMode="hardware"
           accessibilityElementsHidden importantForAccessibility="no-hide-descendants"

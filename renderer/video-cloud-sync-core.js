@@ -15,7 +15,7 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
     const file=fileFor(s);
     if (!fs.existsSync(file)) return {enabled:false,intervalHours:3,device:crypto.randomUUID(),heads:{},slots:{},sequence:0,lastSync:0,nextRun:0};
     try {
-      const value=JSON.parse(fs.readFileSync(file));
+      const value=JSON.parse(fs.readFileSync(file,'utf8'));
       if (!INTERVALS.includes(value.intervalHours) || !value.device || !value.heads || !value.slots) throw Error();
       return value;
     } catch { throw new Error('云同步配置损坏，请从恢复文件恢复密钥；不会自动覆盖原配置'); }
@@ -120,7 +120,7 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
       const out=path.join(directory,scope,'decoded-'+crypto.randomUUID()+'.json');
       try {
         const proof=await runtime.run({operation:'decode',url:media.url,key:key().toString('hex'),snapshotId:archive.meta.snapshotId,output:out},signal,emit);
-        const raw=JSON.parse(fs.readFileSync(out));
+        const raw=JSON.parse(fs.readFileSync(out,'utf8'));
         result=normalize(raw);
         config.lastRead={quality,snapshotId:archive.meta.snapshotId,receivedBytes:proof.receivedBytes,totalBytes:proof.totalBytes,seconds:proof.verifiedSeconds,symbols:proof.symbols,scannedFrames:proof.scannedFrames};
         decoded=JSON.stringify(result,null,2).slice(0,32000);

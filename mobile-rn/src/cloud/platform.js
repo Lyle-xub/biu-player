@@ -23,12 +23,19 @@ export const crypto = {
   createHmac: (name,key) => {if(name!=='sha256')throw Error('不支持的签名算法');return digest(hmac.create(sha256,key));},
   timingSafeEqual: (a,b) => {let diff=a.length^b.length;for(let i=0;i<a.length;i++)diff|=a[i]^(b[i] || 0);return diff===0;},
   randomUUID: () => Crypto.randomUUID(),
-  randomBytes: size => Buffer.from(Crypto.getRandomValues(new Uint8Array(size))),
+  // Keep byte arrays away from Expo's iOS JSI converter. The cloud module uses
+  // the platform secure RNG and returns hex, so the native boundary is strings only.
+  randomBytes: size => Buffer.from(native.randomHex(size),'hex'),
 };
 export const fs = {
   existsSync: uri => Paths.info(uri).exists,
   mkdirSync: uri => new Directory(uri).create({intermediates:true,idempotent:true}),
-  writeFileSync: (uri,data) => new File(uri).write(data),
+  // File.write accepts Either<String, TypedArray>; Expo SDK 57 can SIGTRAP while
+  // probing that union on iOS 27. Marshal through string-only native functions.
+  writeFileSync: (uri,data) => {
+    if(typeof data==='string')native.writeTextFile(uri,data);
+    else native.writeBase64File(uri,Buffer.from(data).toString('base64'));
+  },
   readFileSync: (uri,encoding) => encoding?new File(uri).textSync():Buffer.from(new File(uri).bytesSync()),
   renameSync: (from,to) => native.replaceFile(from,to),
   unlinkSync: uri => new File(uri).delete(),

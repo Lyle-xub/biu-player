@@ -11,6 +11,7 @@ import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import java.io.File
 import java.net.URI
+import java.security.SecureRandom
 
 class BiuVideoCloudModule : Module() {
   companion object { init { System.loadLibrary("biu_cloud") } }
@@ -30,6 +31,12 @@ class BiuVideoCloudModule : Module() {
     Function("cancel") { cancelled = true }
     Function("prepare") { cancelled = false }
     Function("replaceFile") { source: String, target: String -> android.system.Os.rename(file(source).absolutePath, file(target).absolutePath) }
+    Function("randomHex") { count: Int ->
+      require(count in 0..1024) { "随机字节长度无效" }
+      ByteArray(count).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it.toInt() and 255) }
+    }
+    Function("writeTextFile") { target: String, content: String -> file(target).writeText(content) }
+    Function("writeBase64File") { target: String, content: String -> file(target).writeBytes(Base64.decode(content, Base64.DEFAULT)) }
     AsyncFunction("encode") { input: String, output: String, sid: String -> encodeVideo(input, output, sid) }
     AsyncFunction("decode") { input: String, sid: String -> decodeVideo(input, sid) }
   }

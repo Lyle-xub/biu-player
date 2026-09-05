@@ -2,6 +2,7 @@ import ExpoModulesCore
 import AVFoundation
 import CoreVideo
 import Darwin
+import Security
 
 public class BiuVideoCloudModule: Module {
   private let lock = NSLock()
@@ -19,6 +20,23 @@ public class BiuVideoCloudModule: Module {
     Function("prepare") { self.cancel(false) }
     Function("replaceFile") { (source: String, target: String) in
       guard let from=URL(string:source),let to=URL(string:target),from.isFileURL,to.isFileURL,rename(from.path,to.path)==0 else {throw self.problem("同步配置保存失败")}
+    }
+    Function("randomHex") { (count: Int) -> String in
+      guard count >= 0 && count <= 1024 else { throw self.problem("随机字节长度无效") }
+      var bytes=[UInt8](repeating:0,count:count)
+      let status=bytes.withUnsafeMutableBytes { buffer in
+        count == 0 ? errSecSuccess : SecRandomCopyBytes(kSecRandomDefault,count,buffer.baseAddress!)
+      }
+      guard status==errSecSuccess else { throw self.problem("安全随机数生成失败") }
+      return bytes.map { String(format:"%02x",$0) }.joined()
+    }
+    Function("writeTextFile") { (target: String, content: String) in
+      guard let url=URL(string:target),url.isFileURL else { throw self.problem("同步文件地址无效") }
+      try content.write(to:url,atomically:false,encoding:.utf8)
+    }
+    Function("writeBase64File") { (target: String, content: String) in
+      guard let url=URL(string:target),url.isFileURL,let data=Data(base64Encoded:content) else { throw self.problem("同步文件数据无效") }
+      try data.write(to:url)
     }
     AsyncFunction("encode") { (input: String, output: String, sid: String) -> [String: Any] in
       try self.encode(input,output,sid)

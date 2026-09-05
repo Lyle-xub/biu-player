@@ -9,12 +9,12 @@
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  Image, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View,
+  ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors } from '../theme';
 import {
-  authStatus, imageHeaders, logout, smsCaptcha, smsLogin, smsSend,
+  authStatus, logout, smsCaptcha, smsLogin, smsSend,
 } from '../api/client';
 import * as bili from '../api/bili';
 import { usePlayer } from '../player/PlayerContext';
@@ -231,13 +231,10 @@ export default function MineScreen({ navigation }) {
         <View style={styles.accountCard}>
           {auth && auth.isLogin ? (
             <>
-              {auth.face ? (
-                <Image source={{ uri: auth.face, headers: imageHeaders() }} style={styles.avatar} />
-              ) : (
-                <View style={[styles.avatar, styles.avatarFallback]}>
+              <RemoteImage uri={auth.face} width={156} height={156} style={styles.avatar}
+                fallback={<View style={[styles.avatar, styles.avatarFallback]}>
                   <IconUser size={22} color={colors.accent} />
-                </View>
-              )}
+                </View>} />
               <View style={{ flex: 1, minWidth: 0 }}>
                 <Text style={styles.uname} numberOfLines={1}>{auth.uname || 'B 站用户'}</Text>
                 <Text style={styles.uid}>mid: {auth.mid}</Text>

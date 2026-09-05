@@ -8,6 +8,7 @@
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import md5 from 'js-md5';
+import { mediaUrl } from './mediaUrl';
 
 export const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 export const REFERER = 'https://www.bilibili.com/';
@@ -230,7 +231,7 @@ export async function authStatus() {
     const json = JSON.parse(r.body);
     const data = json && json.data;
     if (json.code !== 0 || !data || !data.isLogin) return { isLogin: false };
-    return { isLogin: true, mid: data.mid, uname: data.uname || '', face: data.face || '', vipType: data.vipType || 0 };
+    return { isLogin: true, mid: data.mid, uname: data.uname || '', face: mediaUrl(data.face) || '', vipType: data.vipType || 0 };
   } catch (e) {
     return { isLogin: false, error: String(e) };
   }

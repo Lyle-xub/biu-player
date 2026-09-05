@@ -2,6 +2,7 @@
  * endpoint 与参数与桌面端一致；返回结构与原 api 对象相同。
  */
 import * as client from './client';
+import { mediaUrl } from './mediaUrl';
 import { fetchSubtitles } from '../../../renderer/subtitles';
 
 /* ---------- 工具 ---------- */
@@ -14,11 +15,7 @@ export function parseDur(d) {
   return parts.reduce((acc, n) => acc * 60 + (n || 0), 0);
 }
 // 图片地址归一：协议相对 / http 统一补成 https
-export function absImg(u) {
-  if (!u) return null;
-  if (u.startsWith('//')) return 'https:' + u;
-  return u.replace(/^http:/, 'https:');
-}
+export const absImg = mediaUrl;
 // 排行 / 搜索条目统一为 track（mid 供跳 UP 主空间页）
 export function toTrack(v) {
   return {

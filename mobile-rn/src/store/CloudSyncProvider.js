@@ -70,7 +70,7 @@ export function CloudSyncProvider({children}) {
     run:readOnly=>act(service=>service.run(!!readOnly,!readOnly)),
     exportKey:()=>act(async service=>{
       const file=new File(Paths.cache,'Biu-云同步恢复密钥.json');
-      file.write(JSON.stringify(service.exportRecovery()));
+      platform.fs.writeFileSync(file.uri,JSON.stringify(service.exportRecovery()));
       try{await Sharing.shareAsync(file.uri,{mimeType:'application/json',UTI:'public.json',dialogTitle:'保存云同步恢复密钥'});}finally{if(file.exists)file.delete();}
     }),
     importKey:()=>act(async service=>{

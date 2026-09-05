@@ -219,8 +219,12 @@ export function PlayerProvider({ children }) {
         const offset = Number.isFinite(startAt) ? Math.max(0, Math.min(startAt,
           segment ? segment.to - segment.from : (player.duration || t.duration || Infinity))) : 0;
         const start = (segment?.from || 0) + offset;
-        if (!t.isLive) player.currentTime = start;
-        if (!t.isLive && offset > 0) pendingSeek.current = { target: start, started: Date.now() };
+        if (!t.isLive) {
+          // iOS seeks asynchronously even when two segments share the same
+          // video. Old progress/end events must not finish the new segment.
+          if (segment || offset > 0) pendingSeek.current = { target: start, started: Date.now(), isSegmentSwitch: !!segment };
+          player.currentTime = start;
+        }
         setCurrentTime(start);
         player.play();
         if (!t.isLive) {
@@ -407,7 +411,7 @@ export function PlayerProvider({ children }) {
   const endedToken = useRef(-1);
   const advanceOnce = () => {
     const s = autoNextRef.current;
-    if (!s.queue.length || s.isLive || resolvingRef.current || endedToken.current === tokenRef.current) return;
+    if (!s.queue.length || s.isLive || resolvingRef.current || pendingSeek.current?.isSegmentSwitch || endedToken.current === tokenRef.current) return;
     endedToken.current = tokenRef.current;
     nextRef.current();
   };
@@ -421,9 +425,11 @@ export function PlayerProvider({ children }) {
     const pending = pendingSeek.current;
     if (pending) {
       // Native ticks queued before a seek must not rewind the scrubber or lyrics.
-      // Bound the hold so a failed/adjusted seek can recover to the actual position.
+      // Manual scrubbing can recover to an adjusted native position after a
+      // timeout. A segment switch must land first, even on a slow connection.
       const elapsed = Date.now() - pending.started;
-      if (elapsed < 2500 && (time < pending.target - 0.5 || time > pending.target + 0.5 + elapsed / 1000)) return;
+      if ((pending.isSegmentSwitch || elapsed < 2500)
+        && (time < pending.target - 0.5 || time > pending.target + 0.5 + elapsed / 1000)) return;
       pendingSeek.current = null;
     }
     setCurrentTime(time);

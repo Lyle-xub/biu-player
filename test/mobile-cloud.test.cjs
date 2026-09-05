@@ -18,7 +18,7 @@ test('mobile envelope roundtrips and requires the intended snapshot',async()=>{
 test('mobile crypto and Buffer share signed descriptors with desktop; keys stay outside JSON state',()=>{
  const fs=require('node:fs'),path=require('node:path'),root=path.resolve(__dirname,'../mobile-rn');
  const fromMobile=name=>require(require.resolve(name,{paths:[root]}));
- const babel=fromMobile('@babel/core'),secrets=new Map();
+ const babel=fromMobile('@babel/core'),secrets=new Map(),nativeWrites=[];
  // Use Expo's real URI utilities; only the native filesystem boundary is mocked.
  function loadPathUtility(name) {
   const filename=path.join(root,'node_modules/expo-file-system/src/pathUtilities',name+'.ts');
@@ -34,8 +34,12 @@ test('mobile crypto and Buffer share signed descriptors with desktop; keys stay 
    // java.io.File(URI) rejects an authority, as FileSystem.info does on Android.
    assert.equal(new URL(uri).host,'');require('node:url').fileURLToPath(uri);return {exists:false};
   }},File:class{},Directory:class{}},
-  'expo-modules-core':{requireOptionalNativeModule:()=>({})},
-  'expo-crypto':{randomUUID:require('node:crypto').randomUUID,getRandomValues:b=>require('node:crypto').webcrypto.getRandomValues(b)},
+  'expo-modules-core':{requireOptionalNativeModule:()=>({
+   randomHex:size=>require('node:crypto').randomBytes(size).toString('hex'),
+   writeTextFile:(uri,value)=>nativeWrites.push({uri,value,type:'text'}),
+   writeBase64File:(uri,value)=>nativeWrites.push({uri,value,type:'base64'}),
+  })},
+  'expo-crypto':{randomUUID:require('node:crypto').randomUUID,getRandomValues:()=>assert.fail('iOS cloud keys must not cross the JSI bridge as TypedArray')},
   'expo-secure-store':{setItem:(k,v)=>secrets.set(k,v),getItem:k=>secrets.get(k)},
  };
  const module={exports:{}};new Function('require','module','exports',code)(name=>mocks[name]||fromMobile(name),module,module.exports);
@@ -48,6 +52,13 @@ test('mobile crypto and Buffer share signed descriptors with desktop; keys stay 
  }
  const meta={version:2,channel:'a'.repeat(16),device:'phone-test',slot:'A',snapshotId:'b'.repeat(32),sequence:1,parts:[{slot:'A',snapshotId:'b'.repeat(32),sequence:1,filename:'video-test'}]};
  const key=mobile.Buffer.from(fixture.key,'hex');
+ const generated=mobile.crypto.randomBytes(32);assert.equal(generated.length,32);assert.notEqual(generated.toString('hex'),'0'.repeat(64));
+ mobile.fs.writeFileSync('file:///tmp/state.json','{"enabled":true}');
+ mobile.fs.writeFileSync('file:///tmp/snapshot.bin',mobile.Buffer.from([0,1,255]));
+ assert.deepEqual(nativeWrites,[
+  {uri:'file:///tmp/state.json',value:'{"enabled":true}',type:'text'},
+  {uri:'file:///tmp/snapshot.bin',value:'AAH/',type:'base64'},
+ ]);
  const signed=api.descriptor(meta,key);
  assert.equal(signed,desktop.descriptor(meta,key));assert.deepEqual(api.parseDescriptor(signed,key),meta);
  const reference=mobile.protect(fixture.key);assert.notEqual(reference,fixture.key);assert.equal(mobile.unprotect(reference),fixture.key);

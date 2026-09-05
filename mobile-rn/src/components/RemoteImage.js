@@ -2,13 +2,13 @@ import React, { useEffect, useRef, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { Image } from 'expo-image';
 import { imageHeaders } from '../api/client';
+import { mediaUrl } from '../api/mediaUrl';
 
 const RETRY_DELAYS = [250, 750];
 
 export function optimizedImageUri(value, width, height, attempt = 0) {
   if (!value) return null;
-  const normalized = String(value).startsWith('//')
-    ? `https:${value}` : String(value).replace(/^http:/, 'https:');
+  const normalized = mediaUrl(value);
   try {
     const url = new URL(normalized);
     const match = url.hostname.match(/^i([0-2])\.hdslb\.com$/i);
