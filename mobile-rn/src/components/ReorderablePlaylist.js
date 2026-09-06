@@ -32,7 +32,7 @@ function Grip({ disabled, label, arm, adjust, index, count }) {
   </View>;
 }
 
-function MovingRow({ shift, hidden, animate, children }) {
+function MovingRow({ shift, hidden, animate, reordering, children }) {
   const y = useRef(new Animated.Value(0)).current;
   useLayoutEffect(() => {
     if (!animate) { y.setValue(0); return undefined; }
@@ -40,7 +40,7 @@ function MovingRow({ shift, hidden, animate, children }) {
     animation.start();
     return () => animation.stop();
   }, [shift, animate, y]);
-  return <Animated.View style={[styles.row, { opacity: hidden ? 0 : 1, transform: [{ translateY: y }] }]}>{children}</Animated.View>;
+  return <Animated.View style={[styles.row, reordering && styles.reorderRow, { opacity: hidden ? 0 : 1, transform: [{ translateY: y }] }]}>{children}</Animated.View>;
 }
 
 export default function ReorderablePlaylist({ data, enabled, disabled, renderItem, header, empty, bottomInset, onMove, onDraggingChange }) {
@@ -147,10 +147,10 @@ export default function ReorderablePlaylist({ data, enabled, disabled, renderIte
         renderItem={({ item, index }) => {
           const shift = !drag ? 0 : index > drag.from && index <= drag.to ? -PLAYLIST_ROW_HEIGHT
             : index < drag.from && index >= drag.to ? PLAYLIST_ROW_HEIGHT : 0;
-          return <MovingRow shift={shift} animate={!!drag} hidden={!!drag && index === drag.from}>{rowContent(item, index)}</MovingRow>;
+          return <MovingRow shift={shift} animate={!!drag} reordering={enabled} hidden={!!drag && index === drag.from}>{rowContent(item, index)}</MovingRow>;
         }} />
       {drag ? <Animated.View pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants"
-        style={[styles.row, styles.floating, { transform: [{ translateY: top }] }]}>
+        style={[styles.row, styles.reorderRow, styles.floating, { transform: [{ translateY: top }] }]}>
         {rowContent(drag.item, drag.from, true)}
       </Animated.View> : null}
     </View>
@@ -159,7 +159,8 @@ export default function ReorderablePlaylist({ data, enabled, disabled, renderIte
 
 const styles = StyleSheet.create({
   viewport: { flex: 1, overflow: 'hidden' },
-  row: { height: PLAYLIST_ROW_HEIGHT, flexDirection: 'row', alignItems: 'center' },
+  row: { flexDirection: 'row', alignItems: 'center' },
+  reorderRow: { height: PLAYLIST_ROW_HEIGHT },
   content: { flex: 1, minWidth: 0 },
   grip: { width: 44, height: PLAYLIST_ROW_HEIGHT, alignItems: 'center', justifyContent: 'center' },
   gripText: { color: colors.accent, fontSize: 28 },

@@ -17,12 +17,18 @@ function StatusDot() {
   return <Animated.View pointerEvents="none" accessible={false} style={[styles.statusDot, { opacity }]} />;
 }
 
-export default function RecommendationProfileCard() {
-  const { recommendationManager: manager, recommendationProfile: state, libraryReady, account } = usePlayer();
+export default function RecommendationProfileCard({ source = 'home' }) {
+  const player = usePlayer();
+  const manager = source === 'discovery'
+    ? player.discoveryRecommendationManager : player.recommendationManager;
+  const state = source === 'discovery'
+    ? player.discoveryRecommendationProfile : player.recommendationProfile;
+  const { libraryReady, account } = player;
   const scope = account?.isLogin ? String(account.mid) : '';
-  return manager && state ? <Editor key={scope} manager={manager} state={state} ready={libraryReady} /> : null;
+  return manager && state ? <Editor key={`${scope}:${source}`} manager={manager} state={state}
+    ready={libraryReady} source={source} /> : null;
 }
-function Editor({ manager, state, ready }) {
+const Editor = React.memo(function Editor({ manager, state, ready, source }) {
   const [flipped, setFlipped] = useState(false);
   const [draft, setDraft] = useState(null);
   const [error, setError] = useState('');
@@ -43,18 +49,21 @@ function Editor({ manager, state, ready }) {
     {leading}<Text style={styles.buttonText}>{label}</Text>
   </TouchableOpacity>;
   return <View style={styles.card}>
-<View style={styles.headingRow}><Text style={styles.heading}>我的推荐画像</Text><Text style={styles.archive}>PERSONAL ARCHIVE</Text></View>
+<View style={styles.headingRow}><Text style={styles.heading}>{source === 'discovery' ? '卡片流推荐画像' : '我的推荐画像'}</Text><Text style={styles.archive}>{source === 'discovery' ? 'CARD DISCOVERY' : 'PERSONAL ARCHIVE'}</Text></View>
     {button(state.enabled ? '画像推荐已开启' : '画像推荐已关闭', () => run(() => manager.edit({ type: 'enable', enabled: !state.enabled })), state.enabled, state.enabled ? <StatusDot /> : null)}
     <ProfilePortrait profile={profile} ready={ready && state.ready} flipped={flipped} onFlip={() => setFlipped((value) => !value)} />
     {!!(error || state.error) && <Text style={styles.error}>{error || state.error}</Text>}
     {flipped && <View style={styles.details}>
-    <Text style={styles.hint}>持续累积喜欢、自建歌单与有效收听。推荐信息流只进入候选库；长期兴趣与最近 14 天行为共同影响选曲。</Text>
+    <Text style={styles.hint}>{source === 'discovery'
+      ? '这套画像只用于卡片流，选择和编辑不会改变首页画像。喜欢、自建歌单与有效收听仍可帮助它生成自动画像。'
+      : '持续累积喜欢、自建歌单与有效收听。推荐信息流只进入候选库；长期兴趣与最近 14 天行为共同影响选曲。'}</Text>
     <View style={styles.wrap}>
       {[state.auto, ...state.profiles].map((p) => <React.Fragment key={p.id}>{button(p.name + (state.activeId === p.id ? ' · 使用中' : ''),
         () => run(() => manager.edit({ type: 'select', id: p.id })), state.activeId === p.id)}</React.Fragment>)}
     </View>
     <Text style={styles.hint}>{profile.id === 'auto' ? `累计分析 ${state.auto.samples} 个视频${state.auto.pending ? ` · ${state.auto.pending} 个待分析` : ''} · 喜欢 ${state.auto.sources?.likes || 0} / 歌单 ${state.auto.sources?.playlists || 0} / 信息流 ${state.auto.sources?.feed || 0}`
-      : '自定义画像 · 仅推荐标题或标签匹配的视频，不混入其他推荐；多个标签匹配任意一个，权重影响排序'}{!state.enabled ? ' · 当前未用于首页推荐' : ''}</Text>
+      : source === 'discovery' ? '自定义画像 · 仅按视频真实标签匹配，不限制分区；任一标签命中即可，权重影响排序'
+      : '自定义画像 · 仅推荐标题或标签匹配的视频，不混入其他推荐；多个标签匹配任意一个，权重影响排序'}{!state.enabled ? ` · 当前未用于${source === 'discovery' ? '卡片流' : '首页'}推荐` : ''}</Text>
     {state.busy && <ActivityIndicator color={colors.accent} />}
     <Text style={styles.heading}>画像忽略标签</Text>
     <Text style={styles.hint}>已自动过滤音乐推荐、音乐分享官、征集令等平台标签。歌单、合集、MV 等只识别为内容形式，不参与音乐兴趣。</Text>
@@ -94,7 +103,7 @@ function Editor({ manager, state, ready }) {
     </View>}
     </View>}
   </View>;
-}
+});
 const styles = StyleSheet.create({
   card: { marginHorizontal: 14, marginVertical: 8, padding: 16, gap: 12, borderRadius: 16, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.cardBorder },
   headingRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
@@ -103,7 +112,7 @@ const styles = StyleSheet.create({
   heading: { color: colors.text, fontWeight: '600', fontSize: 14 },
   hint: { color: colors.text3, fontSize: 12, lineHeight: 18 },
   wrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, alignItems: 'center' },
-  button: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12, paddingVertical: 10, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.05)' },
+  button: { minHeight: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingHorizontal: 12, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.05)' },
   statusDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accent,
     boxShadow: `0 0 8px ${colors.accent}` },
   selected: { backgroundColor: colors.accentSoft }, buttonText: { color: colors.accent, fontSize: 12 },

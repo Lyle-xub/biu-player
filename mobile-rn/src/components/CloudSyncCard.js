@@ -1,42 +1,64 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { AppState, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
+import { useIsFocused } from '@react-navigation/native';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { useCloudSync } from '../store/CloudSyncProvider';
 import { streamHeaders } from '../api/client';
 import { colors } from '../theme';
 
 function Preview({url}) {
-  const player=useVideoPlayer(null,p=>{p.loop=true;p.muted=true;p.audioMixingMode='mixWithOthers';p.showNowPlayingNotification=false;});
-  const wanted=useRef('');
+  const [error,setError]=useState('');
+  const player=useVideoPlayer(null,p=>{p.muted=true;p.audioMixingMode='mixWithOthers';p.showNowPlayingNotification=false;});
   useEffect(()=>{
-    const play=()=>{player.loop=true;player.muted=true;player.play();};
-    const sourceSub=player.addListener?.('sourceChange',({source})=>{
-      if(wanted.current&&source?.uri===wanted.current)play();
+    let active=true;
+    const subscription=player.addListener('statusChange',({status,error})=>{
+      if(active&&status==='error')setError(error?.message||'同步视频暂时无法播放');
     });
-    const statusSub=player.addListener?.('statusChange',({status})=>{
-      if(status==='readyToPlay'&&wanted.current)play();
-    });
-    return()=>{sourceSub?.remove?.();statusSub?.remove?.();};
-  },[player]);
-  useEffect(()=>{
-    wanted.current=url;
-    player.replaceAsync({uri:url,headers:streamHeaders()}).then(()=>{
-      if(wanted.current===url)player.play();
-    }).catch(()=>{});
-    return()=>{if(wanted.current===url)wanted.current='';};
+    (async()=>{
+      try {
+        await player.replaceAsync({uri:url,headers:streamHeaders()});
+        if(active)player.play();
+      } catch(e) {if(active)setError(e.message||'同步视频暂时无法播放');}
+    })();
+    // useVideoPlayer owns release. Late source loads must never play a released player.
+    return()=>{active=false;subscription.remove();};
   },[player,url]);
-  return <View pointerEvents="none" style={styles.video}><VideoView player={player} style={StyleSheet.absoluteFill} nativeControls={false} allowsPictureInPicture={false} contentFit="contain" /></View>;
+  return error?<Text style={styles.desc}>{error}</Text>:<View style={styles.video}><VideoView player={player} style={StyleSheet.absoluteFill}
+    surfaceType="textureView" keepScreenAwake={false} nativeControls allowsPictureInPicture={false} contentFit="contain" /></View>;
+}
+
+function PreviewControl({sync}) {
+  const focused=useIsFocused();
+  const [foreground,setForeground]=useState(AppState.currentState==='active');
+  const [expanded,setExpanded]=useState(false),[url,setUrl]=useState(''),[error,setError]=useState('');
+  const visible=expanded&&focused&&foreground;
+  useEffect(()=>{
+    const subscription=AppState.addEventListener('change',state=>setForeground(state==='active'));
+    return()=>subscription.remove();
+  },[]);
+  useEffect(()=>{if(!focused||!foreground)setExpanded(false);},[focused,foreground]);
+  useEffect(()=>{
+    setUrl('');setError('');
+    if(!visible)return;
+    let active=true;
+    (async()=>{
+      try {
+        const next=sync.preview||await sync.loadPreview();
+        if(active){setUrl(next||'');if(!next)setError('同步视频暂时不可用，请稍后重试');}
+      } catch(e) {if(active)setError(e.message||'同步视频加载失败，请稍后重试');}
+    })();
+    return()=>{active=false;};
+  },[visible,sync.preview,sync.loadPreview]);
+  return <>
+    <Action label={visible?'关闭视频预览':'查看同步视频'} onPress={()=>setExpanded(!visible)}/>
+    {visible&&<View style={styles.previewRow}>{url?<Preview key={url} url={url}/>:<Text style={styles.desc}>{error||'正在加载同步视频…'}</Text>}</View>}
+  </>;
 }
 function Action({label,onPress,disabled}) {
   return <TouchableOpacity accessibilityRole="button" accessibilityState={{disabled}} disabled={disabled} onPress={onPress} style={[styles.button,disabled&&styles.disabled]}><Text style={styles.buttonText}>{label}</Text></TouchableOpacity>;
 }
 export default function CloudSyncCard() {
-  const sync=useCloudSync(),[details,setDetails]=useState(false),[preview,setPreview]=useState('');
-  useEffect(()=>{
-    let active=true;setPreview(sync.preview || '');
-    if(!sync.preview&&sync.bvid)sync.loadPreview().then(url=>{if(active)setPreview(url || '');}).catch(()=>{});
-    return()=>{active=false;};
-  },[sync.scope,sync.bvid,sync.preview]);
+  const sync=useCloudSync(),[details,setDetails]=useState(false);
   const disabled=!sync.ready||sync.saving;
   const message=sync.error || (!sync.signedIn?'登录 B 站后可开启':sync.busy?'正在同步…':sync.pending?'等待云端转码与审核':sync.enabled?'自动同步已开启':'视频云同步已关闭');
   const date=t=>new Date(t).toLocaleString('zh-CN');
@@ -53,10 +75,9 @@ export default function CloudSyncCard() {
       disabled={disabled||!sync.signedIn} onPress={()=>sync.configure({intervalHours:hours})} style={[styles.option,sync.intervalHours===hours&&styles.selected]}>
       <Text style={[styles.optionText,sync.intervalHours===hours&&styles.selectedText]}>{hours===24?'每天':`${hours} 小时`}</Text>
     </TouchableOpacity>)}</View>
-    <View style={styles.actions}><Action label="立即同步" onPress={()=>sync.run(false)} disabled={disabled||!sync.enabled||sync.busy}/><Action label="读取云端" onPress={()=>sync.run(true)} disabled={disabled||!sync.hasKey||sync.busy}/></View>
+    <View style={styles.actions}><Action label="立即同步" onPress={()=>sync.run(false)} disabled={disabled||!sync.enabled||sync.busy}/><Action label="读取云端" onPress={()=>sync.run(true)} disabled={disabled||!sync.hasKey||sync.busy}/>{!!sync.bvid&&<PreviewControl key={`${sync.scope}:${sync.bvid}`} sync={sync}/>}</View>
     {!!sync.lastSync&&<Text style={styles.desc}>最近成功 · {date(sync.lastSync)}</Text>}
     {!!sync.enabled&&!!sync.nextRun&&<Text style={styles.desc}>下次检查 · {date(sync.nextRun)}</Text>}
-    {!!sync.bvid&&(preview?<Preview url={preview}/>:<View style={[styles.video,styles.videoLoading]}><Text style={styles.desc}>正在加载同步视频…</Text></View>)}
     <TouchableOpacity accessibilityRole="button" accessibilityState={{expanded:details}} onPress={()=>setDetails(!details)} style={styles.detailsButton}><Text style={styles.desc}>{details?'收起同步详情':'查看同步详情'}</Text></TouchableOpacity>
     {details&&<View style={styles.log}>
       {!!sync.bvid&&<Text selectable style={styles.logText}>{sync.bvid}</Text>}
@@ -76,12 +97,12 @@ const styles=StyleSheet.create({
   desc:{color:colors.text3,fontSize:12,lineHeight:19,marginTop:8},error:{color:colors.accent},
   divider:{height:1,backgroundColor:colors.cardBorder,marginVertical:14},
   segment:{flexDirection:'row',gap:4,padding:4,borderRadius:12,backgroundColor:'rgba(255,255,255,.05)',marginTop:10},
-  option:{flex:1,alignItems:'center',justifyContent:'center',height:34,borderRadius:9},selected:{backgroundColor:colors.accentSoft},
+  option:{flex:1,alignItems:'center',justifyContent:'center',height:48,borderRadius:9},selected:{backgroundColor:colors.accentSoft},
   optionText:{color:colors.text2,fontSize:12},selectedText:{color:colors.accent,fontWeight:'600'},
-  actions:{flexDirection:'row',flexWrap:'wrap',gap:8,marginTop:12},button:{paddingHorizontal:14,paddingVertical:10,borderRadius:20,borderWidth:1,borderColor:colors.cardBorder},
+  actions:{flexDirection:'row',flexWrap:'wrap',gap:8,marginTop:12},button:{minHeight:48,paddingHorizontal:14,alignItems:'center',justifyContent:'center',borderRadius:24,borderWidth:1,borderColor:colors.cardBorder},
+  previewRow:{width:'100%'},
   buttonText:{color:colors.text2,fontSize:12},disabled:{opacity:.4},
   video:{aspectRatio:16/9,borderRadius:14,overflow:'hidden',marginTop:14,backgroundColor:colors.bgSoft},
-  videoLoading:{alignItems:'center',justifyContent:'center'},
-  detailsButton:{alignSelf:'flex-start',paddingVertical:4},log:{padding:12,borderRadius:12,backgroundColor:colors.bgSoft,marginTop:8},logText:{fontSize:11,lineHeight:18,color:colors.text3},
+  detailsButton:{alignSelf:'flex-start',minHeight:48,justifyContent:'center'},log:{padding:12,borderRadius:12,backgroundColor:colors.bgSoft,marginTop:8},logText:{fontSize:11,lineHeight:18,color:colors.text3},
   note:{fontSize:11,lineHeight:18,color:colors.text3,marginTop:14},
 });

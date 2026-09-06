@@ -2193,26 +2193,9 @@ function covHTML(t, size = 100) {
 }
 
 /* ---------- 列表行 / 卡片渲染（沿用设计稿类名） ---------- */
-const sourceTrackRequests = new Map();
-function sourceTrack(t) {
-  if (!t.isSegment) return t;
-  const cached = store.get(`biu-video-source:${t.parentBvid || t.bvid}`, null);
-  return cached ? { ...t, parentTitle: t.parentTitle || cached.title,
-    parentUp: t.parentUp || cached.up, parentMid: t.parentMid || cached.mid } : t;
-}
-async function resolveSourceTrack(t) {
-  const known = sourceTrack(t), bvid = t.parentBvid || t.bvid;
-  if (!t.isSegment || !bvid || (known.parentTitle && known.parentUp && known.parentMid)) return known;
-  if (!sourceTrackRequests.has(bvid)) {
-    const request = api.view(bvid).then((detail) => {
-      const source = { title: detail.title, up: detail.owner?.name, mid: detail.owner?.mid };
-      if (source.title && source.up && source.mid) store.set(`biu-video-source:${bvid}`, source);
-    }).catch(() => {}).finally(() => sourceTrackRequests.delete(bvid));
-    sourceTrackRequests.set(bvid, request);
-  }
-  await sourceTrackRequests.get(bvid);
-  return sourceTrack(t);
-}
+const { sourceTrack, resolveSourceTrack } = window.BiuTrackSource.create({
+  view: bvid => api.view(bvid), get: store.get, set: store.set,
+});
 function trackNameHTML(track) {
   const t = sourceTrack(track);
   return `<span class="track-primary">${esc(t.title)}</span>${t.isSegment && t.parentTitle
@@ -2351,6 +2334,13 @@ async function playTrack(t, options = {}) {
   lastLi = -1;
   destroyHls();
   fillPlayingBase(t);
+  if (t.isSegment) resolveSourceTrack(t).then(source => {
+    if (state.current !== t) return;
+    fillPlayingAttribution(source);
+    if (source.parentTitle) $('vTitle').textContent = source.parentTitle;
+    if (source.parentUp) $('vUpName').textContent = source.parentUp;
+    requestAnimationFrame(syncPlayingHeaderLayout);
+  });
   // 立即用曲目自带时长刷新进度显示，避免新音频元数据就绪前残留上一首的时长
   const initRange = segmentRange(t);
   const initDur = initRange ? initRange.to - initRange.from : t.duration;
@@ -2645,15 +2635,20 @@ playingHeaderObserver?.observe($('npHeading'));
 window.addEventListener('resize', syncPlayingHeaderLayout, { passive: true });
 document.fonts?.ready.then(syncPlayingHeaderLayout).catch(() => {});
 
-function fillPlayingBase(t) {
+function fillPlayingAttribution(t) {
   const sourceTitle = t.isSegment && t.parentTitle && t.parentTitle !== t.title ? t.parentTitle : '';
   const sourceUp = t.isSegment && t.parentUp && t.parentUp !== t.up ? t.parentUp : '';
   $('npArtist').innerHTML = `${esc(t.up || '—')}${sourceUp ? `<span class="np-source-inline"> · ${esc(sourceUp)}</span>` : ''}`;
   const title = t.title || '—';
   const titleLength = Array.from(title).length;
-  $('npTitle').innerHTML = `${esc(title)}${sourceTitle ? `<span class="np-source-inline"> · ${esc(sourceTitle)}</span>` : ''}`;
+  $('npTitle').innerHTML = `<span class="np-title-main">${esc(title)}</span>${sourceTitle ? `<span class="np-source-inline"><span class="np-source-text">${esc(sourceTitle)}</span></span>` : ''}`;
   $('npTitle').classList.toggle('title-long', titleLength > 28);
   $('npTitle').classList.toggle('title-xlong', titleLength > 52);
+}
+
+function fillPlayingBase(track) {
+  const t = sourceTrack(track);
+  fillPlayingAttribution(t);
   $('npSrc').textContent = t.isLive
     ? '直播 · ' + (t.area || '音乐电台')
     : '来源 · ' + (t.bvid || '本地预览');
@@ -2676,8 +2671,8 @@ function fillPlayingBase(t) {
     if (t.pic) { ppCover.src = t.pic; ppCover.hidden = false; }
     else { ppCover.removeAttribute('src'); ppCover.hidden = true; }
   }
-  $('vTitle').textContent = t.title || '—';
-  $('vUpName').textContent = t.up || '—';
+  $('vTitle').textContent = (t.isSegment ? t.parentTitle : t.title) || '—';
+  $('vUpName').textContent = (t.isSegment ? t.parentUp : t.up) || '—';
   $('vUpFans').textContent = '';
   clearHotCommentRotation();
   $('hotCommentAvatar').innerHTML = '<span class="cdot"></span>';
@@ -2686,6 +2681,7 @@ function fillPlayingBase(t) {
 
 /* 播放页详情信息（view 接口数据） */
 function fillPlayingDetail(d) {
+  if (d.title) $('vTitle').textContent = d.title;
   $('npSrc').textContent = `来源 · ${d.tname || (state.current && state.current.bvid) || 'Bilibili'}`;
   $('npSrc').title = $('npSrc').textContent;
   if (d.pic && state.current && !state.current.pic) {
@@ -4940,7 +4936,7 @@ function initRadioInfiniteScroll() {
 }
 
 /* ---------- 搜索 ---------- */
-/* ---------- 搜索：仅返回 UP 主 + 相关视频，支持排序 / 时长筛选 / 翻页 ---------- */
+/* ---------- 搜索：返回 UP 主 + 全分区视频，支持排序 / 时长筛选 / 翻页 ---------- */
 let searchKw = '';
 let searchOrder = '';   // '' 综合 / click 播放 / pubdate 最新 / dm 弹幕 / stow 收藏
 let searchDuration = 0; // 0 全部 / 1 <10min / 2 10-30 / 3 30-60 / 4 60+

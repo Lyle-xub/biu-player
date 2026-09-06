@@ -87,6 +87,6 @@ const styles = StyleSheet.create({
   rule: { height: StyleSheet.hairlineWidth, backgroundColor: 'rgba(255,255,255,.22)', marginTop: 13, marginBottom: 10 },
   brand: { color: '#ff85a7', fontSize: 10, fontWeight: '700', letterSpacing: 2.1 },
   corner: { position: 'absolute', right: 18, bottom: 7, color: 'rgba(255,255,255,.24)', fontSize: 7, letterSpacing: 1.4 },
-  button: { minWidth: 150, height: 44, borderRadius: 22, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
+  button: { minWidth: 150, height: 48, borderRadius: 24, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
   buttonText: { color: '#171810', fontSize: 13, fontWeight: '700' },
 });

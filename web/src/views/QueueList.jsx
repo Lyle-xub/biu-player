@@ -1,5 +1,6 @@
 import React from 'react';
 import { useSlice } from '../store.js';
+import { TrackAttribution } from './TrackAttribution.jsx';
 import { fmt } from '../legacy/html.js';
 
 /* 队列抽屉列表：DOM 与点击事件由组件拥有，controller 的 renderQueue 只 publish('queue', ...)。
@@ -18,7 +19,7 @@ export function QueueList() {
             <span className="qcov">{t.pic
               ? <img src={t.pic} loading="lazy" decoding="async" alt="" />
               : <span style={{ display: 'contents' }} dangerouslySetInnerHTML={{ __html: window.coverSVG((t && t.seed) || 1, 100) }} />}</span>
-            <span className="qt"><b>{t.title}</b><small>{t.up}</small></span>
+            <span className="qt"><b className="track-title-line"><TrackAttribution track={t} /></b><small className="track-artist-line"><TrackAttribution track={t} artist /></small></span>
             <span className="qd num">{t.isLive ? 'LIVE' : fmt(t.duration)}</span>
           </div>
         ))}

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Platform } from 'react-native';
-import { usePlayer } from '../player/PlayerContext';
+import { usePlaybackProgress, usePlayer } from '../player/PlayerContext';
 import { trackKeyOf, segmentRange } from '../player/track';
 import { loadTrackLyrics } from '../player/loadLyrics';
 import { prepareSystemLyrics, systemLyricSlots } from '../player/systemLyrics';
@@ -13,9 +13,10 @@ const defaultCoverColor = [9 / 255, 9 / 255, 11 / 255];
 
 export default function LyricsActivitySync() {
   const {
-    current, queue, index, position, playing, buffering, lyricSettings, seekRevision,
+    current, queue, index, playing, buffering, lyricSettings, seekRevision,
     desktopLyricsEnabled, lockScreenLyricsEnabled, dynamicIslandLyricsEnabled,
   } = usePlayer();
+  const { position } = usePlaybackProgress();
   const [lyricResult, setLyricResult] = useState({ key: null, lines: [] });
   const [activityRendererReady, setActivityRendererReady] = useState(!supported);
   const [coverColor, setCoverColor] = useState(defaultCoverColor);

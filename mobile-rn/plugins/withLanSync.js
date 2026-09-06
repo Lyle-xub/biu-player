@@ -12,7 +12,7 @@ module.exports = function withLanSync(config) {
     return mod;
   });
   return withInfoPlist(config, (mod) => {
-    mod.modResults.NSLocalNetworkUsageDescription = '自动发现同一局域网内登录相同账号的 Biu Player 电脑端，同步我喜欢和歌单。';
+    mod.modResults.NSLocalNetworkUsageDescription = '自动发现同一局域网内登录相同账号的 Biu Player 设备，同步喜欢、歌单和画像；发现页画像仅在移动端之间同步。';
     mod.modResults.NSBonjourServices = [...new Set([...(mod.modResults.NSBonjourServices || []), '_biu-sync._tcp'])];
     mod.modResults.NSAppTransportSecurity = { ...mod.modResults.NSAppTransportSecurity, NSAllowsLocalNetworking: true };
     return mod;

@@ -23,7 +23,7 @@ import { trackKeyOf } from '../player/track';
 import VideoActionBar from '../components/VideoActionBar';
 import { colors } from '../theme';
 import ProgressScrubber from '../components/ProgressScrubber';
-import { usePlayer } from '../player/PlayerContext';
+import { usePlaybackProgress, usePlayer } from '../player/PlayerContext';
 import { loadTrackLyrics } from '../player/loadLyrics';
 import { canOpenTrackUp, openTrackUp } from '../player/openTrackUp';
 import { useTrackSource } from '../player/trackSource';
@@ -41,11 +41,12 @@ import {
 
 export default function PlayerScreen({ navigation, route }) {
   const {
-    current, isLive, playing, buffering, position, duration, playError,
+    current, isLive, playing, buffering, playError,
     togglePlay, next, prev, seekTo, isLiked, toggleLike,
     isInLibrary = () => false, toggleLibrary = () => {},
     player: mediaPlayer, lyricSettings, lyricEffect, seekRevision, resolveTrackUp,
   } = usePlayer();
+  const { position, duration } = usePlaybackProgress();
   const openUp = (track) => openTrackUp(navigation, track, resolveTrackUp);
   const { width: winW, height: winH } = useWindowDimensions();
   const transition = useMediaTransition(navigation);
@@ -273,16 +274,16 @@ export default function PlayerScreen({ navigation, route }) {
                           <View style={styles.identityUpRow}>
                             <Text style={styles.up} numberOfLines={1}>{current.up}</Text>
                             {sourceUp ? <TouchableOpacity disabled={!canOpenCurrentUp} onPress={() => openUp(current)} hitSlop={6} style={styles.upHit}>
-                              <Text style={[styles.sourceUp, canOpenCurrentUp && styles.sourceUpLink]} numberOfLines={1}>· {sourceUp}</Text>
+                              <Text style={styles.sourceUp} numberOfLines={1}>· {sourceUp}</Text>
                             </TouchableOpacity> : null}
                           </View>
                         </View>
-                        <TouchableOpacity style={styles.smallRoundBtn} onPress={() => toggleLike(current)} hitSlop={6}
+                        <TouchableOpacity style={styles.smallRoundBtn} onPress={() => toggleLike(current)} hitSlop={7}
                           accessibilityRole="button" accessibilityLabel={liked ? '取消我喜欢' : '加入我喜欢'}
                           accessibilityState={{ selected: liked }}>
                           <IconHeart size={18} color={liked ? colors.accent : 'rgba(255,255,255,0.85)'} filled={liked} />
                         </TouchableOpacity>
-                        <TouchableOpacity style={styles.smallRoundBtn} onPress={() => setSheet('menu')} hitSlop={6}>
+                        <TouchableOpacity style={styles.smallRoundBtn} onPress={() => setSheet('menu')} hitSlop={7}>
                           <IconMore size={17} color="rgba(255,255,255,0.85)" />
                         </TouchableOpacity>
                       </View>
@@ -308,16 +309,16 @@ export default function PlayerScreen({ navigation, route }) {
                           <View style={styles.identityUpRow}>
                             <Text style={styles.miniUp} numberOfLines={1}>{current.up}</Text>
                             {sourceUp ? <TouchableOpacity disabled={!canOpenCurrentUp} onPress={() => openUp(current)} hitSlop={6} style={styles.upHit}>
-                              <Text style={[styles.sourceUp, canOpenCurrentUp && styles.sourceUpLink]} numberOfLines={1}>· {sourceUp}</Text>
+                              <Text style={styles.sourceUp} numberOfLines={1}>· {sourceUp}</Text>
                             </TouchableOpacity> : null}
                           </View>
                         </View>
-                        <TouchableOpacity style={styles.smallRoundBtn} onPress={() => toggleLike(current)} hitSlop={6}
+                        <TouchableOpacity style={styles.smallRoundBtn} onPress={() => toggleLike(current)} hitSlop={7}
                           accessibilityRole="button" accessibilityLabel={liked ? '取消我喜欢' : '加入我喜欢'}
                           accessibilityState={{ selected: liked }}>
                           <IconHeart size={18} color={liked ? colors.accent : 'rgba(255,255,255,0.85)'} filled={liked} />
                         </TouchableOpacity>
-                        <TouchableOpacity style={styles.smallRoundBtn} onPress={() => setSheet('menu')} hitSlop={6}>
+                        <TouchableOpacity style={styles.smallRoundBtn} onPress={() => setSheet('menu')} hitSlop={7}>
                           <IconMore size={17} color="rgba(255,255,255,0.85)" />
                         </TouchableOpacity>
                       </View>
@@ -452,7 +453,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: 12, paddingTop: 4, paddingBottom: 8,
   },
-  headerButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+  headerButton: { width: 48, height: 48, alignItems: 'center', justifyContent: 'center' },
   headerCenter: { flex: 1, alignItems: 'center', minWidth: 0 },
   /* 分段开关（照抄桌面 .mode-seg + .pill） */
   seg: {
@@ -469,7 +470,7 @@ const styles = StyleSheet.create({
   },
   segBtn: {
     flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    gap: 6, paddingVertical: 9, borderRadius: 999,
+    gap: 6, minHeight: 48, borderRadius: 999,
   },
   segText: { color: 'rgba(255,255,255,0.56)', fontSize: 13, fontWeight: '600', letterSpacing: 1 },
   segTextOn: { color: '#171810' },
@@ -494,7 +495,6 @@ const styles = StyleSheet.create({
   upHit: { alignSelf: 'flex-start', maxWidth: '100%' },
   upLink: { color: colors.accent },
   sourceUp: { color: 'rgba(255,255,255,0.32)', fontSize: 10, marginTop: 3 },
-  sourceUpLink: { color: 'rgba(251,114,153,0.62)' },
   smallRoundBtn: {
     width: 34, height: 34, borderRadius: 17,
     backgroundColor: 'rgba(255,255,255,0.14)',

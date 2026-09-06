@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 import { Asset } from 'expo-asset';
 import { File, Paths } from 'expo-file-system';
@@ -57,16 +57,17 @@ export function CloudSyncProvider({children}) {
       if(AppState.currentState!=='active')runner.current.stop();else runner.current.resume();
     }).catch(e=>publish({...runner.current.status(),error:e.message}));
   },[ready,scope,player.libraryReady]);
-  const act=async action=>{
+  const act=useCallback(async action=>{
     if(!ready || saving || !runner.current)return;
     setSaving(true);
     try {await accountUpdates.current;await action(runner.current);publish(runner.current.status());}
     catch(e){publish({...runner.current.status(),error:e.message || '同步失败，请重试'});}
     finally{if(mounted.current)setSaving(false);}
-  };
-  return <Context.Provider value={{...status,ready,saving,available:!!platform.native,syncLanKey,
+  },[ready,saving]);
+  const loadPreview=useCallback(()=>runner.current?.loadPreview() || Promise.resolve(''),[]);
+  const value=useMemo(()=>({...status,ready,saving,available:!!platform.native,syncLanKey,
     configure:patch=>act(service=>service.configure(patch)),
-    loadPreview:()=>runner.current?.loadPreview() || Promise.resolve(''),
+    loadPreview,
     run:readOnly=>act(service=>service.run(!!readOnly,!readOnly)),
     exportKey:()=>act(async service=>{
       const file=new File(Paths.cache,'Biu-云同步恢复密钥.json');
@@ -79,5 +80,6 @@ export function CloudSyncProvider({children}) {
       if(result.canceled)return;const file=new File(result.assets[0].uri);
       try{if(file.size>8192)throw Error('恢复密钥文件过大');await service.importRecovery(JSON.parse(await file.text()));}finally{if(file.exists)file.delete();}
     }),
-  }}>{children}</Context.Provider>;
+  }),[status,ready,saving,syncLanKey,act,loadPreview]);
+  return <Context.Provider value={value}>{children}</Context.Provider>;
 }

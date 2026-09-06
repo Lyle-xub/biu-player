@@ -1,4 +1,4 @@
-/* Biu Player RN · 搜索：关键词输入 + 视频/UP 主分段，视频点击即播，UP 主进空间页 */
+/* Biu Player RN · 搜索：B 站全分区视频 / UP 主，视频点击即播，UP 主进空间页 */
 import React, { useCallback, useRef, useState } from 'react';
 import {
   ActivityIndicator, FlatList, Image, Keyboard, StyleSheet, Text, TextInput, TouchableOpacity, View,
@@ -92,7 +92,7 @@ export default function SearchScreen({ navigation }) {
           <IconSearch size={15} color={colors.text2} />
           <TextInput
             style={styles.input}
-            placeholder={seg === 'up' ? '搜索 UP 主…' : '搜索歌曲、视频…'}
+            placeholder={seg === 'up' ? '搜索 UP 主…' : '搜索 B 站视频…'}
             placeholderTextColor={colors.text3}
             value={keyword}
             onChangeText={setKeyword}
@@ -101,7 +101,7 @@ export default function SearchScreen({ navigation }) {
             autoCapitalize="none"
           />
           {keyword ? (
-            <TouchableOpacity onPress={() => setKeyword('')} hitSlop={8}>
+            <TouchableOpacity onPress={() => setKeyword('')} hitSlop={14}>
               <Text style={styles.clear}>×</Text>
             </TouchableOpacity>
           ) : null}
@@ -171,7 +171,7 @@ export default function SearchScreen({ navigation }) {
               <Text style={styles.hint}>
                 {searched
                   ? (seg === 'up' ? '没有找到相关 UP 主' : '没有找到相关视频，换个关键词试试')
-                  : '输入关键词，搜索 B 站音乐视频或 UP 主'}
+                  : '输入关键词，搜索 B 站视频或 UP 主'}
               </Text>
             </View>
           )}
@@ -191,7 +191,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', gap: 8,
     backgroundColor: colors.card,
     borderWidth: 1, borderColor: colors.cardBorder,
-    borderRadius: 999, paddingHorizontal: 14, height: 42,
+    borderRadius: 999, paddingHorizontal: 14, height: 48,
   },
   input: { flex: 1, color: colors.text, fontSize: 14, paddingVertical: 0 },
   clear: { color: colors.text3, fontSize: 20, lineHeight: 20 },
@@ -201,7 +201,7 @@ const styles = StyleSheet.create({
     borderRadius: 999, padding: 3,
   },
   segBtn: {
-    flex: 1, height: 32, borderRadius: 999,
+    flex: 1, height: 48, borderRadius: 999,
     alignItems: 'center', justifyContent: 'center',
   },
   segBtnOn: { backgroundColor: colors.accentSoft },
@@ -209,7 +209,7 @@ const styles = StyleSheet.create({
   segTextOn: { color: colors.accent, fontWeight: '600' },
   orderRow: { flexDirection: 'row', gap: 8, paddingHorizontal: 14, paddingBottom: 8 },
   orderChip: {
-    paddingHorizontal: 13, height: 30, borderRadius: 999, justifyContent: 'center',
+    paddingHorizontal: 13, height: 48, borderRadius: 999, justifyContent: 'center',
     backgroundColor: colors.card, borderWidth: 1, borderColor: colors.cardBorder,
   },
   orderChipOn: { backgroundColor: colors.accentSoft, borderColor: 'rgba(251,114,153,0.45)' },
@@ -231,7 +231,7 @@ const styles = StyleSheet.create({
   center: { alignItems: 'center', marginTop: 64, gap: 14, paddingHorizontal: 32 },
   hint: { color: colors.text2, fontSize: 13, textAlign: 'center' },
   retryBtn: {
-    paddingHorizontal: 22, height: 36, borderRadius: 999,
+    paddingHorizontal: 22, height: 48, borderRadius: 999,
     backgroundColor: colors.accentSoft, justifyContent: 'center',
   },
   retryText: { color: colors.accent, fontSize: 13, fontWeight: '600' },

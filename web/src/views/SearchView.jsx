@@ -3,7 +3,7 @@ import { useSlice } from '../store.js';
 import { fmtFans } from '../legacy/html.js';
 import { VCard } from './VCard.jsx';
 
-/* 搜索结果区（UP 主横向列表 + 相关视频 + 翻页器）：DOM 与卡片事件由组件拥有，
+/* 搜索结果区（UP 主横向列表 + 全分区视频 + 翻页器）：DOM 与卡片事件由组件拥有，
  * controller 只 publish('search', ...) / publish('follows', ...)。
  * 筛选条 / 搜索框 / 翻页按钮的点击绑定仍在 controller init（id 不变）。 */
 export function SearchResults() {
@@ -37,7 +37,7 @@ export function SearchResults() {
         </div>
       </section>
       <section className="sec" data-sec="video">
-        <h2>相关视频</h2>
+        <h2>视频结果</h2>
         <div className="vgrid" id="vgrid">
           {videos && videos.length
             ? videos.map((t, i) => (

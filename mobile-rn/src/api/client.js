@@ -8,6 +8,9 @@
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import md5 from 'js-md5';
+import * as SecureStore from 'expo-secure-store';
+import * as Crypto from 'expo-crypto';
+import forge from 'node-forge';
 import { mediaUrl } from './mediaUrl';
 
 export const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
@@ -19,6 +22,7 @@ const COOKIE_HOSTS = /(^|\.)bilibili\.com$|(^|\.)bilivideo\.(com|cn)$|(^|\.)hdsl
 let jar = {};
 let jarReady = null;
 let jarTimer = null;
+let authRevision = 0;
 
 export function initClient() {
   if (!jarReady) {
@@ -40,9 +44,14 @@ function scheduleJarSave() {
   }, 300);
 }
 
-const cookieHeaderFor = (host) => {
+const cookieHeaderFor = (host, cookies = jar) => {
   if (!COOKIE_HOSTS.test(host)) return '';
-  return Object.entries(jar).map(([k, v]) => `${k}=${v}`).join('; ');
+  return Object.entries(cookies).map(([k, v]) => {
+    // QR callback query parameters are decoded, unlike Set-Cookie values.
+    // Keep SESSDATA in its wire format without double-encoding existing cookies.
+    const value = k === 'SESSDATA' ? String(v).replace(/[^A-Za-z0-9_.~%\-]/g, encodeURIComponent) : v;
+    return `${k}=${value}`;
+  }).join('; ');
 };
 
 // 合并后的 Set-Cookie 串按「逗号 + 名字=」切分，避开 Expires 里的逗号
@@ -91,8 +100,7 @@ let wbiKeysAt = 0;
 
 async function getWbiKeys() {
   if (wbiKeys && Date.now() - wbiKeysAt < 12 * 3600 * 1000) return wbiKeys;
-  const res = await biliFetch('https://api.bilibili.com/x/web-interface/nav', { skipBuvid: true });
-  const data = JSON.parse(await res.text());
+  const data = await biliFetch('https://api.bilibili.com/x/web-interface/nav', { skipBuvid: true }, async (res) => JSON.parse(await res.text()));
   const wbi = data.data && data.data.wbi_img;
   if (!wbi) throw new Error('无法获取 WBI 密钥');
   const keyOf = (u) => u.split('/').pop().split('.')[0];
@@ -122,8 +130,7 @@ async function ensureBuvid() {
   if (buvidPending) return buvidPending;
   buvidPending = (async () => {
     try {
-      const res = await biliFetch('https://api.bilibili.com/x/frontend/finger/spi', { skipBuvid: true });
-      const data = JSON.parse(await res.text());
+      const data = await biliFetch('https://api.bilibili.com/x/frontend/finger/spi', { skipBuvid: true }, async (res) => JSON.parse(await res.text()));
       if (data.data && data.data.b_3) { jar.buvid3 = data.data.b_3; scheduleJarSave(); }
     } catch (e) { /* 失败不影响后续请求 */ }
     buvidPending = null;
@@ -132,7 +139,7 @@ async function ensureBuvid() {
 }
 
 /* ---------- 统一请求：UA/Referer/Cookie/超时，opts.wbi 时签名 ---------- */
-export async function biliFetch(url, opts = {}) {
+export async function biliFetch(url, opts = {}, consume = (res) => res) {
   await initClient();
   if (!opts.skipBuvid) await ensureBuvid();
   const u = new URL(url);
@@ -140,7 +147,7 @@ export async function biliFetch(url, opts = {}) {
     const signed = await signWbi(u.search.replace(/^\?/, ''));
     url = u.origin + u.pathname + '?' + signed;
   }
-  const cookie = cookieHeaderFor(u.hostname);
+  const cookie = opts.cookies === false ? '' : cookieHeaderFor(u.hostname);
   const headers = {
     'User-Agent': UA,
     Referer: opts.referer || REFERER,
@@ -148,21 +155,31 @@ export async function biliFetch(url, opts = {}) {
     ...(opts.headers || {}),
   };
   const controller = new AbortController();
-  const abort = () => controller.abort();
+  let rejectAbort;
+  const interrupted = new Promise((_, reject) => { rejectAbort = reject; });
+  const abort = () => {
+    controller.abort();
+    rejectAbort(Object.assign(new Error('请求已取消或超时'), { name: 'AbortError' }));
+  };
   if (opts.signal?.aborted) abort();
   opts.signal?.addEventListener('abort', abort, { once: true });
-  const timer = setTimeout(() => controller.abort(), opts.timeout || 10000);
+  const timer = setTimeout(abort, opts.timeout || 10000);
   try {
-    const res = await fetch(url, {
-      method: opts.method || 'GET',
-      // Keep the application's explicit Cookie header as the only source.
-      credentials: 'omit',
-      headers,
-      body: opts.body,
-      signal: controller.signal,
-    });
-    captureCookies(res, u.hostname);
-    return res;
+    return await Promise.race([interrupted, (async () => {
+      if (controller.signal.aborted) throw Object.assign(new Error('请求已取消'), { name: 'AbortError' });
+      const res = await fetch(url, {
+        method: opts.method || 'GET',
+        // Keep the application's explicit Cookie header as the only source.
+        credentials: 'omit',
+        headers,
+        body: opts.body,
+        signal: controller.signal,
+      });
+      if (opts.captureCookies !== false && !controller.signal.aborted) captureCookies(res, u.hostname);
+      // Keep the deadline through body consumption, even if native fetch fails
+      // to reject promptly after aborting. A stalled body must release callers.
+      return await consume(res);
+    })()]);
   } finally {
     clearTimeout(timer);
     opts.signal?.removeEventListener('abort', abort);
@@ -185,16 +202,17 @@ export async function get(url, opts = {}) {
       await searchQueue;
       if (Date.now() < searchBlockedUntil) return { status: 429, body: '搜索请求冷却中，请稍后重试' };
     }
-    const res = await biliFetch(url, opts);
-    // 412 is not a rate-limit instruction. Do not turn one rejected page into
-    // a fabricated 429 for every later search; honor an explicit Retry-After.
-    if (isSearch && (res.status === 429 || (res.status === 412 && res.headers.get('retry-after')))) {
-      const retry = res.headers.get('retry-after');
-      const delay = retry && /^\d+$/.test(retry) ? Number(retry) * 1000 : Date.parse(retry) - Date.now();
-      searchBlockedUntil = Date.now() + (Number.isFinite(delay) && delay > 0 ? delay : 60000);
-    }
-    return { status: res.status, body: opts.responseType === 'bytes'
-      ? Array.from(new Uint8Array(await res.arrayBuffer())) : await res.text() };
+    return await biliFetch(url, opts, async (res) => {
+      // 412 is not a rate-limit instruction. Do not turn one rejected page into
+      // a fabricated 429 for every later search; honor an explicit Retry-After.
+      if (isSearch && (res.status === 429 || (res.status === 412 && res.headers.get('retry-after')))) {
+        const retry = res.headers.get('retry-after');
+        const delay = retry && /^\d+$/.test(retry) ? Number(retry) * 1000 : Date.parse(retry) - Date.now();
+        searchBlockedUntil = Date.now() + (Number.isFinite(delay) && delay > 0 ? delay : 60000);
+      }
+      return { status: res.status, body: opts.responseType === 'bytes'
+        ? Array.from(new Uint8Array(await res.arrayBuffer())) : await res.text() };
+    });
   } catch (e) {
     const aborted = e && (e.name === 'AbortError' || /aborted|timeout/i.test(String(e.message || e)));
     return { status: -1, body: aborted ? '请求超时，请检查网络' : String(e.message || e) };
@@ -208,15 +226,14 @@ export async function post(url, params = {}, opts = {}) {
   Object.entries(params).forEach(([k, v]) => {
     if (v !== undefined && v !== null) body.set(k, String(v));
   });
-  if (jar.bili_jct && !body.has('csrf')) body.set('csrf', jar.bili_jct);
+  if (opts.csrf !== false && jar.bili_jct && !body.has('csrf')) body.set('csrf', jar.bili_jct);
   try {
-    const res = await biliFetch(url, {
+    return await biliFetch(url, {
       ...opts,
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...(opts.headers || {}) },
       body: body.toString(),
-    });
-    return { status: res.status, body: await res.text() };
+    }, async (res) => ({ status: res.status, body: await res.text() }));
   } catch (e) {
     const aborted = e && (e.name === 'AbortError' || /aborted|timeout/i.test(String(e.message || e)));
     return { status: -1, body: aborted ? '请求超时，请检查网络' : String(e.message || e) };
@@ -279,58 +296,252 @@ export async function qrPoll(key) {
   }
 }
 
-/* ---------- 短信验证码登录（移植自 mobile/server.js /auth/sms-*，与桌面端同流程） ---------- */
-// 极验参数：{ ok, token, gt, challenge }
-export async function smsCaptcha() {
-  try {
-    const r = await get('https://passport.bilibili.com/x/passport-login/captcha?source=main_web',
-      { referer: 'https://passport.bilibili.com/login' });
-    if (r.status !== 200) throw new Error('HTTP ' + r.status);
-    const json = JSON.parse(r.body);
-    if (json.code !== 0 || !json.data || !json.data.geetest) throw new Error(json.message || '获取验证参数失败');
-    return { ok: true, token: json.data.token, gt: json.data.geetest.gt, challenge: json.data.geetest.challenge };
-  } catch (e) {
-    return { ok: false, message: String(e.message || e) };
-  }
-}
-
-// 发短信：{ tel, token, challenge, validate, seccode } → { ok, message, captchaKey }
-export async function smsSend(payload) {
-  try {
-    const r = await post('https://passport.bilibili.com/x/passport-login/web/sms/send', {
-      cid: payload.cid || 86, tel: payload.tel, source: 'main_web',
-      token: payload.token, challenge: payload.challenge,
-      validate: payload.validate, seccode: payload.seccode,
-    }, { referer: 'https://passport.bilibili.com/login' });
-    if (r.status !== 200) throw new Error('HTTP ' + r.status);
-    const json = JSON.parse(r.body);
-    return { ok: json.code === 0, message: json.message || '', captchaKey: json.data && json.data.captcha_key };
-  } catch (e) {
-    return { ok: false, message: String(e.message || e) };
-  }
-}
-
-// 验证码登录：成功时响应 Set-Cookie 已由 captureCookies 入罐 → { ok, auth }
-export async function smsLogin(payload) {
-  try {
-    const r = await post('https://passport.bilibili.com/x/passport-login/web/login/sms', {
-      cid: payload.cid || 86, tel: payload.tel, code: payload.code, source: 'main_web',
-      captcha_key: payload.captchaKey, keep: true,
-    }, { referer: 'https://passport.bilibili.com/login' });
-    if (r.status !== 200) throw new Error('HTTP ' + r.status);
-    const json = JSON.parse(r.body);
-    if (json.code !== 0) return { ok: false, message: json.message || '登录失败' };
-    scheduleJarSave();
-    return { ok: true, auth: await authStatus() };
-  } catch (e) {
-    return { ok: false, message: String(e.message || e) };
-  }
-}
-
 export async function logout() {
+  await initClient();
+  authRevision++;
+  const mid = jar.DedeUserID;
   ['SESSDATA', 'bili_jct', 'DedeUserID', 'DedeUserID__ckMd5', 'sid'].forEach((k) => delete jar[k]);
+  if (mid) await appCredentialWrite(() => SecureStore.deleteItemAsync(`biu.bili-app.${mid}`)).catch(() => {});
   scheduleJarSave();
   return { isLogin: false };
+}
+
+// Protocol reference: PiliPlus 4d66b7b, lib/http/login.dart, video.dart and
+// utils/app_sign.dart. App approval issues an Android HD token; web cookies
+// cannot approve this grant on the user's behalf.
+const APP_KEY = 'dfca71928277209b';
+const APP_SECRET = 'b5475a8825547a4fc26c7d518eaaa02e';
+const APP_UA = 'Mozilla/5.0 BiliDroid/2.0.1 (bbcallen@gmail.com) os/android model/android_hd mobi_app/android_hd build/2001100 channel/master innerVer/2001100 osVer/15 network/2';
+// Forge's PKCS#1 padding needs native entropy in Hermes, which has no Node RNG.
+forge.random.getBytesSync = (count) => String.fromCharCode(...Crypto.getRandomBytes(count));
+let appDeviceId;
+function deviceId() {
+  if (!appDeviceId) {
+    const now = new Date(), year = now.getFullYear();
+    const bcd = (value) => (Math.floor(value / 10) << 4) | (value % 10);
+    const bytes = [...Crypto.getRandomBytes(16), ...[Math.floor(year / 100), year % 100, now.getMonth() + 1,
+      now.getDate(), now.getHours(), now.getMinutes(), now.getSeconds()].map(bcd), ...Crypto.getRandomBytes(8)];
+    bytes.push(bytes.reduce((sum, value) => sum + value, 0) & 255);
+    appDeviceId = bytes.map((value) => value.toString(16).padStart(2, '0')).join('');
+  }
+  return appDeviceId;
+}
+let appWrites = Promise.resolve();
+function appCredentialWrite(write) {
+  const result = appWrites.then(write);
+  appWrites = result.catch(() => {});
+  return result;
+}
+function signApp(params) {
+  // PiliPlus signs URI components (spaces as %20, empty values as bare keys).
+  const values = { ...params, appkey: APP_KEY, ts: String(Math.floor(Date.now() / 1000)) };
+  const query = Object.keys(values).sort().map((key) => encodeURIComponent(key)
+    + (String(values[key]) === '' ? '' : '=' + encodeURIComponent(String(values[key])))).join('&');
+  return query + '&sign=' + md5(query + APP_SECRET);
+}
+function appData(response, stage) {
+  if (response.status !== 200) throw new Error(`${stage}连接失败（HTTP ${response.status}），请稍后重试`);
+  let json;
+  try { json = JSON.parse(response.body); } catch { throw new Error(`${stage}响应无效`); }
+  if (json.code !== 0) throw Object.assign(new Error(`${stage}失败（${json.code}）`), { code: json.code, stage });
+  return json.data;
+}
+function appAuthRequired(message = '首次使用 App 推荐，请打开 B 站完成授权') {
+  return Object.assign(new Error(message), { code: 'APP_AUTH_REQUIRED' });
+}
+async function appSession(signal, login = false) {
+  await initClient();
+  const mid = String(jar.DedeUserID || ''), session = jar.SESSDATA;
+  const revision = authRevision;
+  if (!login && (!mid || !session)) throw new Error('请先在「我的」登录 B 站');
+  const check = () => {
+    if (signal?.aborted) throw Object.assign(new Error('授权已取消'), { name: 'AbortError' });
+    if (revision !== authRevision || String(jar.DedeUserID || '') !== mid || jar.SESSDATA !== session) throw new Error('账号已切换，请重新授权');
+  };
+  check();
+  return { mid, sessionKey: md5(session || ''), storageKey: `biu.bili-app.${mid}`, check, login };
+}
+async function appOptions(signal) {
+  await ensureBuvid();
+  const device = md5(String(jar.buvid3 || 'biu-player'));
+  return { cookies: false, csrf: false, skipBuvid: true, captureCookies: false, signal,
+    headers: { 'User-Agent': APP_UA, 'app-key': 'android_hd', env: 'prod',
+      buvid: `XY${device[2]}${device[12]}${device[22]}${device}` } };
+}
+async function appLoginPost(path, params, signal, stage) {
+  const opts = await appOptions(signal);
+  return appData(await post(`https://passport.bilibili.com/x/passport-tv-login/qrcode/${path}?${signApp(params)}`,
+    {}, opts), stage);
+}
+async function appSmsPost(path, params, signal) {
+  const opts = await appOptions(signal);
+  const buvid = opts.headers.buvid;
+  const body = signApp({ build: '2001100', buvid, local_id: buvid, channel: 'master', disable_rcmd: '0',
+    platform: 'android', mobi_app: 'android_hd', c_locale: 'zh_CN', s_locale: 'zh_CN',
+    statistics: '{"appId":5,"platform":3,"version":"2.0.1","abtest":""}', ...params });
+  try {
+    return await biliFetch('https://passport.bilibili.com/x/passport-login/' + path, {
+      ...opts, method: 'POST', body,
+      headers: { ...opts.headers, 'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8' },
+    }, async (res) => ({ status: res.status, body: await res.text() }));
+  } catch (error) {
+    if (error.name === 'AbortError') throw error;
+    throw new Error('短信登录连接失败，请检查网络后重试');
+  }
+}
+export async function smsSend({ tel, cid = 86, captcha, signal }) {
+  if (String(cid) !== '86' || !/^1\d{10}$/.test(tel)) throw new Error('请输入正确的 11 位手机号');
+  const session = await appSession(signal, true);
+  const opts = await appOptions(signal);
+  const response = await appSmsPost('sms/send', { cid, tel,
+    login_session_id: md5(opts.headers.buvid + Date.now()),
+    ...(captcha ? { gee_challenge: captcha.challenge, gee_validate: captcha.validate,
+      gee_seccode: captcha.seccode, recaptcha_token: captcha.token } : {}),
+  }, signal);
+  session.check();
+  let data;
+  try { data = appData(response, '发送验证码'); }
+  catch (error) {
+    if (Number(error.code) !== -105) throw error;
+    data = JSON.parse(response.body).data;
+  }
+  if (data?.captcha_key && !data.recaptcha_url) return { captchaKey: data.captcha_key };
+  let challenge;
+  try {
+    const url = new URL(data?.recaptcha_url);
+    challenge = { gt: url.searchParams.get('gee_gt'), challenge: url.searchParams.get('gee_challenge'), token: url.searchParams.get('recaptcha_token') };
+  } catch { /* Older App responses need the safecenter captcha endpoint. */ }
+  if (!challenge?.gt || !challenge.challenge || !challenge.token) {
+    const pre = appData(await post('https://passport.bilibili.com/x/safecenter/captcha/pre', {}, opts), '获取安全验证');
+    session.check();
+    challenge = { gt: pre?.gee_gt, challenge: pre?.gee_challenge, token: pre?.recaptcha_token };
+  }
+  if (!challenge.gt || !challenge.challenge || !challenge.token) throw new Error('B 站未返回有效的安全验证，请重试');
+  return { captcha: challenge };
+}
+export async function smsLogin({ tel, cid = 86, code, captchaKey, signal }) {
+  if (String(cid) !== '86' || !/^1\d{10}$/.test(tel) || !/^\d{4,8}$/.test(code) || !captchaKey) throw new Error('请填写手机号和短信验证码');
+  const session = await appSession(signal, true);
+  const keyData = appData(await get('https://passport.bilibili.com/x/passport-login/web/key', await appOptions(signal)), '获取登录公钥');
+  session.check();
+  const key = forge.pki.publicKeyFromPem(keyData.key);
+  const seed = forge.util.bytesToHex(forge.random.getBytesSync(8));
+  const dt = encodeURIComponent(forge.util.encode64(key.encrypt(seed, 'RSAES-PKCS1-V1_5')));
+  const id = deviceId();
+  const data = appData(await appSmsPost('login/sms', { cid, tel, code, captcha_key: captchaKey,
+    bili_local_id: id, device_id: id, device: 'phone', device_name: 'vivo', device_platform: 'Android14vivo',
+    dt, from_pv: 'main.my-information.my-login.0.click', from_url: encodeURIComponent('bilibili://user_center/mine'),
+  }, signal), '短信登录');
+  session.check();
+  if (data?.status === 2) throw new Error('B 站要求额外安全验证，请改用 B 站 App 登录');
+  return completeAppLogin(session, data, signal);
+}
+export async function startAppAuthorization({ signal, login = false } = {}) {
+  const session = await appSession(signal, login);
+  const data = await appLoginPost('auth_code', { local_id: '0', platform: 'android', mobi_app: 'android_hd' },
+    signal, '创建 App 授权');
+  session.check();
+  let url;
+  try { url = new URL(data.url); } catch { throw new Error('B 站返回的授权地址无效'); }
+  if (url.protocol !== 'https:' || !/(^|\.)bilibili\.com$/.test(url.hostname) || !data.auth_code) {
+    throw new Error('B 站返回的授权地址无效');
+  }
+  return { ...session, authCode: data.auth_code, url: url.href,
+    expiresAt: Date.now() + Math.min(180, Number(data.expires_in) > 0 ? Number(data.expires_in) : 180) * 1000 };
+}
+export async function pollAppAuthorization(grant, { signal } = {}) {
+  grant.check();
+  if (Date.now() >= grant.expiresAt) return { status: 'expired' };
+  let data;
+  try {
+    data = await appLoginPost('poll', { auth_code: grant.authCode, local_id: '0' }, signal, '领取 App 令牌');
+  } catch (error) {
+    grant.check();
+    if (Number(error.code) === 86038) return { status: 'expired' };
+    if (Number(error.code) === 86039) return { status: 'waiting' };
+    if (Number(error.code) === 86090) return { status: 'scanned' };
+    throw error;
+  }
+  grant.check();
+  return completeAppLogin(grant, data, signal);
+}
+async function completeAppLogin(grant, data, signal) {
+  grant.check();
+  const info = data?.token_info || data;
+  const mid = String(info?.mid || data?.mid || '');
+  if (!/^[1-9]\d*$/.test(mid)) throw new Error('B 站未返回有效的登录账号');
+  if (!grant.login && mid !== grant.mid) throw new Error('请使用与「我的」相同的 B 站账号授权');
+  if (!info?.access_token || !(Number(info.expires_in) > 60)) throw new Error('B 站未返回有效的 App 令牌，请刷新授权');
+  let nextJar, auth;
+  if (grant.login) {
+    const cookies = {};
+    for (const cookie of data?.cookie_info?.cookies || []) {
+      if (['SESSDATA', 'bili_jct', 'DedeUserID', 'DedeUserID__ckMd5', 'sid'].includes(cookie.name)
+          && typeof cookie.value === 'string') cookies[cookie.name] = cookie.value;
+    }
+    if (!cookies.SESSDATA || !cookies.bili_jct || cookies.DedeUserID !== mid) throw new Error('B 站未返回完整登录凭据，请刷新重试');
+    // Validate cookies before committing either credential, so a "successful"
+    // first login cannot leave the Web APIs and App feed on different accounts.
+    nextJar = { ...jar };
+    ['SESSDATA', 'bili_jct', 'DedeUserID', 'DedeUserID__ckMd5', 'sid'].forEach((key) => delete nextJar[key]);
+    Object.assign(nextJar, cookies);
+    const web = appData(await get('https://api.bilibili.com/x/web-interface/nav', {
+      cookies: false, captureCookies: false, signal,
+      headers: { Cookie: cookieHeaderFor('api.bilibili.com', nextJar) },
+    }), '校验登录账号');
+    grant.check();
+    if (!web?.isLogin || String(web.mid) !== mid) throw new Error('登录账号校验失败，请刷新重试');
+    auth = { isLogin: true, mid: web.mid, uname: web.uname || '', face: mediaUrl(web.face) || '', vipType: web.vipType || 0 };
+  }
+  const storageKey = `biu.bili-app.${mid}`;
+  const credential = { appkey: APP_KEY, mid, sessionKey: nextJar ? md5(nextJar.SESSDATA) : grant.sessionKey,
+    token: info.access_token, expiresAt: Date.now() + Number(info.expires_in) * 1000 };
+  await appCredentialWrite(async () => {
+    grant.check();
+    await SecureStore.setItemAsync(storageKey, JSON.stringify(credential));
+    try {
+      grant.check();
+      if (nextJar) {
+        clearTimeout(jarTimer);
+        await AsyncStorage.setItem(JAR_KEY, JSON.stringify(nextJar));
+        grant.check();
+        jar = nextJar;
+        authRevision++;
+      }
+    } catch (error) {
+      await SecureStore.deleteItemAsync(storageKey);
+      if (nextJar) await AsyncStorage.setItem(JAR_KEY, JSON.stringify(jar));
+      throw error;
+    }
+  });
+  if (!grant.login) grant.check();
+  return { status: 'authorized', ...(auth ? { auth } : {}) };
+}
+export async function appGet(path, params = {}) {
+  if (path !== '/x/v2/feed/index') throw new Error('不支持的移动端接口');
+  const session = await appSession();
+  let auth;
+  try { auth = JSON.parse(await SecureStore.getItemAsync(session.storageKey)); } catch { /* Request App approval again. */ }
+  session.check();
+  if (auth?.appkey !== APP_KEY || auth.mid !== session.mid || auth.sessionKey !== session.sessionKey || !auth.token) {
+    throw appAuthRequired();
+  }
+  if (!(auth.expiresAt > Date.now() + 60000)) throw appAuthRequired('App 推荐授权已到期，请打开 B 站重新授权');
+  const opts = await appOptions();
+  session.check();
+  const response = await get(`https://app.bilibili.com${path}?${signApp({ ...params, access_key: auth.token })}`, opts);
+  session.check();
+  try { return appData(response, '读取 App 推荐'); }
+  catch (error) {
+    if (![-101, -111, -663].includes(Number(error.code))) throw error;
+    // Do not delete a newer grant if an old in-flight feed request is rejected.
+    await appCredentialWrite(async () => {
+      const current = await SecureStore.getItemAsync(session.storageKey);
+      if (current && JSON.parse(current).token === auth.token) await SecureStore.deleteItemAsync(session.storageKey);
+    });
+    session.check();
+    throw appAuthRequired(`B 站已拒绝当前 App 令牌（${error.code}），请重新授权`);
+  }
 }
 
 // 供播放器使用：CDN 必须带 Referer 否则 403

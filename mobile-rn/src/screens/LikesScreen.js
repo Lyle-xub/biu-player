@@ -2,13 +2,14 @@
  * 与桌面端 biu-likes 本地收藏同源；播放页小心心即收进这里）
  */
 import React from 'react';
-import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { FlatList, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors } from '../theme';
 import { usePlayer } from '../player/PlayerContext';
 import { canOpenTrackUp, openTrackUp } from '../player/openTrackUp';
 import { trackKeyOf } from '../player/track';
-import TrackRow from '../components/TrackRow';
+import CollectionTrackRow from '../components/CollectionTrackRow';
+import { useTrackActions } from '../components/TrackActions';
 import CollectionToolbar, { useCollectionView } from '../components/CollectionToolbar';
 import { IconBack, IconHeart } from '../components/icons';
 
@@ -16,6 +17,7 @@ export default function LikesScreen({ navigation }) {
   const { likes, playQueue, current, resolveTrackUp } = usePlayer();
   const openUp = (track) => openTrackUp(navigation, track, resolveTrackUp);
   const collection = useCollectionView(likes);
+  const actions = useTrackActions('likes');
   const tracks = collection.visibleTracks;
 
   return (
@@ -29,24 +31,25 @@ export default function LikesScreen({ navigation }) {
       </View>
       <CollectionToolbar query={collection.query} onQuery={collection.setQuery} sort={collection.sort}
         onSort={collection.setSort} resultCount={tracks.length} />
-      <ScrollView contentContainerStyle={styles.content}>
-        {tracks.length ? (
-          tracks.map((t, i) => (
-            <TrackRow
+      {actions.feedback}
+      <FlatList data={tracks} keyExtractor={trackKeyOf} contentContainerStyle={styles.content}
+        renderItem={({ item: t, index: i }) => (
+            <CollectionTrackRow
               key={trackKeyOf(t) || i}
               track={t}
               active={trackKeyOf(current) === trackKeyOf(t)}
               onPress={() => playQueue(tracks, i)}
+              onMenu={() => actions.open(t)} onRemove={() => actions.remove(t)}
               onPressUp={canOpenTrackUp(t) ? () => openUp(t) : undefined}
             />
-          ))
-        ) : !likes.length ? (
+          )}
+        ListEmptyComponent={!likes.length ? (
           <View style={styles.emptyBox}>
             <IconHeart size={30} color={colors.text3} />
             <Text style={styles.empty}>还没有喜欢的歌曲{'\n'}播放页点小心心，歌就会收进来</Text>
           </View>
-        ) : <Text style={styles.noResult}>没有找到匹配的歌曲</Text>}
-      </ScrollView>
+        ) : <Text style={styles.noResult}>没有找到匹配的歌曲</Text>} />
+      {actions.sheet}
     </SafeAreaView>
   );
 }

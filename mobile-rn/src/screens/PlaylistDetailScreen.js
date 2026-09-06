@@ -143,9 +143,9 @@ const styles = StyleSheet.create({
   empty: { color: colors.text3, fontSize: 13, textAlign: 'center', lineHeight: 20 },
   editError: { color: colors.danger, fontSize: 13, padding: 14 },
   description: { color: colors.text2, fontSize: 13, lineHeight: 21, padding: 14 },
-  editButton: { width: 44, height: 44, flexShrink: 0, borderRadius: 22, backgroundColor: colors.card, alignItems: 'center', justifyContent: 'center' },
+  editButton: { width: 48, height: 48, flexShrink: 0, borderRadius: 24, backgroundColor: colors.card, alignItems: 'center', justifyContent: 'center' },
   actionBtn: {
-    paddingHorizontal: 22, height: 36, borderRadius: 999,
+    paddingHorizontal: 22, height: 48, borderRadius: 999,
     backgroundColor: colors.accentSoft, justifyContent: 'center',
   },
   actionText: { color: colors.accent, fontSize: 13, fontWeight: '600' },

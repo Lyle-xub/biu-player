@@ -69,7 +69,7 @@ function parseDur(d) {
   const parts = String(d || '0:00').split(':').map(Number);
   return parts.reduce((acc, n) => acc * 60 + (n || 0), 0);
 }
-// 排行 / 搜索条目统一为 track
+// 排行 / 全分区视频搜索条目统一为 track
 function toTrack(v) {
   return {
     bvid: v.bvid || null,
@@ -77,7 +77,9 @@ function toTrack(v) {
     cid: v.cid || 0,
     mid: v.owner?.mid || v.mid || 0,
     title: stripEm(v.title),
-    tid: Number(v.tid || v.typeid) || 0, tags: v.tags || (typeof v.tag === 'string' ? v.tag.split(',') : []),
+    tid: Number(v.tid || v.typeid) || 0,
+    tname: stripEm(v.tname || v.typename),
+    tags: v.tags || (typeof v.tag === 'string' ? v.tag.split(',') : []),
     desc: String(v.desc || v.description || '').slice(0, 1500),
     up: (v.owner && v.owner.name) || v.author || '',
     duration: parseDur(v.duration),
@@ -780,7 +782,7 @@ const api = {
     return result.slice(0, limit);
   },
 
-  // 视频搜索（不按时长排除短视频），返回 { list, numPages, page }
+  // B 站全分区视频搜索（不限定音乐分区，也不按时长排除短视频）。
   // order: '' 综合 / click 最多播放 / pubdate 最新发布 / dm 最多弹幕 / stow 最多收藏
   // duration: 0 全部 / 1 <10 分钟 / 2 10-30 / 3 30-60 / 4 60+
   async search(keyword, order = '', duration = 0, page = 1) {
@@ -793,7 +795,8 @@ const api = {
     if (duration) url += '&duration=' + duration;
     const data = await jget(url);
     const list = (data.result || [])
-      .filter((v) => v.type === 'video')
+      // search_type=video 已限定为视频；以可播放标识判断，兼容部分结果缺少 type 字段。
+      .filter((v) => v && v.bvid)
       .map(toTrack)
       .filter((t) => t.bvid);
     return { list, numPages: data.numPages || 1, page: data.page || page };

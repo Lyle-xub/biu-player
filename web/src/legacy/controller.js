@@ -2,6 +2,7 @@
  * 依赖全局（api / coverSVG / BiuPlaybackSession / splitDecodeAacStream / Hls）由 vendor.js 与 index.html 的 hls 脚本提供。
  */
 import '../vendor.js';
+import { sourceTrack, resolveSourceTrack } from '../trackSource.js';
 import { publish, peek } from '../store.js';
 import { esc, covHTML, fmt, fmtNum, fmtFans } from './html.js';
 
@@ -2156,6 +2157,13 @@ async function playTrack(t, options = {}) {
   lastLi = -1;
   destroyHls();
   fillPlayingBase(t);
+  if (t.isSegment) resolveSourceTrack(t).then(source => {
+    if (state.current !== t) return;
+    patchSlice('np', { sourceTitle: source.parentTitle || '', sourceArtist: source.parentUp || '' });
+    patchSlice('vdetail', { ...(source.parentTitle ? { title: source.parentTitle } : {}),
+      ...(source.parentUp ? { upName: source.parentUp } : {}) });
+    requestAnimationFrame(syncPlayingHeaderLayout);
+  });
   // 立即用曲目自带时长刷新进度显示，避免新音频元数据就绪前残留上一首的时长
   const initRange = segmentRange(t);
   const initDur = initRange ? initRange.to - initRange.from : t.duration;
@@ -2427,7 +2435,8 @@ playingHeaderObserver?.observe($('npHeading'));
 window.addEventListener('resize', syncPlayingHeaderLayout, { passive: true });
 document.fonts?.ready.then(syncPlayingHeaderLayout).catch(() => {});
 
-function fillPlayingBase(t) {
+function fillPlayingBase(track) {
+  const t = sourceTrack(track);
   publish('np', {
     title: t.title || '—',
     artist: t.up || '—',
@@ -2454,7 +2463,8 @@ function fillPlayingBase(t) {
     if (t.pic) { ppCover.src = t.pic; ppCover.hidden = false; }
     else { ppCover.removeAttribute('src'); ppCover.hidden = true; }
   }
-  patchSlice('vdetail', { title: t.title || '—', upName: t.up || '—', upFans: '' });
+  patchSlice('vdetail', { title: (t.isSegment ? t.parentTitle : t.title) || '—',
+    upName: (t.isSegment ? t.parentUp : t.up) || '—', upFans: '' });
   clearHotCommentRotation();
   patchSlice('hotComment', { avatar: null, seed: null, uname: null });
   setHotCommentText('热评加载中…');
@@ -2462,6 +2472,7 @@ function fillPlayingBase(t) {
 
 /* 播放页详情信息（view 接口数据）：np/vdetail/follows/npActions 走 store，组件渲染 */
 function fillPlayingDetail(d) {
+  if (d.title) patchSlice('vdetail', { title: d.title });
   patchSlice('np', { src: `来源 · ${d.tname || (state.current && state.current.bvid) || 'Bilibili'}` });
   if (d.pic && state.current && !state.current.pic) {
     state.current.pic = d.pic.replace(/^http:/, 'https:');
@@ -4520,7 +4531,7 @@ function initRadioInfiniteScroll() {
 }
 
 /* ---------- 搜索 ---------- */
-/* ---------- 搜索：仅返回 UP 主 + 相关视频，支持排序 / 时长筛选 / 翻页 ---------- */
+/* ---------- 搜索：返回 UP 主 + 全分区视频，支持排序 / 时长筛选 / 翻页 ---------- */
 let searchKw = '';
 let searchOrder = '';   // '' 综合 / click 播放 / pubdate 最新 / dm 弹幕 / stow 收藏
 let searchDuration = 0; // 0 全部 / 1 <10min / 2 10-30 / 3 30-60 / 4 60+

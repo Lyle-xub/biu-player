@@ -245,15 +245,26 @@
     }
     return selected;
   }
-  function rank(candidates, profile, excluded = [], limit = 18) {
+  const interestKey = (name) => ['cos', 'cosplay', 'coser', 'cos正片', 'cosplay正片'].includes(keyOf(name)) ? 'cosplay' : keyOf(name);
+  function titleMatches(title, name) {
+    const word = keyOf(name);
+    const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (interestKey(name) === 'cosplay') return /(^|[^a-z0-9])cos(?:play|er)?($|[^a-z0-9])/i.test(title);
+    return /^[a-z0-9]/i.test(word) || /[a-z0-9]$/i.test(word)
+      ? new RegExp(`(^|[^a-z0-9])${escaped}($|[^a-z0-9])`, 'i').test(title) : title.includes(word);
+  }
+  function rank(candidates, profile, excluded = [], limit = 18, { tagsOnly = false } = {}) {
     const seen = new Set(excluded), selected = [], owners = new Map(), interests = tags(profile?.tags);
     const pool = candidates.filter((track) => {
       if (!track.bvid || seen.has(track.bvid)) return false;
       seen.add(track.bvid); return true;
     }).map((track) => {
-      const names = new Set(tags(track.tags).map((tag) => keyOf(tag.name)));
+      const names = new Set(tags(track.tags).map((tag) => interestKey(tag.name)));
       const title = String(track.title || '').normalize('NFKC').toLowerCase();
-      const matches = interests.filter((tag) => names.has(keyOf(tag.name)) || title.includes(keyOf(tag.name)));
+      const matches = interests.filter((tag) => names.has(interestKey(tag.name))
+        // A broad hosiery interest includes its specific types, not vice versa.
+        || (keyOf(tag.name) === '丝袜' && ['黑丝', '白丝', '肉丝', '连裤袜', '长筒袜'].some((name) => names.has(name)))
+        || (!tagsOnly && titleMatches(title, tag.name)));
       const score = matches.reduce((sum, tag) => sum + tag.weight, 0);
       return { track, score, matches };
     }).filter((item) => item.score > 0);
@@ -433,7 +444,10 @@
       await writes.catch(() => {});
       const next = normalize(snapshot);
       if (action.type === 'enable') next.enabled = !!action.enabled;
-      else if (action.type === 'select') next.activeId = action.id;
+      else if (action.type === 'select') {
+        next.activeId = action.id;
+        if (typeof action.enabled === 'boolean') next.enabled = action.enabled;
+      }
       else if (action.type === 'delete') {
         next.profiles = next.profiles.filter((p) => p.id !== action.id);
         if (next.activeId === action.id) next.activeId = 'auto';

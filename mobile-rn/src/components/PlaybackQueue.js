@@ -47,7 +47,7 @@ export default function PlaybackQueue({ onClose }) {
 const styles = StyleSheet.create({
   header: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', paddingHorizontal: 8, paddingBottom: 8, gap: 8 },
   title: { color: colors.text, fontSize: 16, fontWeight: '600', flexGrow: 1 },
-  mode: { flexDirection: 'row', alignItems: 'center', minHeight: 44, gap: 7, paddingHorizontal: 8, borderRadius: 12 },
+  mode: { flexDirection: 'row', alignItems: 'center', minHeight: 48, gap: 7, paddingHorizontal: 8, borderRadius: 12 },
   modeText: { color: colors.accent, fontSize: 12 },
   list: { flexGrow: 0, flexShrink: 1 },
   row: { flexDirection: 'row', alignItems: 'center', minHeight: 58, paddingHorizontal: 10, paddingVertical: 10, borderRadius: 12, gap: 10 },

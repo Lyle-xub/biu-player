@@ -2,7 +2,7 @@
 import { blend, isStrict } from '../../../renderer/recommendation-profile';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, FlatList, RefreshControl, StyleSheet, Text, TouchableOpacity, View,
+  ActivityIndicator, FlatList, Platform, RefreshControl, StyleSheet, Text, TouchableOpacity, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors } from '../theme';
@@ -18,20 +18,25 @@ import { IconHeart, IconNote, IconSearch } from '../components/icons';
 
 const RECOMMEND_BATCH = 20;
 const MAX_RECOMMEND_PAGES = 8;
+const WATERFALL_BLOCK_SIZE = 8;
+// Sparse music/profile batches must leave something in the actual feed.
+const bannerCount = (items) => Math.min(5, Math.max(0, items.length - 1));
 const cardWeight = (track) => 1 + (String(track.title || '').length > 18 ? 0.24 : 0)
   + (track.recommendationReason ? 0.2 : 0);
 
 function waterfallBlocks(items) {
-  const columns = [[], []];
-  const weights = [0, 0];
-  // Balance the complete feed continuously. Restarting the weights for every
-  // fetched page forced both columns onto a shared row and created large holes.
-  items.forEach((track) => {
-    const column = weights[0] <= weights[1] ? 0 : 1;
-    columns[column].push(track);
-    weights[column] += cardWeight(track);
-  });
-  return items.length ? [{ key: 'waterfall', columns }] : [];
+  const blocks = [];
+  for (let start = 0; start < items.length; start += WATERFALL_BLOCK_SIZE) {
+    const columns = [[], []];
+    const weights = [0, 0];
+    items.slice(start, start + WATERFALL_BLOCK_SIZE).forEach((track) => {
+      const column = weights[0] <= weights[1] ? 0 : 1;
+      columns[column].push(track);
+      weights[column] += cardWeight(track);
+    });
+    blocks.push({ key: `waterfall-${Math.floor(start / WATERFALL_BLOCK_SIZE)}`, columns });
+  }
+  return blocks;
 }
 
 export default function HomeScreen({ navigation }) {
@@ -65,7 +70,7 @@ export default function HomeScreen({ navigation }) {
     const token = ++requestRef.current;
     if (m === 'likes') {
       loadingMoreRef.current = false;
-      setTracks(likes); setLoading(false); setLoadingMore(false); setError(null);
+      setTracks(likes); setLoading(false); setRefreshing(false); setLoadingMore(false); setError(null);
       return;
     }
     const finishUpdatePause = m === 'recommend' ? beginRecommendation() : null;
@@ -78,49 +83,36 @@ export default function HomeScreen({ navigation }) {
       const exclude = m === 'recommend' ? tracksRef.current.map((t) => t.bvid) : [];
       const profilePage = profilePageRef.current;
       // Wait for saved selection before requesting or displaying platform content.
-      if (m === 'recommend' && recommendationManager) {
-        await recommendationManager.ready();
-        if (token !== requestRef.current) return;
-        if (isStrict(recommendationManager.getSnapshot())) {
-          const received = [], seen = new Set(exclude);
-          const onBatch = (batch) => {
-            if (token !== requestRef.current) return;
-            const fresh = batch.filter((t) => { if (seen.has(t.bvid)) return false; seen.add(t.bvid); return true; });
-            if (!fresh.length) return;
-            received.push(...fresh);
-            setTracks([...previous, ...received]);
-            setLoading(false);
-            setRefreshing(false);
-            setLoadingMore(true);
-          };
-          const matches = await recommendationManager.recommend({ page: profilePage, mode: recommendMode,
-            exclude, onBatch });
-          if (token !== requestRef.current) return;
-          profilePageRef.current = profilePage + 1;
-          onBatch(matches);
-          if (!received.length) setTracks(previous);
-          return;
-        }
-      }
+      // Profile matching is an enrichment pass. It must never delay the platform
+      // feed, especially while the saved profile is being restored.
       const suggested = () => m === 'recommend' && recommendationManager
         ? recommendationManager.recommend({ page: profilePage, mode: recommendMode, exclude }).catch(() => [])
         : Promise.resolve([]);
-      const finish = async (items) => {
-        const personalized = await suggested();
+      const finish = (items) => {
+        // Optional profile searches can take much longer than the platform feed.
+        // Publish now; enrich in the background without holding pagination open.
         if (token !== requestRef.current) return;
+        if (items.length) setTracks([...previous, ...items]);
+        setLoading(false);
+        setRefreshing(false);
+        loadingMoreRef.current = false;
+        setLoadingMore(false);
         profilePageRef.current = profilePage + 1;
-        // Keep the carousel platform-only; sample insertion slots in the actual waterfall.
-        const banner = m === 'recommend' && !previous.length ? items.slice(0, 5) : [];
-        const bannerIds = new Set(banner.map((t) => t.bvid));
-        const merged = [...banner, ...blend(items.slice(banner.length),
-          personalized.filter((t) => !bannerIds.has(t.bvid)))];
-        setTracks([...previous, ...merged]);
-        return merged;
+        suggested().then((personalized) => {
+          if (token !== requestRef.current || !personalized.length) return;
+          const banner = m === 'recommend' && !previous.length ? items.slice(0, bannerCount(items)) : [];
+          const bannerIds = new Set(banner.map((t) => t.bvid));
+          const merged = [...banner, ...blend(items.slice(banner.length),
+            personalized.filter((t) => !bannerIds.has(t.bvid)))];
+          if (merged.length) { setTracks([...previous, ...merged]); setError(null); }
+        });
       };
       let list;
       if (m === 'rank') {
         list = await bili.ranking();
       } else if (!account?.isLogin) {
+        // Guests use the public recommendation endpoint only as their source;
+        // logged-in feeds never mix in ranking items as a supplement.
         list = await bili.ranking();
       } else {
         const seen = new Set(exclude);
@@ -128,10 +120,17 @@ export default function HomeScreen({ navigation }) {
         let freshIdx = freshIdxRef.current;
         let fetchError;
         const append = (items) => {
+          if (token !== requestRef.current) return;
           for (const track of items) {
             if (!track.bvid || seen.has(track.bvid)) continue;
             seen.add(track.bvid);
             list.push(track);
+          }
+          if (list.length) {
+            setTracks([...previous, ...list]);
+            setLoading(false);
+            setRefreshing(false);
+            setLoadingMore(list.length < RECOMMEND_BATCH);
           }
         };
         for (let page = 0; page < MAX_RECOMMEND_PAGES && list.length < RECOMMEND_BATCH; page += 1) {
@@ -139,7 +138,7 @@ export default function HomeScreen({ navigation }) {
           try {
             items = recommendMode === 'all'
               ? await bili.personalizedRecommendations(freshIdx, 30)
-              : await bili.personalizedMusicRecommendations(freshIdx, 30);
+              : await bili.personalizedMusicRecommendations(freshIdx, 30, append);
           } catch (e) {
             fetchError = e;
             break;
@@ -149,32 +148,14 @@ export default function HomeScreen({ navigation }) {
           freshIdxRef.current = freshIdx;
           recommendationManager?.observeFeed(items);
           append(items);
-          if (list.length) {
-            setTracks([...previous, ...list]);
-            setLoading(false);
-            setLoadingMore(list.length < RECOMMEND_BATCH);
-          }
         }
         if (token !== requestRef.current) return;
-        // 个性结果不足时补音乐热榜，不混入其他分区，也不无限请求推荐接口。
-        if (list.length < RECOMMEND_BATCH) {
-          try {
-            const ranked = await bili.ranking();
-            if (token !== requestRef.current) return;
-            append(ranked.filter((track) => !seen.has(track.bvid))
-              .slice(0, RECOMMEND_BATCH - list.length)
-              .map((track) => ({ ...track, recommendationReason: '音乐热榜' })));
-          } catch (e) {
-            fetchError = fetchError || e;
-          }
-        }
-        if (token !== requestRef.current) return;
-        const merged = await finish(list);
-        if (token === requestRef.current && !merged?.length && !previous.length && fetchError) throw fetchError;
+        finish(list);
+        if (fetchError) throw fetchError;
         return;
       }
       if (token === requestRef.current) {
-        await finish(list);
+        finish(list);
       }
     } catch (e) {
       if (token === requestRef.current) {
@@ -192,15 +173,16 @@ export default function HomeScreen({ navigation }) {
   }, [mode, likes, recommendMode, account?.isLogin, recommendationManager]);
 
   const loadMoreOnScroll = () => {
-    if (mode === 'recommend' && (account?.isLogin || strictProfile)
-      && scrollIntentRef.current && !loadingMore && !loading && !error) {
+    if (mode === 'recommend' && scrollIntentRef.current && !loadingMore && !loading && !error) {
       scrollIntentRef.current = false;
       load(true);
     }
   };
 
   useEffect(() => {
-    initClient().then(() => setClientReady(true));
+    let active = true;
+    initClient().then(() => { if (active) setClientReady(true); });
+    return () => { active = false; requestRef.current += 1; };
   }, []);
   useEffect(() => {
     if (!clientReady || account === null || mode !== 'recommend') return;
@@ -220,7 +202,7 @@ export default function HomeScreen({ navigation }) {
   };
 
   const { bannerTracks, waterfall } = useMemo(() => {
-    const bannerTracks = mode === 'recommend' ? tracks.slice(0, 5) : [];
+    const bannerTracks = mode === 'recommend' ? tracks.slice(0, bannerCount(tracks)) : [];
     const bannerIds = new Set(bannerTracks.map((track) => track.bvid));
     // 按视频标识排除轮播内容，刷新和分页时保持两处推荐互不重复。
     const feed = tracks.filter((track) => !bannerIds.has(track.bvid));
@@ -238,17 +220,23 @@ export default function HomeScreen({ navigation }) {
       <View style={styles.header}>
         <TouchableOpacity
           style={styles.searchPill}
+          hitSlop={{ top: 2, bottom: 2 }}
+          accessibilityRole="button"
+          accessibilityLabel="搜索视频、UP 主"
           activeOpacity={0.8}
           onPress={() => navigation.navigate('Search')}
         >
           <IconSearch size={15} color={colors.text2} />
-          <Text style={styles.searchHint}>搜索歌曲、UP 主…</Text>
+          <Text style={styles.searchHint}>搜索视频、UP 主…</Text>
         </TouchableOpacity>
       </View>
       <View style={styles.chipRow}>
         {chips.map(({ key, label, icon: Icon }) => (
           <TouchableOpacity
             key={key}
+            hitSlop={{ top: 6, bottom: 6 }}
+            accessibilityRole="button"
+            accessibilityState={{ selected: mode === key }}
             style={[styles.chip, mode === key && styles.chipOn]}
             onPress={() => switchMode(key)}
           >
@@ -259,11 +247,13 @@ export default function HomeScreen({ navigation }) {
       </View>
       <FlatList
         ref={listRef}
-        data={!loading ? waterfall : []}
+        data={waterfall}
         initialNumToRender={2}
         maxToRenderPerBatch={2}
         windowSize={3}
-        removeClippedSubviews
+        // Each cell contains only eight cards, so native clipping can recycle
+        // distant feed content without creating the old single giant cell.
+        removeClippedSubviews={Platform.OS === 'android'}
         keyExtractor={(block) => block.key}
         renderItem={({ item: block }) => (
           <View style={styles.waterfallRow}>
@@ -298,7 +288,7 @@ export default function HomeScreen({ navigation }) {
           if (contentOffset.y >= 0 && contentSize.height - contentOffset.y - layoutMeasurement.height
             <= layoutMeasurement.height * 0.5) loadMoreOnScroll();
         }}
-        ListHeaderComponent={<View><DailyCard navigation={navigation} />{!loading && bannerTracks.length > 0 && <HomeBanner tracks={bannerTracks} onPress={(_, index) => playQueue(tracks, index)} />}</View>}
+        ListHeaderComponent={<View><DailyCard navigation={navigation} />{bannerTracks.length > 0 && <HomeBanner tracks={bannerTracks} onPress={(_, index) => playQueue(tracks, index)} />}</View>}
         ListEmptyComponent={loading && !refreshing ? (
           <ActivityIndicator color={colors.accent} style={{ marginTop: 48 }} />
         ) : error && !tracks.length ? (
@@ -333,7 +323,7 @@ export default function HomeScreen({ navigation }) {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: 'transparent' },
-  header: { paddingHorizontal: 14, paddingTop: 6, paddingBottom: 10 },
+  header: { paddingHorizontal: 14, paddingTop: 8, paddingBottom: 6 },
   searchPill: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
     backgroundColor: colors.card,
@@ -341,7 +331,7 @@ const styles = StyleSheet.create({
     borderRadius: 999, paddingHorizontal: 14, height: 40,
   },
   searchHint: { color: colors.text3, fontSize: 13 },
-  chipRow: { flexDirection: 'row', gap: 8, paddingHorizontal: 14, paddingBottom: 10 },
+  chipRow: { flexDirection: 'row', gap: 8, paddingHorizontal: 14, paddingVertical: 6 },
   chip: {
     flexDirection: 'row', alignItems: 'center', gap: 5,
     paddingHorizontal: 14, height: 32, borderRadius: 999,
@@ -358,7 +348,7 @@ const styles = StyleSheet.create({
   emptyBox: { alignItems: 'center', marginTop: 64, gap: 14 },
   emptyText: { color: colors.text2, fontSize: 13, textAlign: 'center', paddingHorizontal: 32 },
   retryBtn: {
-    paddingHorizontal: 22, height: 36, borderRadius: 999,
+    paddingHorizontal: 22, height: 48, borderRadius: 999,
     backgroundColor: colors.accentSoft, justifyContent: 'center',
   },
   retryText: { color: colors.accent, fontSize: 13, fontWeight: '600' },

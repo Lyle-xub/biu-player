@@ -3,8 +3,9 @@
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  ActivityIndicator, FlatList, RefreshControl, StyleSheet, Text, TouchableOpacity, View,
+  ActivityIndicator, RefreshControl, StyleSheet, Text, TouchableOpacity, View,
 } from 'react-native';
+import { FlashList } from '@shopify/flash-list';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors, fmtCount } from '../theme';
 import * as bili from '../api/bili';
@@ -57,7 +58,7 @@ export default function RadioScreen({ navigation }) {
     if (p > 1 && busy.current) return;
     const token = ++request.current;
     busy.current = true;
-    if (p === 1) { setLoading(true); setRefreshKey((key) => key + 1); } else setLoadingMore(true);
+    if (p === 1) setLoading(true); else setLoadingMore(true);
     setError(null);
     try {
       const rooms = await bili.rooms(p);
@@ -92,18 +93,19 @@ export default function RadioScreen({ navigation }) {
         <Text style={styles.headerTitle}>音乐电台</Text>
         <Text style={styles.headerHint}>B 站直播 · 电台分区</Text>
       </View>
-      <FlatList
+      <FlashList
         data={loading && !refreshing ? [] : list}
         ListHeaderComponent={<FollowedLives onSelect={watch} refreshKey={refreshKey} />}
+        masonry
         numColumns={2}
-        columnWrapperStyle={{ gap: 12 }}
+        optimizeItemArrangement
         keyExtractor={(r) => String(r.roomid)}
-        renderItem={({ item, index: i }) => (
-          <View style={{ flex: 1 }}>
+        renderItem={({ item }) => (
+          <View style={styles.masonryItem}>
             <RoomCard
               room={item}
               active={!!current && current.isLive && current.roomid === item.roomid && playing}
-              onPress={() => watch(list, i)}
+              onPress={() => watch(list, list.findIndex((room) => room.roomid === item.roomid))}
             />
           </View>
         )}
@@ -111,7 +113,7 @@ export default function RadioScreen({ navigation }) {
         refreshControl={(
           <RefreshControl
             refreshing={refreshing}
-            onRefresh={() => { setRefreshing(true); load(1); }}
+            onRefresh={() => { setRefreshing(true); setRefreshKey((key) => key + 1); load(1); }}
             tintColor={colors.accent}
           />
         )}
@@ -138,7 +140,8 @@ const styles = StyleSheet.create({
   },
   headerTitle: { color: colors.text, fontSize: 17, fontWeight: '700' },
   headerHint: { color: colors.text3, fontSize: 11, marginLeft: 'auto' },
-  listContent: { paddingHorizontal: 14, paddingBottom: 140 },
+  listContent: { paddingHorizontal: 8, paddingBottom: 140 },
+  masonryItem: { paddingHorizontal: 6 },
   card: {
     marginBottom: 14,
     backgroundColor: colors.card,

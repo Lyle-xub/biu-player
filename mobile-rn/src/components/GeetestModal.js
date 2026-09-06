@@ -151,12 +151,12 @@ const styles = StyleSheet.create({
   overlayText: { color: colors.text2, fontSize: 12, textAlign: 'center', paddingHorizontal: 24 },
   retryBtn: {
     borderRadius: 999, backgroundColor: colors.accent,
-    paddingHorizontal: 26, height: 34, justifyContent: 'center',
+    paddingHorizontal: 26, height: 48, justifyContent: 'center',
   },
   retryText: { color: '#171810', fontSize: 12, fontWeight: '600' },
   cancelBtn: {
     borderRadius: 999, borderWidth: 1, borderColor: colors.cardBorder,
-    paddingHorizontal: 22, height: 34, justifyContent: 'center',
+    paddingHorizontal: 22, height: 48, justifyContent: 'center',
   },
   cancelText: { color: colors.text2, fontSize: 12 },
 });

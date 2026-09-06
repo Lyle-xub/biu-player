@@ -10,7 +10,7 @@ import { useIsFocused } from '@react-navigation/native';
 import useMediaTransition from '../player/useMediaTransition';
 import VideoActionBar from '../components/VideoActionBar';
 import { colors, fmtDur } from '../theme';
-import { usePlayer } from '../player/PlayerContext';
+import { usePlaybackProgress, usePlayer } from '../player/PlayerContext';
 import VideoPane from '../components/VideoPane';
 import RemoteImage from '../components/RemoteImage';
 import { IconBack, IconPause, IconPlay } from '../components/icons';
@@ -20,8 +20,9 @@ export default function VideoScreen({ route, navigation }) {
   const focused = useIsFocused();
   const routeTrack = (route.params && route.params.track) || {};
   const {
-    current, playing, buffering, position, duration, playError, togglePlay, seekTo, player,
+    current, playing, buffering, playError, togglePlay, seekTo, player,
   } = usePlayer();
+  const { position, duration } = usePlaybackProgress();
   // 路由参数里的 track 可能与当前曲目错位（切过歌）：画面跟随 current，元信息优先 current
   const track = current || routeTrack;
 
@@ -115,7 +116,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20, marginTop: 18,
   },
   playBtn: {
-    width: 46, height: 46, borderRadius: 23,
+    width: 48, height: 48, borderRadius: 24,
     backgroundColor: 'rgba(255,255,255,0.16)',
     alignItems: 'center', justifyContent: 'center',
   },

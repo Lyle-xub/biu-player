@@ -74,8 +74,8 @@ const styles = StyleSheet.create({
   preview: { width: 90, height: 90, borderRadius: 16, overflow: 'hidden' },
   coverChoice: { width: 60, height: 60, borderRadius: 12, overflow: 'hidden', borderWidth: 2, borderColor: 'transparent', marginRight: 8 },
   link: { color: colors.accent, fontSize: 13 },
-  save: { backgroundColor: colors.accent, minHeight: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center' },
+  save: { backgroundColor: colors.accent, minHeight: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center' },
   saveText: { color: '#fff', fontWeight: '600' },
-  cancel: { minHeight: 36, alignItems: 'center', justifyContent: 'center' },
+  cancel: { minHeight: 48, alignItems: 'center', justifyContent: 'center' },
   error: { color: colors.danger, fontSize: 13 },
 });

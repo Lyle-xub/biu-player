@@ -7,7 +7,7 @@ import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import Svg, { Circle } from 'react-native-svg';
 import { colors } from '../theme';
-import { usePlayer } from '../player/PlayerContext';
+import { usePlaybackProgress, usePlayer } from '../player/PlayerContext';
 import { IconNext, IconNote, IconPause, IconPlay, IconQueue } from './icons';
 import BottomSheet from './BottomSheet';
 import PlaybackQueue from './PlaybackQueue';
@@ -41,7 +41,8 @@ function GlassBackground({ blurTarget }) {
 export default function MiniBar({ blurTarget, hasBottomTabs = true, visible = true }) {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation();
-  const { current, isLive, playing, buffering, togglePlay, next, position, duration } = usePlayer();
+  const { current, isLive, playing, buffering, togglePlay, next } = usePlayer();
+  const { position, duration } = usePlaybackProgress();
   const [queueOpen, setQueueOpen] = useState(false);
   const lift = useRef(new Animated.Value(hasBottomTabs ? 1 : 0)).current;
   const reveal = useRef(new Animated.Value(visible ? 1 : 0)).current;

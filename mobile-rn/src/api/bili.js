@@ -16,19 +16,22 @@ export function parseDur(d) {
 }
 // 图片地址归一：协议相对 / http 统一补成 https
 export const absImg = mediaUrl;
-// 排行 / 搜索条目统一为 track（mid 供跳 UP 主空间页）
+// 排行 / 全分区视频搜索条目统一为 track（mid 供跳 UP 主空间页）
 export function toTrack(v) {
   return {
     bvid: v.bvid || null,
     aid: v.aid || v.id || 0,
     cid: v.cid || 0,
     title: stripEm(v.title),
-    tid: Number(v.tid || v.typeid) || 0, tags: v.tags || (typeof v.tag === 'string' ? v.tag.split(',') : []),
+    tid: Number(v.tid || v.typeid) || 0,
+    tname: stripEm(v.tname || v.typename),
+    tags: v.tags || (typeof v.tag === 'string' ? v.tag.split(',') : []),
     desc: String(v.desc || v.description || '').slice(0, 1500),
     up: (v.owner && v.owner.name) || v.author || '',
     mid: (v.owner && v.owner.mid) || v.mid || 0,
     duration: parseDur(v.duration),
     pic: v.pic ? absImg(v.pic) : null,
+    dimension: v.dimension || null,
   };
 }
 
@@ -42,7 +45,7 @@ function recommendationToTrack(item, detail) {
   return {
     bvid: item.bvid || detail.bvid || null,
     aid: item.id || detail.aid || 0,
-    cid: detail.cid || 0,
+    cid: item.cid || detail.cid || 0,
     title: stripEm(item.title || detail.title),
     up: (item.owner && item.owner.name) || (detail.owner && detail.owner.name) || '',
     mid: (item.owner && item.owner.mid) || (detail.owner && detail.owner.mid) || 0,
@@ -51,9 +54,13 @@ function recommendationToTrack(item, detail) {
     tid: detail.tid,
     tags: detail.tags || (typeof item.tag === 'string' ? item.tag.split(',') : []),
     desc: String(detail.desc || item.description || '').slice(0, 1500),
-    tname: detail.tname || '音乐',
+    // The home recommendation response does not include a partition for every
+    // item. Do not label every unclassified video as music; the music-only path
+    // fills this from /view before returning it.
+    tname: detail.tname || '',
     recommendationReason: (item.rcmd_reason && item.rcmd_reason.content) || '',
     stat: item.stat || detail.stat || null,
+    dimension: item.dimension || detail.dimension || null,
   };
 }
 
@@ -68,7 +75,7 @@ async function jget(url, opts) {
 
 /* ---------- 接口 ---------- */
 
-// 音乐区排行（首页推荐流不可用时的兜底列表）
+// 音乐区排行（用户主动选择热榜时使用）
 export async function ranking() {
   try {
     const data = await jget('https://api.bilibili.com/x/web-interface/ranking/v2?rid=3&ps=100');
@@ -107,32 +114,99 @@ export async function personalizedRecommendations(freshIdx = 0, limit = 12) {
     .map((item) => recommendationToTrack(item, item));
 }
 
-// 保留个性推荐顺序，只补取当前页的视频详情并筛出音乐分区；不跨页补足数量。
-export async function personalizedMusicRecommendations(freshIdx = 0, limit = 20) {
+// App recommendation cards use args/player_args instead of the web feed shape.
+export async function mobileRecommendations(cursor = null) {
+  const idx = cursor == null ? 0 : Number(cursor);
+  const data = await client.appGet('/x/v2/feed/index', {
+    platform: 'android', mobi_app: 'android_hd', device: 'pad', build: 2001100,
+    c_locale: 'zh_CN', s_locale: 'zh_CN', channel: 'master', column: 4,
+    device_name: 'android', device_type: 0, disable_rcmd: 0, flush: 5,
+    fnval: 976, fnver: 0, force_host: 2, fourk: 1, guidance: 0, https_url_req: 0,
+    network: 'wifi', player_net: 1, pull: idx === 0 ? 'true' : 'false', idx,
+    qn: 32, recsys_mode: 0, splash_id: '', voice_balance: 0,
+    statistics: '{"appId":5,"platform":3,"version":"2.0.1","abtest":""}',
+  });
+  const raw = Array.isArray(data?.items) ? data.items : [];
+  const seen = new Set();
+  const cards = raw.filter((item) => {
+    if (item.goto !== 'av' || item.can_play === 0 || item.ad_info || String(item.card_goto || '').includes('ad') || !item.player_args) return false;
+    const id = item.bvid || item.player_args.aid || item.args?.aid || item.param;
+    if (!id || seen.has(String(id))) return false;
+    seen.add(String(id)); return true;
+  });
+  const items = [];
+  for (let offset = 0; offset < cards.length; offset += 4) {
+    items.push(...(await Promise.all(cards.slice(offset, offset + 4).map(async (item) => {
+      const aid = Number(item.player_args.aid || item.args?.aid || item.param);
+      let bvid = item.bvid || String(item.uri || '').match(/BV[0-9A-Za-z]{10}/)?.[0];
+      let detail = {};
+      // Older app cards expose only av IDs. Resolve them through the video info
+      // API, never through the web recommendation feed.
+      if (!bvid && Number.isSafeInteger(aid) && aid > 0) {
+        detail = await jget(`https://api.bilibili.com/x/web-interface/view?aid=${aid}`);
+        bvid = detail.bvid;
+        if (!bvid) throw new Error('App 推荐的视频信息暂时不可用，请重试');
+      }
+      if (!bvid) return null;
+      return { ...toTrack(detail), bvid, aid, cid: item.player_args.cid || detail.cid || 0,
+        tid: Number(item.args?.tid || detail.tid) || 0,
+        tname: stripEm(item.args?.tname || detail.tname),
+        title: stripEm(item.title), pic: absImg(item.cover),
+        up: item.args?.up_name || item.avatar?.text || detail.owner?.name || '',
+        mid: item.args?.up_id || item.avatar?.up_id || detail.owner?.mid || 0,
+        duration: item.player_args.duration || parseDur(item.cover_right_text) || detail.duration || 0,
+        tags: Array.isArray(item.tags) ? item.tags : [],
+        recommendationReason: stripEm(item.rcmd_reason_style?.text || item.bottom_rcmd_reason_style?.text || ''),
+      };
+    }))).filter(Boolean));
+  }
+  // Android HD uses the refresh/page index, as in PiliPlus's RcmdController.
+  return { items, nextIdx: String(idx + 1) };
+}
+
+// Video metadata endpoints continue to use the account's web cookie jar.
+export async function relatedVideos(bvid) {
+  const data = await jget('https://api.bilibili.com/x/web-interface/archive/related?bvid=' + encodeURIComponent(bvid));
+  const seen = new Set([bvid]);
+  return (Array.isArray(data) ? data : []).filter((item) => {
+    if (!item?.bvid || seen.has(item.bvid)) return false;
+    seen.add(item.bvid); return true;
+  }).map(toTrack);
+}
+
+export async function videoTags(bvid) {
+  const data = await jget('https://api.bilibili.com/x/web-interface/view/detail/tag?bvid=' + encodeURIComponent(bvid));
+  if (!Array.isArray(data)) throw new Error('视频标签响应异常');
+  return data.map((tag) => stripEm(tag.tag_name)).filter(Boolean);
+}
+
+// Stream playable music matches as they resolve; a slow sibling must not hide them.
+export async function personalizedMusicRecommendations(freshIdx = 0, limit = 20, onBatch) {
   const candidates = await personalizedRecommendations(freshIdx, limit);
   const music = [];
   for (let offset = 0; offset < candidates.length; offset += 5) {
     const batch = candidates.slice(offset, offset + 5);
-    const details = await Promise.all(batch.map((item) => view(item.bvid).catch(() => null)));
-    batch.forEach((item, index) => {
-      const detail = details[index];
-      if (!detail || !isMusicPartition(detail)) return;
-      music.push({
-        ...item,
-        aid: detail.aid || item.aid,
-        cid: detail.cid || item.cid,
-        mid: detail.owner?.mid || item.mid,
-        tid: detail.tid,
-    tags: detail.tags || (typeof item.tag === 'string' ? item.tag.split(',') : []),
-    desc: String(detail.desc || item.description || '').slice(0, 1500),
+    const failures = [];
+    await Promise.all(batch.map(async (item) => {
+      let detail;
+      try { detail = item.tid ? item : await view(item.bvid); }
+      catch (error) { failures.push(error); return; }
+      if (!isMusicPartition(detail)) return;
+      const track = { ...item,
+        aid: detail.aid || item.aid, cid: detail.cid || item.cid,
+        mid: detail.owner?.mid || item.mid, tid: detail.tid,
+        tags: detail.tags || item.tags || [], desc: String(detail.desc || item.desc || '').slice(0, 1500),
         tname: detail.tname || '音乐',
-      });
-    });
+      };
+      music.push(track);
+      onBatch?.([track]);
+    }));
+    if (failures.length === batch.length) throw failures[0];
   }
   return music;
 }
 
-// 视频搜索（不按时长排除短视频），返回 { list, numPages, page }
+// B 站全分区视频搜索（不限定音乐分区，也不按时长排除短视频）。
 // order: '' 综合 / click 最多播放 / pubdate 最新发布 / dm 最多弹幕 / stow 最多收藏
 // duration: 0 全部 / 1 <10 分钟 / 2 10-30 / 3 30-60 / 4 60+
 export async function search(keyword, order = '', duration = 0, page = 1) {
@@ -142,7 +216,8 @@ export async function search(keyword, order = '', duration = 0, page = 1) {
   if (duration) url += '&duration=' + duration;
   const data = await jget(url);
   const list = (data.result || [])
-    .filter((v) => v.type === 'video')
+    // search_type=video 已限定为视频；以可播放标识判断，兼容部分结果缺少 type 字段。
+    .filter((v) => v && v.bvid)
     .map(toTrack)
     .filter((t) => t.bvid);
   return { list, numPages: data.numPages || 1, page: data.page || page };

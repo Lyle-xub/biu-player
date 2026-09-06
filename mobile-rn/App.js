@@ -11,6 +11,7 @@ import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { StatusBar } from 'expo-status-bar';
 import { isRunningInExpoGo } from 'expo';
 import * as SplashScreen from 'expo-splash-screen';
@@ -18,15 +19,16 @@ import { BlurTargetView, BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import Svg, { Defs, RadialGradient, Rect, Stop } from 'react-native-svg';
 import { colors } from './src/theme';
-import { PlayerProvider } from './src/player/PlayerContext';
+import { PlayerProvider, usePlayer } from './src/player/PlayerContext';
 import { LanSyncProvider } from './src/store/LanSyncProvider';
 import { CloudSyncProvider } from './src/store/CloudSyncProvider';
 import { mediaScreenOptions } from './src/player/useMediaTransition';
 import MiniBar from './src/components/MiniBar';
 import { OverlayProvider } from './src/components/Overlay';
 import PageTransition, { pageScreenOptions } from './src/components/PageTransition';
-import { IconHome, IconRadio, IconSearch, IconUser } from './src/components/icons';
+import { IconDiscover, IconHome, IconRadio, IconSearch, IconUser } from './src/components/icons';
 import HomeScreen from './src/screens/HomeScreen';
+import DiscoveryScreen from './src/screens/DiscoveryScreen';
 import DailyScreen from './src/screens/DailyScreen';
 import RadioScreen from './src/screens/RadioScreen';
 import SearchScreen from './src/screens/SearchScreen';
@@ -68,11 +70,12 @@ const navTheme = {
 
 const TAB_ICONS = {
   Home: IconHome,
+  Discover: IconDiscover,
   Radio: IconRadio,
   Search: IconSearch,
   Mine: IconUser,
 };
-const TAB_LABELS = { Home: '首页', Radio: '电台', Search: '搜索', Mine: '我的' };
+const TAB_LABELS = { Home: '首页', Discover: '发现', Radio: '电台', Search: '搜索', Mine: '我的' };
 
 function StartupGlow() {
   const opacity = useRef(new Animated.Value(1)).current;
@@ -174,7 +177,7 @@ function TabBarBridge({ navigation, state, report }) {
   return null;
 }
 
-function GlassTabBar({ active, blurTarget, navigate }) {
+function GlassTabBar({ active, blurTarget, navigate, names }) {
   const insets = useSafeAreaInsets();
   return (
     <View style={[styles.tabBar, { height: 49 + insets.bottom, paddingBottom: insets.bottom }]}>
@@ -191,7 +194,7 @@ function GlassTabBar({ active, blurTarget, navigate }) {
         colors={['rgba(18,22,15,0.30)', 'rgba(4,6,3,0.60)']}
         style={StyleSheet.absoluteFill}
       />
-      {Object.keys(TAB_ICONS).map((name) => {
+      {names.map((name) => {
         const focused = active === name;
         const color = focused ? colors.accent : colors.text3;
         return (
@@ -214,6 +217,10 @@ function GlassTabBar({ active, blurTarget, navigate }) {
 }
 
 function Tabs() {
+  const { discoveryEnabled } = usePlayer();
+  const tabNames = discoveryEnabled
+    ? ['Home', 'Discover', 'Radio', 'Search', 'Mine']
+    : ['Home', 'Radio', 'Search', 'Mine'];
   const blurTargetRef = useRef(null);
   const tabNavigationRef = useRef(null);
   const lastHomePressRef = useRef(null);
@@ -247,6 +254,8 @@ function Tabs() {
           }}
         >
           <Tab.Screen name="Home" component={HomeScreen} options={{ title: '首页' }} />
+          {discoveryEnabled ? <Tab.Screen name="Discover" component={DiscoveryScreen}
+            options={{ title: '发现' }} /> : null}
           <Tab.Screen name="Radio" component={RadioScreen} options={{ title: '电台' }} />
           <Tab.Screen name="Search" component={SearchScreen} options={{ title: '搜索' }} />
           <Tab.Screen name="Mine" component={MineScreen} options={{ title: '我的' }} />
@@ -256,6 +265,7 @@ function Tabs() {
         active={activeTab}
         blurTarget={blurTargetRef}
         navigate={navigateTab}
+        names={tabNames}
       />
     </View>
   );
@@ -329,6 +339,7 @@ function StackChrome({ children, state, closedTransition }) {
 export default function App() {
   const [closedTransition, setClosedTransition] = useState(0);
   return (
+    <GestureHandlerRootView style={styles.app}>
     <SafeAreaProvider>
       <PlayerProvider>
         <LyricsActivitySync />
@@ -368,6 +379,7 @@ export default function App() {
         </CloudSyncProvider>
       </PlayerProvider>
     </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }
 

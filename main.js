@@ -520,6 +520,7 @@ app.whenReady().then(() => {
         recommendation: require('./renderer/recommendation-profile').normalize(saved[`biu-recommendation-profiles${suffix}`]) };
     };
   const writeSyncLibrary = (scope, library, base) => {
+      library = require('./renderer/library-sync').normalize(library, { discovery: false });
       const suffix = scope ? `@${scope}` : '';
       const before = readBiuStore();
       biuStoreCache = { ...before, [`biu-likes${suffix}`]: library.likes,
@@ -547,6 +548,7 @@ app.whenReady().then(() => {
     coverFile: path.join(cloudSource, 'cover.png'),
   });
   const videoCloud = createVideoCloudSync({
+    syncDiscovery: false,
     directory: path.join(app.getPath('userData'), 'video-cloud'), api: cloudApi, runtime: cloudRuntime,
     auth: getAuthStatus, readLibrary: readSyncLibrary, writeLibrary: writeSyncLibrary,
     protect: text => { if (!safeStorage.isEncryptionAvailable()) throw new Error('系统密钥保护不可用'); return safeStorage.encryptString(text).toString('base64'); },

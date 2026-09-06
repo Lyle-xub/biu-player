@@ -10,7 +10,10 @@ import { useTrackSource } from '../player/trackSource';
 export default function TrackRow({ track: originalTrack, onPress, onPressUp, onLongPress, active = false }) {
   const track = useTrackSource(originalTrack);
   return (
-    <TouchableOpacity style={styles.row} activeOpacity={0.75} onPress={onPress} onLongPress={onLongPress} delayLongPress={380}>
+    <TouchableOpacity style={styles.row} activeOpacity={0.75} onPress={onPress} onLongPress={onLongPress} delayLongPress={380}
+      accessibilityRole="button" accessibilityLabel={track.title}
+      accessibilityActions={onLongPress ? [{ name: 'options', label: '更多操作' }] : undefined}
+      onAccessibilityAction={(event) => { if (event.nativeEvent.actionName === 'options') onLongPress?.(); }}>
       <RemoteImage uri={track.pic} width={180} height={180} style={styles.cover}
         fallback={<View style={[StyleSheet.absoluteFill, styles.coverFallback]}>
           <IconNote size={18} color={colors.accent} />

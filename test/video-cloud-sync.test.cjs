@@ -17,9 +17,9 @@ function backend(){
     runtime:{ensure:async()=>{},run:async(req,signal,event)=>{if(signal.aborted)throw Error('aborted');if(req.operation==='encode'){const id=crypto.randomBytes(16).toString('hex');data.set(id,req.library);return {snapshotId:id};}fs.mkdirSync(path.dirname(req.output),{recursive:true});fs.writeFileSync(req.output,JSON.stringify(data.get(req.snapshotId)));event({type:'symbol',symbols:7,needed:7});return {passed:true};}}
   };
 }
-function device(t,b,initial=lib([1])) {
+function device(t,b,initial=lib([1]),syncDiscovery=true) {
   const directory=fs.mkdtempSync(path.join(os.tmpdir(),'biu-cloud-'));let library=normalize(initial),account='123';
-  const service=createVideoCloudSync({directory,api:b.api,runtime:b.runtime,auth:async()=>({isLogin:true,mid:account}),readLibrary:()=>library,writeLibrary:(_,value)=>{library=value;},protect:s=>'protected:'+s,unprotect:s=>s.slice(10)});
+  const service=createVideoCloudSync({syncDiscovery,directory,api:b.api,runtime:b.runtime,auth:async()=>({isLogin:true,mid:account}),readLibrary:()=>library,writeLibrary:(_,value)=>{library=value;},protect:s=>'protected:'+s,unprotect:s=>s.slice(10)});
   t.after(()=>{service.stop();fs.rmSync(directory,{recursive:true,force:true});});
   return {service,directory,get library(){return library;},set library(v){library=normalize(v);},set account(v){account=v;}};
 }
@@ -40,6 +40,31 @@ test('pending verification survives restart and never resubmits',async t=>{
   assert.equal(a.service.status().pending,true);assert.equal(a.service.status().lastSync,0);await a.service.run();assert.equal(b.count,1);
   await a.service.setAccount('');await a.service.setAccount('123');b.ready=true;await a.service.run();
   assert.equal(b.count,1);assert.equal(a.service.status().pending,false);assert.ok(a.service.status().lastSync);
+});
+test('cloud snapshots carry discovery profiles across devices and detect discovery-only edits', async t => {
+  const R = require('../renderer/recommendation-profile');
+  const recommendation = R.normalize({ profiles: [{ id: 'p', name: '音乐', tags: ['钢琴'] }], activeId: 'p' });
+  const discoveryRecommendation = R.normalize({ profiles: [{ id: 'p', name: '美女', tags: ['cos'] }], activeId: 'p' });
+  const b = backend(), phone = device(t, b, { ...lib([1]), recommendation, discoveryRecommendation });
+  await phone.service.setAccount('123'); await phone.service.configure({ enabled: true }); await phone.service.run();
+  const desktop = device(t, b, { ...lib([2]), recommendation }, false);
+  await desktop.service.setAccount('123'); await desktop.service.importRecovery(phone.service.exportRecovery());
+  await desktop.service.configure({ enabled: true }); await desktop.service.run();
+  assert.equal(desktop.library.discoveryRecommendation, undefined, 'desktop applies only shared main profiles');
+  assert.deepEqual(desktop.library.recommendation, recommendation);
+  const secondPhone = device(t, b, lib([]));
+  await secondPhone.service.setAccount('123'); await secondPhone.service.importRecovery(phone.service.exportRecovery());
+  await secondPhone.service.run(true);
+  assert.deepEqual(secondPhone.library.discoveryRecommendation, discoveryRecommendation, 'desktop library updates leave mobile cloud data intact');
+  const edits = b.edits;
+  phone.library = { ...phone.library, discoveryRecommendation: R.normalize({ ...discoveryRecommendation, profiles: [], activeId: 'auto' }) };
+  await phone.service.run();
+  assert.ok(b.edits > edits, 'discovery changes participate in the snapshot fingerprint');
+  await desktop.service.run(true);
+  assert.equal(desktop.library.discoveryRecommendation, undefined);
+  await secondPhone.service.run(true);
+  assert.deepEqual(secondPhone.library.discoveryRecommendation.profiles, [], 'discovery deletions still sync between phones');
+  assert.deepEqual(desktop.library.recommendation, recommendation);
 });
 test('loading a video preview does not upload or decode the library',async t=>{
   const b=backend(),a=device(t,b);await a.service.setAccount('123');await a.service.configure({enabled:true});await a.service.run();

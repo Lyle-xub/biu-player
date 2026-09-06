@@ -53,7 +53,7 @@ const styles = StyleSheet.create({
   label: { color: colors.text2, fontSize: 13, flex: 1 },
   desc: { color: colors.text3, fontSize: 12, lineHeight: 18 },
   actions: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 12 },
-  button: { backgroundColor: colors.accentSoft, borderRadius: 12, paddingHorizontal: 16, paddingVertical: 10 },
+  button: { minHeight: 48, justifyContent: 'center', backgroundColor: colors.accentSoft, borderRadius: 12, paddingHorizontal: 16 },
   buttonText: { color: colors.accent, fontSize: 13, fontWeight: '600' },
   track: { height: 3, borderRadius: 3, overflow: 'hidden', backgroundColor: colors.cardBorder },
   progress: { height: 3, backgroundColor: colors.accent },

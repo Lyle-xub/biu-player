@@ -8,7 +8,7 @@ function atomic(file, value) {
   fs.writeFileSync(file+'.tmp',JSON.stringify(value),{mode:0o600});
   fs.renameSync(file+'.tmp',file);
 }
-function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writeLibrary, protect, unprotect, onStatus=()=>{}, now=Date.now }) {
+function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writeLibrary, protect, unprotect, onStatus=()=>{}, now=Date.now, syncDiscovery=true }) {
   let scope='', config=null, running=null, controller=null, timer=null, logs=[], progress={}, preview='', decoded='', error='', paused=false;
   const fileFor = s => path.join(directory,s,'state.json');
   function load(s) {
@@ -123,7 +123,7 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
         const raw=JSON.parse(fs.readFileSync(out,'utf8'));
         result=normalize(raw);
         config.lastRead={quality,snapshotId:archive.meta.snapshotId,receivedBytes:proof.receivedBytes,totalBytes:proof.totalBytes,seconds:proof.verifiedSeconds,symbols:proof.symbols,scannedFrames:proof.scannedFrames};
-        decoded=JSON.stringify(result,null,2).slice(0,32000);
+        decoded=JSON.stringify(normalize(result,{discovery:syncDiscovery}),null,2).slice(0,32000);
         publish();
         if (!gate) break;
       } catch(e) {problem=e;if(gate)throw e;}
@@ -180,7 +180,7 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
           const local=normalize(await readLibrary(scope));
           const common=archive.meta.parentSnapshotId && config.history?.[archive.meta.parentSnapshotId] || config.base || null;
           const merged=reconcile(common,local,remote);
-          await writeLibrary(scope,merged,local);
+          await writeLibrary(scope,normalize(merged,{discovery:syncDiscovery}),normalize(local,{discovery:syncDiscovery}));
           config.base=remote;config.baseSnapshotId=part.snapshotId;config.baseSequence=part.sequence;remember(part.snapshotId,remote);
           config.activeBvid=archive.bvid;save();
           emit({type:'merge',message:`已合并 ${merged.likes.length} 首喜欢、${merged.library.length} 首音乐库、${merged.playlists.length} 个歌单`});break;
@@ -200,7 +200,10 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
       }
       return;
     }
-    const library=normalize(await readLibrary(scope)),hash=fingerprint(library);
+    const local=normalize(await readLibrary(scope),{discovery:syncDiscovery});
+    // A desktop upload must leave the mobile-only field in the shared cloud snapshot untouched.
+    const library=normalize({...local,...(!syncDiscovery && config.base?.discoveryRecommendation
+      ? {discoveryRecommendation:config.base.discoveryRecommendation} : {})}),hash=fingerprint(library);
     if(!force && archive && (hash===config.lastPublishedHash && archive.meta.snapshotId===config.lastPublishedSnapshot || config.base && hash===fingerprint(config.base))){config.lastSync=now();config.nextRun=now()+config.intervalHours*3600000;save();emit({type:'idle',message:'音乐库没有变化，无需上传'});return;}
     if(!archive && config.imported)throw new Error('等待原设备创建同步稿件；导入密钥的设备不会另建稿件');
     const slot=archive?.meta.slot==='A'?'B':'A';

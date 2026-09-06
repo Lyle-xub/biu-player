@@ -5,6 +5,37 @@ const { merge, reconcile, normalize, endpoint } = require('../renderer/library-s
 const song = (id, extra = {}) => ({ bvid: `BV${id}`, title: `Song ${id}`, cid: id, ...extra });
 const library = (likes = [], playlists = []) => ({ version: 1, likes, playlists });
 
+test('desktop sync applies shared main profiles while excluding mobile discovery profiles', () => {
+  const R = require('../renderer/recommendation-profile');
+  const fs = require('node:fs'), vm = require('node:vm');
+  const mainProfile = R.normalize({ profiles: [{ id: 'same', name: '音乐', tags: ['钢琴'] }], activeId: 'same' });
+  const discovery = R.normalize({ profiles: [{ id: 'same', name: '美女', tags: ['cos', '丝袜'] }], activeId: 'same' });
+  const source = fs.readFileSync(require.resolve('../main'), 'utf8');
+  let failure = false, notification;
+  const context = vm.createContext({
+    require: (name) => name === './renderer/recommendation-profile' ? R : { normalize },
+    biuStoreCache: {}, readBiuStore() { return context.biuStoreCache; }, flushBiuStore: () => !failure,
+    mainWin: { isDestroyed: () => false, webContents: { send: (_, data) => { notification = data; } } },
+  });
+  vm.runInContext(source.slice(source.indexOf('  const readSyncLibrary ='), source.indexOf('  const lanSync = createLanSync('))
+    + '\nthis.read = readSyncLibrary; this.write = writeSyncLibrary;', context);
+  const incoming = normalize({ ...library(), recommendation: mainProfile, discoveryRecommendation: discovery });
+  context.write('123', incoming);
+  assert.deepEqual(context.read('123').recommendation, mainProfile, 'mobile main profiles enter the shared desktop profile store');
+  assert.equal(context.read('123').discoveryRecommendation, undefined);
+  assert.equal(context.biuStoreCache['biu-discovery-recommendation-profiles@123'], undefined);
+  assert.equal(notification.library.discoveryRecommendation, undefined, 'desktop renderer receives no discovery profile');
+  const edited = structuredClone(incoming); edited.recommendation.profiles[0].name = '学习';
+  failure = true;
+  assert.throws(() => context.write('123', edited), /保存失败/);
+  assert.deepEqual(context.read('123').recommendation, mainProfile);
+  failure = false; context.write('123', edited);
+  assert.equal(context.read('123').recommendation.profiles[0].name, '学习');
+  assert.deepEqual(context.read('456').recommendation.profiles, []);
+  assert.deepEqual(context.read('').recommendation.profiles, []);
+  assert.deepEqual(reconcile(incoming, incoming, library()), incoming, 'a snapshot without discovery does not erase it on mobile');
+});
+
 test('library merge is idempotent, keeps segment identity and empty playlists, and only transfers library fields', () => {
   const a = song(1, { Cookie: 'secret', url: 'https://signed.example/token', lyricRef: { source: 'qq', songmid: 'abc', token: 'secret' } });
   const first = song(1, { isSegment: true, from: 0, to: 20 });

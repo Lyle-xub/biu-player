@@ -145,6 +145,9 @@ test('desktop profile bridge refreshes the active manager and ignores another ac
   const desktop = window.BiuRecommendationDesktop({ getScope: () => '123', getLikes: () => [], getMode: () => mode,
     onRefresh: () => refreshes++ });
   const before = await desktop.manager().exportSync();
+  await receive({ scope: '123', library: { discoveryRecommendation: R.normalize({ profiles: [{ id: 'cos', name: '美女', tags: ['cos'] }], activeId: 'cos' }) } });
+  assert.deepEqual(await desktop.manager().exportSync(), before, 'desktop UI never activates or learns from the retained discovery namespace');
+  assert.equal(refreshes, 0);
   const incoming = R.normalize({ profiles: [{ id: 'phone', name: '学习', tags: ['钢琴'] }], activeId: 'phone' });
   await receive({ scope: '456', library: { recommendation: incoming }, base: { recommendation: before } });
   assert.equal(disk.size, 0);
@@ -383,4 +386,35 @@ test('failed cumulative analysis persists pending videos and keeps previous know
     blocked = false; await manager.refresh(true);
     assert.equal(disk.auto.samples, 2); assert.equal(disk.auto.pending, 0);
   } finally { manager.dispose(); }
+});
+
+test('selecting a profile can enable filtering in one persisted revision', async () => {
+  let disk = R.normalize({ enabled: false, profiles: [{ id: 'piano', name: '钢琴', tags: ['钢琴'] }] });
+  const writes = [];
+  const manager = R.createManager({ read: async () => disk, write: async (value) => { disk = value; writes.push(value); }, getLikes: () => [] });
+  await manager.ready();
+  const before = manager.getSnapshot().revision;
+  await manager.edit({ type: 'select', id: 'piano', enabled: true });
+  assert.equal(disk.enabled, true); assert.equal(disk.activeId, 'piano');
+  assert.equal(writes.length, 1);
+  assert.equal(manager.getSnapshot().revision, before + 1);
+  await manager.edit({ type: 'enable', enabled: false });
+  await manager.edit({ type: 'select', id: 'auto' });
+  assert.equal(disk.enabled, false, 'existing selection callers retain the current enabled preference');
+});
+
+test('short Latin profile interests cannot match inside software names and cosplay aliases remain compatible', () => {
+  const profile = { tags: ['cos', '丝袜'] };
+  const videos = [
+    { bvid: 'mac', title: 'macOS 软件推荐' }, { bvid: 'cost', title: 'Costco 应用' },
+    { bvid: 'math', title: 'cosine function' }, { bvid: 'cos', title: '今日COS作品' },
+    { bvid: 'play', title: 'Cosplay 展会' }, { bvid: 'tag', title: '角色展示', tags: ['COSPLAY'] },
+    { bvid: 'silk', title: '丝袜穿搭' },
+  ];
+  assert.deepEqual(new Set(R.rank(videos, profile).map((v) => v.bvid)), new Set(['cos', 'play', 'tag', 'silk']));
+  assert.deepEqual(R.rank(videos, profile, [], 18, { tagsOnly: true }).map((v) => v.bvid), ['tag']);
+  assert.deepEqual(R.rank([{ bvid: 'cpp', title: 'C++ 入门' }, { bvid: 'no', title: 'CCCC教程' }], { tags: ['C++'] }).map((v) => v.bvid), ['cpp']);
+  const hosiery = ['黑丝', '白丝', '连裤袜', '丝袜', '软件应用'].map((tag) => ({ bvid: tag, tags: [tag] }));
+  assert.deepEqual(R.rank(hosiery, { tags: ['丝袜'] }, [], 18, { tagsOnly: true }).map((v) => v.bvid), ['黑丝', '白丝', '连裤袜', '丝袜']);
+  assert.deepEqual(R.rank(hosiery, { tags: ['黑丝'] }, [], 18, { tagsOnly: true }).map((v) => v.bvid), ['黑丝']);
 });

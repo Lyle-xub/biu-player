@@ -35,7 +35,7 @@
     values.forEach((v) => { if (!result.has(key(v))) result.set(key(v), v); });
     return [...result.values()];
   }
-  function normalize(v) {
+  function normalize(v, { discovery = true } = {}) {
     if (!object(v) || v.version !== 1 || !Array.isArray(v.playlists) || v.playlists.length > 1000) throw new Error('同步数据格式或版本不兼容');
     const likes = tracks(v.likes);
     const library = tracks(v.library || []);
@@ -53,7 +53,8 @@
     });
     if (new Set(playlists.map((p) => String(p.id))).size !== playlists.length) throw new Error('歌单标识重复');
     return { version: 1, likes, library, playlists,
-      ...(v.recommendation === undefined ? {} : { recommendation: recommendation.syncState(v.recommendation) }) };
+      ...(v.recommendation === undefined ? {} : { recommendation: recommendation.syncState(v.recommendation) }),
+      ...(!discovery || v.discoveryRecommendation === undefined ? {} : { discoveryRecommendation: recommendation.syncState(v.discoveryRecommendation) }) };
   }
   function merge(a, b) {
     const local = normalize(a), remote = normalize(b);
@@ -65,7 +66,8 @@
     });
     return normalize({ version: 1, likes: unique([...local.likes, ...remote.likes], trackKey),
       library: unique([...local.library, ...remote.library], trackKey), playlists: [...playlists.values()],
-      recommendation: recommendation.reconcile(undefined, local.recommendation, remote.recommendation) });
+      recommendation: recommendation.reconcile(undefined, local.recommendation, remote.recommendation),
+      discoveryRecommendation: recommendation.reconcile(undefined, local.discoveryRecommendation, remote.discoveryRecommendation) });
   }
   // First contact is additive. Later exchanges compare with the last shared copy,
   // so a removal is distinguishable from a song the other device has never seen.
@@ -101,8 +103,11 @@
     });
     return normalize({ version: 1, likes: list(base.likes, local.likes, remote.likes, trackKey),
       library: list(base.library, local.library, remote.library, trackKey), playlists,
-      recommendation: recommendation.reconcile(base.recommendation, local.recommendation, remote.recommendation) });
+      recommendation: recommendation.reconcile(base.recommendation, local.recommendation, remote.recommendation),
+      discoveryRecommendation: recommendation.reconcile(base.discoveryRecommendation, local.discoveryRecommendation, remote.discoveryRecommendation) });
   }
+  const profileCount = (library) => [library.recommendation, library.discoveryRecommendation]
+    .reduce((count, state) => count + (state ? state.profiles.length + 1 : 0), 0);
   function privateIPv4(address) {
     const parts = String(address).split('.');
     if (parts.length !== 4 || parts.some((s) => !/^(0|[1-9]\d{0,2})$/.test(s) || +s > 255)) return false;
@@ -115,5 +120,5 @@
     if (!match || !privateIPv4(match[1]) || +match[2] < 1 || +match[2] > 65535) throw new Error('请输入电脑显示的局域网地址和端口，例如 192.168.1.10:43821');
     return `http://${match[1]}:${Number(match[2])}`;
   }
-  return { normalize, merge, reconcile, trackKey, privateIPv4, endpoint };
+  return { normalize, merge, reconcile, profileCount, trackKey, privateIPv4, endpoint };
 });

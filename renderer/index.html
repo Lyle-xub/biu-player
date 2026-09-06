@@ -50,7 +50,7 @@
     </button>
     <div class="search pill" onclick="go('search')">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-      搜索 B 站音乐、UP 主…
+      搜索 B 站视频、UP 主…
     </div>
   </div>
 </header>
@@ -193,7 +193,7 @@
   <div class="search-hero">
     <div class="box">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,.6)" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-      <input id="searchInput" placeholder="搜索 B 站音乐、UP 主…" autocomplete="off">
+      <input id="searchInput" placeholder="搜索 B 站视频、UP 主…" autocomplete="off">
       <span class="caret"></span>
     </div>
   </div>
@@ -230,7 +230,7 @@
     <div class="ups" id="ups"></div>
   </section>
   <section class="sec" data-sec="video">
-    <h2>相关视频</h2>
+    <h2>视频结果</h2>
     <div class="vgrid" id="vgrid"><div class="list-hint">输入关键词，回车搜索</div></div>
     <div class="sp-pager" id="spPager" hidden>
       <button type="button" class="sp-btn" id="spPrev">上一页</button>
@@ -751,6 +751,7 @@
 <script src="vendor/hls.min.js"></script>
 <script src="subtitles.js"></script>
 <script src="api.js"></script>
+<script src="track-source.js"></script>
 <script src="playback-session.js"></script>
 <script src="music-dictionary.js"></script>
 <script src="daily-recommendation.js"></script>

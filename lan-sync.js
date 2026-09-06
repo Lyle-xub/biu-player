@@ -2,7 +2,7 @@ const http = require('node:http');
 const os = require('node:os');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
-const { normalize, reconcile, privateIPv4 } = require('./renderer/library-sync');
+const { normalize, reconcile, profileCount, privateIPv4 } = require('./renderer/library-sync');
 
 const digest = (value) => crypto.createHash('md5').update(value).digest('hex');
 const revision = (library) => digest(JSON.stringify(normalize(library)));
@@ -48,7 +48,8 @@ function advertise(options, onError) {
 // The account tag matches local app accounts; it is not proof of Bilibili
 // identity. No Bilibili credentials leave a device. Use on a trusted LAN.
 function createLanSync({ readLibrary, writeLibrary, cloudKeyStatus, exchangeCloudKey, onStatus = () => {},
-  deviceId = crypto.randomUUID(), host = '0.0.0.0', publish = advertise, interfaces = lanInterfaces }) {
+  deviceId = crypto.randomUUID(), host = '0.0.0.0', publish = advertise, interfaces = lanInterfaces, syncDiscovery = false }) {
+  const supportedLibrary = (value) => normalize(value, { discovery: syncDiscovery });
   let session = null, server = null, unpublish = null, generation = 0;
   let enabled = true, scope = '', error = '';
   const status = () => ({ enabled, active: !!session, error, signedIn: !!scope,
@@ -94,7 +95,7 @@ function createLanSync({ readLibrary, writeLibrary, cloudKeyStatus, exchangeClou
         current.lastSeen = Date.now();
         if (req.method === 'GET' && req.url === '/v2/status') {
           const cloud = cloudKeyStatus?.(current.scope);
-          return send(res, 200, { revision: revision(readLibrary(current.scope)),
+          return send(res, 200, { revision: revision(supportedLibrary(readLibrary(current.scope))), discoveryProfiles: syncDiscovery,
             ...(cloud && keyPair ? {cloudKey:{version:1,publicKey,channel:cloud.channel}} : {}) });
         }
         if (req.method !== 'POST' || !['/v2/sync', '/v2/ack', '/v2/cloud-key'].includes(req.url)) return send(res, 404, { error: '同步接口不存在' });
@@ -135,12 +136,12 @@ function createLanSync({ readLibrary, writeLibrary, cloudKeyStatus, exchangeClou
           current.lastSync = Date.now(); current.counts = receipt.counts;
           announce(); return send(res, 200, { revision: receipt.revision });
         }
-        const before = normalize(readLibrary(current.scope));
-        const result = reconcile(body.base || null, before, body.library);
+        const before = supportedLibrary(readLibrary(current.scope));
+        const result = reconcile(body.base ? supportedLibrary(body.base) : null, before, supportedLibrary(body.library));
         if (JSON.stringify(before) !== JSON.stringify(result)) writeLibrary(current.scope, result, before);
         const receipt = { id: crypto.randomUUID(), revision: revision(result),
           counts: { likes: result.likes.length, library: result.library.length,
-            playlists: result.playlists.length, profiles: result.recommendation ? result.recommendation.profiles.length + 1 : 0 } };
+            playlists: result.playlists.length, profiles: profileCount(result) } };
         if (current.receipts.size >= 64) current.receipts.delete(current.receipts.keys().next().value);
         current.receipts.set(body.clientId, receipt);
         send(res, 200, { revision: receipt.revision, receipt: receipt.id, library: result });

@@ -5,20 +5,22 @@ import { usePlaylists } from './playlists';
 import { accountKey, readAccountValue } from './accountStorage';
 import { createManager } from '../../../renderer/recommendation-profile';
 
-export default function useRecommendationProfile(account, likes, libraryReady) {
+export default function useRecommendationProfile(
+  account, likes, libraryReady, storageName = 'biu.recommendation-profiles',
+) {
   const playlists = usePlaylists();
   const scope = account?.isLogin && account.mid ? String(account.mid) : '';
   const source = useMemo(() => ({ current: likes }), [scope]);
   source.current = likes;
   const manager = useMemo(() => {
-    const key = accountKey('biu.recommendation-profiles', scope);
+    const key = accountKey(storageName, scope);
     return createManager({
       get: client.get, getLikes: () => source.current,
       getPlaylists: () => readAccountValue('biu.playlists', scope, []),
       read: async () => { const raw = await AsyncStorage.getItem(key); return raw ? JSON.parse(raw) : null; },
       write: (value) => AsyncStorage.setItem(key, JSON.stringify(value)),
     });
-  }, [scope, source]);
+  }, [scope, source, storageName]);
   const state = useSyncExternalStore(manager.subscribe, manager.getSnapshot);
   useEffect(() => {
     if (libraryReady) manager.setActive(true);

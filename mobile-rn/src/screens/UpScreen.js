@@ -145,7 +145,7 @@ const styles = StyleSheet.create({
   center: { alignItems: 'center', marginTop: 48, gap: 14, paddingHorizontal: 32 },
   hint: { color: colors.text2, fontSize: 13, textAlign: 'center' },
   retryBtn: {
-    paddingHorizontal: 22, height: 36, borderRadius: 999,
+    paddingHorizontal: 22, height: 48, borderRadius: 999,
     backgroundColor: colors.accentSoft, justifyContent: 'center',
   },
   retryText: { color: colors.accent, fontSize: 13, fontWeight: '600' },

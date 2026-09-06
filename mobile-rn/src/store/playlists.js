@@ -130,6 +130,19 @@ export function removeFromPlaylist(id, key) {
   return removePlaylistTracks(id, [key]);
 }
 
+export function transferPlaylistTrack(fromId, toId, key) {
+  return changePlaylists((list) => {
+    const from = list.find((p) => p.id === fromId), to = list.find((p) => p.id === toId);
+    if (!from || !to) throw new Error('歌单已被删除，请重新选择');
+    const track = from.tracks.find((item) => trackKeyOf(item) === key);
+    if (!track) throw new Error('歌曲已从原歌单移除');
+    if (fromId === toId) return list;
+    // Both lists share one persisted value: a failed write never loses the source.
+    return list.map((p) => p.id === fromId ? { ...p, tracks: p.tracks.filter((item) => trackKeyOf(item) !== key) }
+      : p.id === toId && !to.tracks.some((item) => trackKeyOf(item) === key) ? { ...p, tracks: [...p.tracks, track] } : p);
+  });
+}
+
 export function removePlaylistTracks(id, keys) {
   const removed = new Set(keys);
   return changePlaylists((list) => list.map((p) => p.id === id

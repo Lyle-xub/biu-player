@@ -1,7 +1,7 @@
-/* Biu Player RN · 全局播放状态（单一 expo-video player 架构）
- * 点播与直播共用同一个 VideoPlayer：
+/* Biu Player RN · 全局播放状态（一个前台播放器，发现队列可接管预加载实例）
+ * 点播与直播共用当前前台 VideoPlayer；发现页可把已预热的实例提升为前台：
  *   点播：progressive mp4 整文件流（bili.videoUrl，含音轨）——播放页歌词模式只是
- *     把视频画面藏起来，声音一直从这个 player 出；切「原视频」只是显示画面，
+ *     把视频画面藏起来，声音从当前 player 出；切「原视频」只是显示画面，
  *     永不 replace/pause/resume，从根上消灭重载与串台。
  *   直播（track.isLive）：同一 player 播 HLS（contentType:'hls'）；无进度条，
  *     seekTo 跳过，prev/next 当作换台。
@@ -22,6 +22,7 @@ import * as bili from '../api/bili';
 import { authStatus, initClient, streamHeaders } from '../api/client';
 import { mediaUrl } from '../api/mediaUrl';
 import { fetchTrackSource } from './trackSource';
+import { takeDiscoveryPreload } from './discoveryPreload';
 import { segmentRange, trackKeyOf } from './track';
 import { PLAYBACK_QUALITIES, normalizePlaybackQuality } from './playbackQuality';
 import { getPlaylists, mergeSyncedPlaylists, setPlaylistScope } from '../store/playlists';
@@ -41,32 +42,55 @@ const LOCK_SCREEN_LYRICS_KEY = 'biu.ios-lock-screen-lyrics';
 const DYNAMIC_ISLAND_LYRICS_KEY = 'biu.ios-dynamic-island-lyrics';
 const LYRIC_EFFECT_KEY = 'biu.lyric-effect';
 const RECOMMEND_MODE_KEY = 'biu.recommend-mode';
+const DISCOVERY_ENABLED_KEY = 'biu.discovery-enabled';
+const DISCOVERY_MODE_KEY = 'biu.discovery-recommend-mode';
 const PLAY_MODE_KEY = 'biu.play-mode';
 const PLAYBACK_SESSION_KEY = 'biu.playback-session';
 export const PLAY_MODES = ['loop', 'single', 'shuffle'];
 export const RECOMMEND_MODES = ['music', 'all'];
 
 const PlayerContext = createContext(null);
+const PlaybackProgressContext = createContext({ position: 0, duration: 0 });
 
 export function PlayerProvider({ children }) {
-  const player = useVideoPlayer(null, (p) => {
+  const basePlayer = useVideoPlayer(null, (p) => {
     p.timeUpdateEventInterval = 0.25; // UI samples; lyric interpolation runs on the native driver.
+    p.bufferOptions = { preferredForwardBufferDuration: 12, minBufferForPlayback: 0.5, waitsToMinimizeStalling: false };
     p.staysActiveInBackground = true; // 退后台继续出声（音频不中断）
     p.showNowPlayingNotification = true; // 通知栏 / 锁屏媒体控件，由原生播放器同步播放状态
     p.audioMixingMode = 'doNotMix'; // 系统播放其他媒体时正常让出，用户再次播放时由同一模块恢复会话
   });
-  const { isPlaying } = useEvent(player, 'playingChange', { isPlaying: player.playing });
-  const { status } = useEvent(player, 'statusChange', { status: player.status });
+  const [adoptedPlayer, setAdoptedPlayer] = useState(null);
+  const player = adoptedPlayer || basePlayer;
+  const activePlayer = useRef(player);
+  const ownedPlayers = useRef(new Set());
+  const baseRetired = useRef(false);
+  // Bind the emitter identity before Expo's latest-listener forwarding. Events
+  // already queued by a retired player cannot affect the newly selected video.
+  const events = useMemo(() => ({
+    addListener: (name, listener) => player.addListener(name, (...args) => {
+      if (activePlayer.current === player) listener(...args);
+    }),
+  }), [player]);
+  useEvent(events, 'playingChange', { isPlaying: player.playing });
+  useEvent(events, 'statusChange', { status: player.status });
+  // useEvent retains its previous value when its emitter changes. Native reads
+  // give the adopted player's actual state even when readiness happened offscreen.
+  const isPlaying = player.playing, status = player.status;
   const [currentTime, setCurrentTime] = useState(0);
   const pendingSeek = useRef(null);
 
   const [queue, setQueue] = useState([]);
   const [index, setIndex] = useState(-1);
+  const [queueSource, setQueueSource] = useState('');
+  const queueSourceRef = useRef('');
   const [playMode, setPlayModeState] = useState('loop');
   const playModeEdited = useRef(false);
   const shuffleHistory = useRef([]);
   const [resolving, setResolving] = useState(false);
   const [sourcePending, setSourcePending] = useState(false);
+  const [videoSource, setVideoSource] = useState(null);
+  const [automaticVideoTransition, setAutomaticVideoTransition] = useState(false);
   const [playError, setPlayError] = useState(null);
   const [likes, setLikes] = useState([]);
   const [libraryReady, setLibraryReady] = useState(false);
@@ -80,6 +104,7 @@ export function PlayerProvider({ children }) {
   const [savedLibrary, setSavedLibrary] = useState([]);
   const savedLibraryRef = useRef(savedLibrary);
   savedLibraryRef.current = savedLibrary;
+  const collectionWrites = useRef(Promise.resolve());
   const [history, setHistory] = useState([]);
   const [quality, setQualityState] = useState(1);
   const qualityEdited = useRef(false);
@@ -89,12 +114,16 @@ export function PlayerProvider({ children }) {
   const [lockScreenLyricsEnabled, setLockScreenLyricsEnabledState] = useState(true);
   const [dynamicIslandLyricsEnabled, setDynamicIslandLyricsEnabledState] = useState(true);
   const [recommendMode, setRecommendModeState] = useState('music');
+  const [discoveryEnabled, setDiscoveryEnabledState] = useState(false);
+  const [discoveryRecommendMode, setDiscoveryRecommendModeState] = useState('music');
   const [seekRevision, setSeekRevision] = useState(0);
   const lyricEffectEdited = useRef(false);
   const desktopLyricsEdited = useRef(false);
   const lockScreenLyricsEdited = useRef(false);
   const dynamicIslandLyricsEdited = useRef(false);
   const recommendModeEdited = useRef(false);
+  const discoveryEnabledEdited = useRef(false);
+  const discoveryModeEdited = useRef(false);
   const tokenRef = useRef(0);
   const listeningRef = useRef(null);
   const searchPlaybackRef = useRef(false);
@@ -102,6 +131,8 @@ export function PlayerProvider({ children }) {
   const playIntentRef = useRef(false);
   const loadedMediaKey = useRef(null);
   const pendingAutoplayUri = useRef(null);
+  const videoLoad = useRef(null);
+  const videoRequest = useRef(null);
   const replaceChain = useRef(Promise.resolve()); // 串行化 replaceAsync，防串台
   const playbackSessionRef = useRef(null);
   const sessionRestoreStarted = useRef(false);
@@ -170,6 +201,13 @@ export function PlayerProvider({ children }) {
       const saved = JSON.parse(raw);
       if (!recommendModeEdited.current && RECOMMEND_MODES.includes(saved)) setRecommendModeState(saved);
     }).catch(() => {});
+    AsyncStorage.getItem(DISCOVERY_ENABLED_KEY).then((raw) => {
+      if (!discoveryEnabledEdited.current) setDiscoveryEnabledState(JSON.parse(raw) === true);
+    }).catch(() => {});
+    AsyncStorage.getItem(DISCOVERY_MODE_KEY).then((raw) => {
+      const saved = JSON.parse(raw);
+      if (!discoveryModeEdited.current && RECOMMEND_MODES.includes(saved)) setDiscoveryRecommendModeState(saved);
+    }).catch(() => {});
     AsyncStorage.getItem(PLAY_MODE_KEY).then((raw) => {
       const saved = JSON.parse(raw);
       if (!playModeEdited.current && PLAY_MODES.includes(saved)) setPlayModeState(saved);
@@ -187,11 +225,28 @@ export function PlayerProvider({ children }) {
     AsyncStorage.setItem(accountKey(key, accountScope.current), JSON.stringify(val)).catch(() => {});
   }, []);
 
+  const publishVideoSource = useCallback(() => {
+    const request = videoRequest.current;
+    const load = videoLoad.current;
+    if (resolvingRef.current || !request || request.token !== tokenRef.current
+      || !load?.loaded || load.mediaKey !== request.mediaKey) return;
+    // A matching loaded item can acquire its video surface now. Waiting for a
+    // playing clock here forces audio to start before video can even render.
+    // pendingSeek independently guards stale end/progress events below.
+    setVideoSource((old) => old?.revision === request.token ? old
+      : { key: request.key, revision: request.token });
+  }, []);
+
   const playIndex = useCallback(async (
     list, i, keepShuffleHistory = false, automatic = false, startAt = 0, autoplay = true,
   ) => {
+    let playbackPlayer = activePlayer.current;
+    let prepared;
     const t = list[i];
     if (!t) return;
+    // A pending replace may still change the native item before this request's
+    // turn in the chain (A → B → A). Only an idle chain can safely reuse media.
+    const canReuseMedia = !resolvingRef.current;
     if (autoplay) listeningRef.current?.start(t, { manual: !automatic, search: !automatic && searchPlaybackRef.current });
     searchPlaybackRef.current = false;
     if (!keepShuffleHistory) shuffleHistory.current = [];
@@ -200,23 +255,33 @@ export function PlayerProvider({ children }) {
     setResolving(true);
     setPlayError(null);
     const token = ++tokenRef.current;
+    setAutomaticVideoTransition(automatic);
+    videoRequest.current = null;
+    setVideoSource(null);
     pendingSeek.current = null;
     resolvingRef.current = true;
-    playbackSessionRef.current = { queue: list, index: i, position: startAt };
+    playbackSessionRef.current = { queue: list, index: i, position: startAt, source: queueSourceRef.current };
     AsyncStorage.setItem(PLAYBACK_SESSION_KEY, JSON.stringify(playbackSessionRef.current)).catch(() => {});
     try {
       // 自动续播时保留 playWhenReady：pause 会让 Android 媒体服务退出前台，
       // 随后的后台取流 / 重新播放可能被系统限制。replaceAsync 本身会切换旧媒体。
-      if (!automatic) player.pause();
+      if (!automatic) playbackPlayer.pause();
       let source;
       let mediaKey;
       if (t.isLive) {
+        mediaKey = `live:${t.roomid}`;
         // 电台：HLS（同一 player，contentType 显式声明）
         const url = await bili.livePlayUrl(t.roomid);
         if (token !== tokenRef.current) return;
         source = { uri: url, headers: streamHeaders(), contentType: 'hls' };
       } else {
-        let cid = t.cid;
+        prepared = !t.isSegment && !startAt ? await takeDiscoveryPreload(t, quality, accountScope.current) : null;
+        if (token !== tokenRef.current) return;
+        let cid = t.cid || prepared?.cid;
+        if (prepared) {
+          t.cid = cid;
+          if (prepared.dimension) t.dimension = prepared.dimension;
+        }
         if (!cid) {
           const v = await bili.view(t.bvid);
           if (token !== tokenRef.current) return;
@@ -229,11 +294,12 @@ export function PlayerProvider({ children }) {
         }
         if (!cid) throw new Error('无法获取视频分 P 信息');
         mediaKey = `${t.bvid}:${cid}:${quality}`;
-        if (loadedMediaKey.current !== mediaKey) {
+        if (prepared?.player || !canReuseMedia || loadedMediaKey.current !== mediaKey) {
           // 音画共用视频流；自动不指定 qn，手动档位传递实际的视频清晰度。
-          const url = await bili.videoUrl(t.bvid, cid, quality === 1 ? undefined : quality);
+          const requestedQuality = quality === 1 ? undefined : quality;
+          const url = prepared?.uri || await bili.videoUrl(t.bvid, cid, requestedQuality);
           if (token !== tokenRef.current) return; // 已被更新的切歌请求取代
-          source = { uri: url, headers: streamHeaders(), contentType: 'progressive' };
+          source = { uri: url, headers: streamHeaders(), contentType: 'progressive', useCaching: true };
         }
       }
       const metadataSegment = segmentRange(t);
@@ -246,19 +312,43 @@ export function PlayerProvider({ children }) {
         biuSegmentEnd: metadataSegment?.to ?? null,
       };
       if (source) source.metadata = metadata;
+      videoRequest.current = { token, key: trackKeyOf(t), mediaKey };
       // 串行 replace：过期的加载流程到这一步直接丢弃，只有最新 track 能落地
       replaceChain.current = replaceChain.current.catch(() => {}).then(async () => {
         if (token !== tokenRef.current) return;
-        if (source) {
+        if (prepared?.player) {
+          const incoming = prepared.player;
+          // Keep the loaded AVPlayerItem / ExoPlayer and its buffer intact: no
+          // replace, no seek-to-zero, and no repeated play-URL or metadata request.
+          playbackPlayer.pause();
+          playbackPlayer.showNowPlayingNotification = false;
+          playbackPlayer.staysActiveInBackground = false;
+          incoming.volume = playbackPlayer.volume ?? 1;
+          incoming.muted = false;
+          incoming.timeUpdateEventInterval = 0.25;
+          ownedPlayers.current.add(incoming);
+          activePlayer.current = incoming;
+          playbackPlayer = incoming;
+          prepared.adopt();
+          setAdoptedPlayer(incoming);
+          loadedMediaKey.current = mediaKey;
+          const loaded = prepared.loaded || incoming.status === 'readyToPlay';
+          videoLoad.current = { uri: source.uri, mediaKey, loaded, player: incoming };
+          pendingAutoplayUri.current = loaded ? null : source.uri;
+          setSourcePending(!loaded);
+        } else if (source) {
           try {
             // expo-video iOS resolves replaceAsync before its main-thread AVPlayerItem
             // replacement runs. Resume when sourceChange confirms the new item exists.
             playIntentRef.current = autoplay;
             pendingAutoplayUri.current = source.uri;
             setSourcePending(true);
-            await player.replaceAsync(source);
+            videoLoad.current = { uri: source.uri, mediaKey, loaded: false };
+            await playbackPlayer.replaceAsync(source);
             loadedMediaKey.current = mediaKey;
           } catch (e) {
+            loadedMediaKey.current = null;
+            videoLoad.current = null;
             if (token === tokenRef.current) {
               playIntentRef.current = false;
               pendingAutoplayUri.current = null;
@@ -267,30 +357,34 @@ export function PlayerProvider({ children }) {
             }
             return;
           }
-        } else if (player.updateMetadata) {
+        } else if (playbackPlayer.updateMetadata) {
           // Adjacent clips reuse the stream, but each song owns its media card.
-          await player.updateMetadata(metadata);
+          await playbackPlayer.updateMetadata(metadata);
         }
         if (token !== tokenRef.current) return;
         const segment = segmentRange(t);
         const offset = Number.isFinite(startAt) ? Math.max(0, Math.min(startAt,
-          segment ? segment.to - segment.from : (player.duration || t.duration || Infinity))) : 0;
+          segment ? segment.to - segment.from : (playbackPlayer.duration || t.duration || Infinity))) : 0;
         const start = (segment?.from || 0) + offset;
         if (!t.isLive) {
           // iOS seeks asynchronously even when two segments share the same
           // video. Old progress/end events must not finish the new segment.
-          if (segment || offset > 0) pendingSeek.current = { target: start, started: Date.now(), isSegmentSwitch: !!segment };
-          player.currentTime = start;
+          if (source || segment || offset > 0) pendingSeek.current = {
+            target: start, started: Date.now(), isSegmentSwitch: !!segment, isSourceSwitch: !!source,
+          };
+          // A fresh source already starts at zero. Seeking it again can flush a
+          // decoded first frame and show the native shutter as playback starts.
+          if (!source || start > 0) playbackPlayer.currentTime = start;
         }
         setCurrentTime(start);
         playIntentRef.current = autoplay;
         // replaceAsync can reset AVPlayer integration flags on iOS. Reapply them
         // before every new item so lock-screen / Control Center stays registered.
-        player.staysActiveInBackground = true;
-        player.showNowPlayingNotification = true;
-        player.audioMixingMode = 'doNotMix';
-        if (autoplay) player.play();
-        else player.pause();
+        playbackPlayer.staysActiveInBackground = true;
+        playbackPlayer.showNowPlayingNotification = true;
+        playbackPlayer.audioMixingMode = 'doNotMix';
+        if (autoplay) playbackPlayer.play();
+        else playbackPlayer.pause();
         if (!t.isLive && autoplay) {
           setHistory((h) => {
             const nextH = [t, ...h.filter((x) => trackKeyOf(x) !== trackKeyOf(t))].slice(0, 100);
@@ -306,12 +400,14 @@ export function PlayerProvider({ children }) {
       setSourcePending(false);
       setPlayError(String(e.message || e));
     } finally {
+      prepared?.dispose?.();
       if (token === tokenRef.current) {
         resolvingRef.current = false;
         setResolving(false);
+        publishVideoSource();
       }
     }
-  }, [player, quality, persistLibrary]);
+  }, [player, quality, persistLibrary, publishVideoSource]);
 
   // A process restart clears AVPlayer and iOS Now Playing even though the user
   // still has a current song. Restore the media paused so both the in-app bar
@@ -325,6 +421,9 @@ export function PlayerProvider({ children }) {
       if (!Array.isArray(saved?.queue) || !saved.queue.length || saved.queue[saved.index]?.isLive) return;
       const restoredIndex = Math.max(0, Math.min(saved.queue.length - 1, Number(saved.index) || 0));
       const restoredPosition = Math.max(0, Number(saved.position) || 0);
+      queueSourceRef.current = typeof saved.source === 'string' ? saved.source
+        : saved.queue.some((track) => track.discoveryOrigin) ? 'discovery' : '';
+      setQueueSource(queueSourceRef.current);
       playIndex(saved.queue, restoredIndex, false, false, restoredPosition, false);
     }).catch(() => {});
   }, [playIndex]);
@@ -340,8 +439,27 @@ export function PlayerProvider({ children }) {
 
   const playQueue = useCallback((tracks, i = 0, startAt = 0, source = '') => {
     searchPlaybackRef.current = source === 'search';
+    queueSourceRef.current = source;
+    setQueueSource(source);
     return playIndex(tracks, i, false, false, startAt);
   }, [playIndex]);
+
+  // Feed enrichment changes future entries without replacing the playing source.
+  const syncDiscoveryQueue = useCallback((tracks) => {
+    if (queueSource !== 'discovery' || !current || tracks === queue) return;
+    if (!tracks.length) {
+      player.pause(); setQueue([]); setIndex(-1);
+      listeningRef.current?.start(null);
+      playbackSessionRef.current = { queue: [], index: -1, position: 0, source: 'discovery' };
+      return;
+    }
+    const nextIndex = tracks.findIndex((track) => trackKeyOf(track) === trackKeyOf(current));
+    if (nextIndex < 0) return;
+    setQueue(tracks); setIndex(nextIndex);
+    if (playbackSessionRef.current) {
+      playbackSessionRef.current = { ...playbackSessionRef.current, queue: tracks, index: nextIndex };
+    }
+  }, [queueSource, current, queue, player]);
 
   const next = useCallback((automatic = false) => {
     if (!queue.length) return;
@@ -452,21 +570,53 @@ export function PlayerProvider({ children }) {
     persist(RECOMMEND_MODE_KEY, mode);
   }, [persist]);
 
+  const setDiscoveryEnabled = useCallback((enabled) => {
+    const next = enabled === true;
+    discoveryEnabledEdited.current = true;
+    setDiscoveryEnabledState(next);
+    persist(DISCOVERY_ENABLED_KEY, next);
+  }, [persist]);
+
+  const setDiscoveryRecommendMode = useCallback((mode) => {
+    if (!RECOMMEND_MODES.includes(mode)) return;
+    discoveryModeEdited.current = true;
+    setDiscoveryRecommendModeState(mode);
+    persist(DISCOVERY_MODE_KEY, mode);
+  }, [persist]);
+
   const isLiked = useCallback(
     (t) => !!t && likes.some((x) => trackKeyOf(x) === trackKeyOf(t)),
     [likes],
   );
+  const changeCollections = useCallback((update) => {
+    const scope = accountScope.current, epoch = libraryEpoch.current;
+    const operation = collectionWrites.current.catch(() => {}).then(async () => {
+      const check = () => { if (epoch !== libraryEpoch.current || !libraryReadyRef.current) throw new Error('账号正在切换，请稍后重试'); };
+      check();
+      const before = { likes: likesRef.current, library: savedLibraryRef.current };
+      const next = update(before);
+      await Promise.all([
+        next.likes !== before.likes && AsyncStorage.setItem(accountKey(LIKES_KEY, scope), JSON.stringify(next.likes)),
+        next.library !== before.library && AsyncStorage.setItem(accountKey(MUSIC_LIBRARY_KEY, scope), JSON.stringify(next.library)),
+      ]);
+      check();
+      likesRef.current = next.likes; savedLibraryRef.current = next.library;
+      setLikes(next.likes); setSavedLibrary(next.library);
+    });
+    collectionWrites.current = operation.catch(() => {});
+    return operation;
+  }, []);
   const toggleLike = useCallback((t) => {
     if (!t) return;
-    setLikes((list) => {
+    return changeCollections((before) => {
+      const list = before.likes;
       const k = trackKeyOf(t);
       const nextL = list.some((x) => trackKeyOf(x) === k)
         ? list.filter((x) => trackKeyOf(x) !== k)
         : [{ ...t, addedAt: Date.now() }, ...list];
-      persistLibrary(LIKES_KEY, nextL);
-      return nextL;
+      return { ...before, likes: nextL };
     });
-  }, [persistLibrary]);
+  }, [changeCollections]);
 
   const isInLibrary = useCallback(
     (t) => !!t && [...likes, ...savedLibrary].some((x) => trackKeyOf(x) === trackKeyOf(t)),
@@ -474,18 +624,21 @@ export function PlayerProvider({ children }) {
   );
   const toggleLibrary = useCallback((t) => {
     if (!t) return;
-    setSavedLibrary((list) => {
+    return changeCollections((before) => {
+      const list = before.library;
       const key = trackKeyOf(t);
-      if (likesRef.current.some((x) => trackKeyOf(x) === key)
-        && !list.some((x) => trackKeyOf(x) === key)) return list;
+      if (before.likes.some((x) => trackKeyOf(x) === key)
+        && !list.some((x) => trackKeyOf(x) === key)) return before;
       const next = list.some((x) => trackKeyOf(x) === key)
         ? list.filter((x) => trackKeyOf(x) !== key)
         : [{ ...t, addedAt: Date.now() }, ...list];
-      savedLibraryRef.current = next;
-      persistLibrary(MUSIC_LIBRARY_KEY, next);
-      return next;
+      return { ...before, library: next };
     });
-  }, [persistLibrary]);
+  }, [changeCollections]);
+  const removeCollectionTrack = useCallback((track, collection) => changeCollections((before) => {
+    const keep = (item) => trackKeyOf(item) !== trackKeyOf(track);
+    return { likes: before.likes.filter(keep), library: collection === 'library' ? before.library.filter(keep) : before.library };
+  }), [changeCollections]);
 
   // 旧版桌面端写入本地集合时没有保留 mid。首次点击 UP 主时按 bvid
   // 补查视频作者，并写回所有本地歌曲集合，后续启动与同步可直接使用。
@@ -561,17 +714,36 @@ export function PlayerProvider({ children }) {
   }, [persist]);
 
   const { recommendationManager, recommendationProfile } = useRecommendationProfile(account, likes, libraryReady);
-  const listening = useMemo(() => tracker((event) => recommendationManager.recordListening(event)), [recommendationManager]);
+  const { recommendationManager: discoveryRecommendationManager,
+    recommendationProfile: discoveryRecommendationProfile } = useRecommendationProfile(
+    account, likes, libraryReady, 'biu.discovery-recommendation-profiles',
+  );
+  const listening = useMemo(() => {
+    const main = tracker((event) => recommendationManager.recordListening(event));
+    const discovery = tracker((event) => discoveryRecommendationManager.recordListening(event));
+    return {
+      start(track, options) {
+        // Each tracker flushes its previous session before starting the next.
+        // Capture the source at selection, not when delayed ticks are persisted.
+        main.start(queueSourceRef.current === 'discovery' ? null : track, options);
+        discovery.start(queueSourceRef.current === 'discovery' ? track : null, options);
+      },
+      tick(position, playing) { main.tick(position, playing); discovery.tick(position, playing); },
+      flush() { main.flush(); discovery.flush(); },
+    };
+  }, [discoveryRecommendationManager, recommendationManager]);
   listeningRef.current = listening;
   useEffect(() => () => listening.flush(), [listening]);
   useEffect(() => { if (!isPlaying) listening.tick(currentTime, false); }, [isPlaying, listening]);
   const profileScope = account?.isLogin && account.mid ? String(account.mid) : '';
   const getSyncLibrary = useCallback(async (scope = accountScope.current) => {
     const epoch = libraryEpoch.current;
-    const [playlists, recommendation] = await Promise.all([getPlaylists(), recommendationManager.exportSync()]);
+    const [playlists, recommendation, discoveryRecommendation] = await Promise.all([
+      getPlaylists(), recommendationManager.exportSync(), discoveryRecommendationManager.exportSync(),
+    ]);
     if (!libraryReadyRef.current || epoch !== libraryEpoch.current || scope !== accountScope.current || scope !== profileScope) throw new Error('账号正在切换');
-    return { version: 1, likes: likesRef.current, library: savedLibraryRef.current, playlists, recommendation };
-  }, [recommendationManager, profileScope]);
+    return { version: 1, likes: likesRef.current, library: savedLibraryRef.current, playlists, recommendation, discoveryRecommendation };
+  }, [recommendationManager, discoveryRecommendationManager, profileScope]);
   const applySyncLibrary = useCallback((incoming, base, scope = accountScope.current) => {
     const epoch = libraryEpoch.current;
     const check = () => {
@@ -584,6 +756,8 @@ export function PlayerProvider({ children }) {
       await mergeSyncedPlaylists(data.playlists, base?.playlists);
       check();
       await recommendationManager.applySync(data.recommendation, base?.recommendation);
+      check();
+      await discoveryRecommendationManager.applySync(data.discoveryRecommendation, base?.discoveryRecommendation);
       for (;;) {
         check();
         const before = likesRef.current;
@@ -608,7 +782,7 @@ export function PlayerProvider({ children }) {
     });
     accountSwitch.current = operation.catch(() => {});
     return operation;
-  }, [recommendationManager, profileScope]);
+  }, [recommendationManager, discoveryRecommendationManager, profileScope]);
 
   // 单曲循环只影响自动结束，手动上一首/下一首仍可切歌；分切也从自己的起点重播。
   const nextRef = useRef(next);
@@ -619,9 +793,9 @@ export function PlayerProvider({ children }) {
   remoteNextRef.current = next;
   const prevRef = useRef(prev);
   prevRef.current = prev;
-  useEventListener(player, 'nextTrack', () => remoteNextRef.current());
-  useEventListener(player, 'previousTrack', () => prevRef.current());
-  useEventListener(player, 'systemSeek', ({ sourceTime, mediaKey, segmentStart, segmentDuration }) => {
+  useEventListener(events, 'nextTrack', () => remoteNextRef.current());
+  useEventListener(events, 'previousTrack', () => prevRef.current());
+  useEventListener(events, 'systemSeek', ({ sourceTime, mediaKey, segmentStart, segmentDuration }) => {
     if (!current || current.isLive || resolvingRef.current || !Number.isFinite(sourceTime)) return;
     const segment = segmentRange(current);
     if (mediaKey !== `${current.bvid || ''}:${current.cid || 0}`
@@ -638,15 +812,34 @@ export function PlayerProvider({ children }) {
   const endedToken = useRef(-1);
   const advanceOnce = () => {
     const s = autoNextRef.current;
-    if (!s.queue.length || s.isLive || resolvingRef.current || (pendingSeek.current?.isSegmentSwitch || pendingSeek.current?.isSystemSeek) || endedToken.current === tokenRef.current) return;
+    if (!s.queue.length || s.isLive || resolvingRef.current || (pendingSeek.current?.isSourceSwitch || pendingSeek.current?.isSegmentSwitch || pendingSeek.current?.isSystemSeek) || endedToken.current === tokenRef.current) return;
     endedToken.current = tokenRef.current;
     nextRef.current();
   };
-  useEventListener(player, 'playToEnd', () => {
+  useEventListener(events, 'playToEnd', () => {
     listening.flush();
     advanceOnce();
   });
-  useEventListener(player, 'sourceChange', ({ source }) => {
+  useEventListener(events, 'statusChange', ({ status: nextStatus, error }) => {
+    if (nextStatus !== 'error') return;
+    // Native decoding/CDN failures can arrive after replaceAsync has resolved.
+    // Retry must fetch a fresh URL and replace the failed item, not reuse it.
+    loadedMediaKey.current = null;
+    videoLoad.current = null;
+    setVideoSource(null);
+    pendingAutoplayUri.current = null;
+    setSourcePending(false);
+    setPlayError(error?.message || '视频播放失败，请点击重试');
+  });
+  useEventListener(events, 'sourceLoad', ({ videoSource: source }) => {
+    const load = videoLoad.current;
+    if (!load || source?.uri !== load.uri) return;
+    // Unlike queue/current and replaceAsync, this event identifies the source
+    // whose native tracks actually loaded. Late events cannot reveal another card.
+    load.loaded = true;
+    publishVideoSource();
+  });
+  useEventListener(events, 'sourceChange', ({ source }) => {
     if (!pendingAutoplayUri.current || source?.uri !== pendingAutoplayUri.current) return;
     pendingAutoplayUri.current = null;
     setSourcePending(false);
@@ -657,18 +850,26 @@ export function PlayerProvider({ children }) {
       player.play();
     }
   });
-  useEventListener(player, 'timeUpdate', ({ currentTime: time }) => {
+  useEventListener(events, 'timeUpdate', ({ currentTime: time }) => {
     if (resolvingRef.current) return;
     listening.tick(time, player.playing && player.status === 'readyToPlay' && !pendingSeek.current);
     const pending = pendingSeek.current;
     if (pending) {
+      // Ticks have no source identity. Do not let even a plausible old clock
+      // unlock startup before the matching sourceLoad acknowledges the new item.
+      if (pending.isSourceSwitch && !videoLoad.current?.loaded) return;
       // Native ticks queued before a seek must not rewind the scrubber or lyrics.
       // Manual scrubbing can recover to an adjusted native position after a
-      // timeout. A segment switch must land first, even on a slow connection.
+      // timeout. Source/segment switches must land first, even on a slow connection.
       const elapsed = Date.now() - pending.started;
-      if ((pending.isSegmentSwitch || elapsed < 2500)
+      if ((pending.isSourceSwitch || pending.isSegmentSwitch || elapsed < 2500)
         && (time < pending.target - 0.5 || time > pending.target + 0.5 + elapsed / 1000)) return;
+      // A reset-to-zero tick only proves that the item was installed, not that
+      // playback started. Reject stale end events until it moves; surface mounting
+      // is independent so it does not have to wait for an audible playback tick.
+      if (pending.isSourceSwitch && playIntentRef.current && time <= pending.target) return;
       pendingSeek.current = null;
+      publishVideoSource();
     }
     setCurrentTime(time);
     if (playbackSessionRef.current) {
@@ -683,16 +884,50 @@ export function PlayerProvider({ children }) {
     if (!s.isLive && playIntentRef.current && reachedEnd) advanceOnce();
   });
 
+  useEffect(() => {
+    const load = videoLoad.current;
+    if (load?.player === player && player.status === 'readyToPlay') {
+      load.loaded = true;
+      setSourcePending(false);
+      publishVideoSource();
+    }
+    for (const previous of ownedPlayers.current) {
+      if (previous === player || previous === activePlayer.current) continue;
+      previous.release(); ownedPlayers.current.delete(previous);
+    }
+    if (player !== basePlayer && !baseRetired.current) {
+      baseRetired.current = true;
+      basePlayer.replaceAsync(null).catch(() => {});
+    }
+  }, [player, basePlayer, publishVideoSource]);
+  useEffect(() => () => {
+    tokenRef.current++;
+    for (const owned of ownedPlayers.current) owned.release();
+    ownedPlayers.current.clear();
+  }, []);
+
   const playing = !!isPlaying;
 
+  const position = isLive || resolving ? 0
+    : Math.max(0, Math.min(range ? range.to - range.from : Infinity, (currentTime || 0) - (range?.from || 0)));
+  const duration = isLive ? 0
+    : (range ? range.to - range.from : (player.duration || (current && current.duration) || 0));
+  const progressValue = useMemo(() => ({ position, duration }), [position, duration]);
+  const progressRef = useRef(progressValue);
+  progressRef.current = progressValue;
+
   const value = useMemo(() => ({
-    queue, index, current, isLive, playMode, setPlayMode,
+    queue, index, queueSource, current, isLive, playMode, setPlayMode,
     playing,
+    videoSource,
+    automaticVideoTransition,
     buffering: resolving || sourcePending || status === 'loading',
-    position: isLive || resolving ? 0 : Math.max(0, Math.min(range ? range.to - range.from : Infinity, (currentTime || 0) - (range?.from || 0))),
-    duration: isLive ? 0 : (range ? range.to - range.from : (player.duration || (current && current.duration) || 0)),
+    // Backwards-compatible imperative reads stay current without making every
+    // usePlayer consumer subscribe to the 250 ms playback clock.
+    get position() { return progressRef.current.position; },
+    get duration() { return progressRef.current.duration; },
     playError,
-    likes, isLiked, toggleLike, libraryTracks, isInLibrary, toggleLibrary, resolveTrackUp,
+    likes, isLiked, toggleLike, libraryTracks, isInLibrary, toggleLibrary, removeCollectionTrack, resolveTrackUp,
     libraryReady, getSyncLibrary, applySyncLibrary,
     account, switchAccount,
     history,
@@ -704,12 +939,15 @@ export function PlayerProvider({ children }) {
     dynamicIslandLyricsEnabled, setDynamicIslandLyricsEnabled,
     seekRevision,
     recommendMode, setRecommendMode, recommendationManager, recommendationProfile,
+    discoveryEnabled, setDiscoveryEnabled,
+    discoveryRecommendMode, setDiscoveryRecommendMode,
+    discoveryRecommendationManager, discoveryRecommendationProfile,
     setVolume, pauseAll, resume,
-    playQueue, playIndex, togglePlay, next, prev, seekTo,
+    playQueue, syncDiscoveryQueue, playIndex, togglePlay, next, prev, seekTo,
     player, // 原始 VideoPlayer：播放页/视频页的 VideoView 共用
   }), [
-    queue, index, current, isLive, playMode, setPlayMode, playing, status, currentTime, sourcePending,
-    resolving, playError, likes, isLiked, toggleLike, libraryTracks, isInLibrary, toggleLibrary, resolveTrackUp,
+    queue, index, queueSource, current, isLive, playMode, setPlayMode, playing, status, sourcePending, videoSource, automaticVideoTransition,
+    resolving, playError, likes, isLiked, toggleLike, libraryTracks, isInLibrary, toggleLibrary, removeCollectionTrack, resolveTrackUp,
     libraryReady, getSyncLibrary, applySyncLibrary, account, switchAccount, history, quality, setQuality, lyricSettings, updateLyricSettings,
     lyricEffect, setLyricEffect,
     desktopLyricsEnabled, setDesktopLyricsEnabled,
@@ -717,11 +955,17 @@ export function PlayerProvider({ children }) {
     dynamicIslandLyricsEnabled, setDynamicIslandLyricsEnabled,
     seekRevision,
     recommendMode, setRecommendMode, recommendationManager, recommendationProfile,
+    discoveryEnabled, setDiscoveryEnabled,
+    discoveryRecommendMode, setDiscoveryRecommendMode,
+    discoveryRecommendationManager, discoveryRecommendationProfile,
     setVolume, pauseAll, resume,
-    playQueue, playIndex, togglePlay, next, prev, seekTo, player,
+    playQueue, syncDiscoveryQueue, playIndex, togglePlay, next, prev, seekTo, player,
   ]);
 
-  return <PlayerContext.Provider value={value}>{children}</PlayerContext.Provider>;
+  return <PlayerContext.Provider value={value}>
+    <PlaybackProgressContext.Provider value={progressValue}>{children}</PlaybackProgressContext.Provider>
+  </PlayerContext.Provider>;
 }
 
 export const usePlayer = () => useContext(PlayerContext);
+export const usePlaybackProgress = () => useContext(PlaybackProgressContext);

@@ -7,7 +7,7 @@ import BottomSheet from './BottomSheet';
 import { colors } from '../theme';
 import * as bili from '../api/bili';
 import { get, streamHeaders } from '../api/client';
-import { usePlayer } from '../player/PlayerContext';
+import { usePlaybackProgress, usePlayer } from '../player/PlayerContext';
 import { segmentRange, segmentTracks } from '../player/track';
 import { createPlaylist } from '../store/playlists';
 import html from '../split/editor.generated.json';
@@ -24,6 +24,7 @@ export default function SplitPanel({ source, onClose }) {
 function Editor({ source, onClose }) {
   const navigation = useNavigation();
   const playback = usePlayer();
+  const progress = usePlaybackProgress();
   const playerRef = useRef(playback);
   playerRef.current = playback;
   const web = useRef(null);
@@ -60,9 +61,9 @@ function Editor({ source, onClose }) {
   useEffect(() => {
     if (!ready) return;
     const same = playback.current?.bvid === source.bvid && Number(playback.current?.cid) === Number(source.cid);
-    const position = same ? playback.position + (segmentRange(playback.current)?.from || 0) : 0;
+    const position = same ? progress.position + (segmentRange(playback.current)?.from || 0) : 0;
     web.current?.injectJavaScript(`window.splitClock?.(${position},${same && playback.playing && !playback.buffering});true;`);
-  }, [ready, playback.position, playback.playing, playback.buffering, playback.current, source]);
+  }, [ready, progress.position, playback.playing, playback.buffering, playback.current, source]);
 
   const fetchJson = async (url, body, headers) => {
     const controller = new AbortController();

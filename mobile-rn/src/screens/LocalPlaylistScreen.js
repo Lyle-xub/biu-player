@@ -5,7 +5,8 @@ import { colors } from '../theme';
 import { usePlayer } from '../player/PlayerContext';
 import { canOpenTrackUp, openTrackUp } from '../player/openTrackUp';
 import { deletePlaylist, movePlaylistTrack, removePlaylistTracks, trackKeyOf, updatePlaylist, usePlaylists } from '../store/playlists';
-import TrackRow from '../components/TrackRow';
+import CollectionTrackRow from '../components/CollectionTrackRow';
+import { useTrackActions } from '../components/TrackActions';
 import ConfirmDialog from '../components/Dialog';
 import PlaylistEditor from '../components/PlaylistEditor';
 import ReorderablePlaylist from '../components/ReorderablePlaylist';
@@ -17,6 +18,7 @@ export default function LocalPlaylistScreen({ navigation, route }) {
   const { id } = route.params || {};
   const playlists = usePlaylists();
   const { playQueue, current, resolveTrackUp } = usePlayer();
+  const trackActions = useTrackActions('playlist', id);
   const openUp = (track) => openTrackUp(navigation, track, resolveTrackUp);
   const insets = useSafeAreaInsets();
   const pl = playlists.find((p) => p.id === id);
@@ -62,6 +64,7 @@ export default function LocalPlaylistScreen({ navigation, route }) {
         <Text style={styles.title} numberOfLines={1}>{pl?.title || '歌单'}</Text>
       </View>
       {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
+      {trackActions.feedback}
       <ReorderablePlaylist data={tracks} enabled={editing} disabled={busy} bottomInset={insets.bottom}
         onDraggingChange={setDragging} onMove={(key, index) => run(() => movePlaylistTrack(id, key, index))}
         header={pl ? <>
@@ -90,23 +93,23 @@ export default function LocalPlaylistScreen({ navigation, route }) {
           </View></> : null}
         </> : null}
         renderItem={({ item: t, index }) => (
-          <View style={styles.track}>
-            <View style={styles.trackRow}>
-              {editing ? <TouchableOpacity accessibilityRole="checkbox" accessibilityLabel={`选择 ${t.title}`}
-                accessibilityState={{ checked: selected.has(trackKeyOf(t)) }} onPress={() => toggle(trackKeyOf(t))} style={styles.check}>
-                <Text style={{ color: colors.accent, fontSize: 20 }}>{selected.has(trackKeyOf(t)) ? '●' : '○'}</Text>
-              </TouchableOpacity> : null}
-              <View style={{ flex: 1 }}>
-                <TrackRow track={t} active={trackKeyOf(current) === trackKeyOf(t)}
-                  onPress={() => editing ? toggle(trackKeyOf(t)) : playQueue(tracks, index)}
-                  onLongPress={() => remove([trackKeyOf(t)])}
-                  onPressUp={!editing && canOpenTrackUp(t) ? () => openUp(t) : undefined} />
-              </View>
+          <View style={styles.trackRow}>
+            {editing ? <TouchableOpacity accessibilityRole="checkbox" accessibilityLabel={`选择 ${t.title}`}
+              accessibilityState={{ checked: selected.has(trackKeyOf(t)) }} onPress={() => toggle(trackKeyOf(t))} style={styles.check}>
+              <Text style={{ color: colors.accent, fontSize: 20 }}>{selected.has(trackKeyOf(t)) ? '●' : '○'}</Text>
+            </TouchableOpacity> : null}
+            <View style={{ flex: 1 }}>
+              <CollectionTrackRow track={t} active={trackKeyOf(current) === trackKeyOf(t)} disabled={editing || busy || dragging}
+                onPress={() => editing ? toggle(trackKeyOf(t)) : playQueue(tracks, index)}
+                onLongPress={() => remove([trackKeyOf(t)])}
+                onMenu={() => trackActions.open(t)} onRemove={() => trackActions.remove(t)}
+                onPressUp={!editing && canOpenTrackUp(t) ? () => openUp(t) : undefined} />
             </View>
           </View>
         )}
         empty={<Text style={styles.empty}>{pl ? '歌单里还没有歌曲\n在播放页菜单中选择「加入歌单」' : '歌单不存在或已被删除'}</Text>} />
       <ConfirmDialog config={confirm} onClose={() => setConfirm(null)} />
+      {trackActions.sheet}
     </SafeAreaView>
   );
 }
@@ -122,8 +125,7 @@ const styles = StyleSheet.create({
   description: { color: colors.text2, fontSize: 13, lineHeight: 20 },
   actions: { flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', gap: 6, paddingHorizontal: 14, paddingBottom: 12 },
   count: { flex: 1, minWidth: 0, color: colors.text2, fontSize: 13 },
-  button: { width: 44, height: 44, flexShrink: 0, alignItems: 'center', justifyContent: 'center', borderRadius: 22, backgroundColor: colors.card },
-  track: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.cardBorder },
+  button: { width: 48, height: 48, flexShrink: 0, alignItems: 'center', justifyContent: 'center', borderRadius: 24, backgroundColor: colors.card },
   trackRow: { flexDirection: 'row', alignItems: 'center' },
   check: { paddingLeft: 14, paddingVertical: 20, minWidth: 36, alignItems: 'center' },
   hint: { color: colors.text3, fontSize: 12, paddingHorizontal: 18, paddingBottom: 10 },

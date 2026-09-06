@@ -43,7 +43,7 @@ export function NpInfo() {
     <>
       <div className="np-artist" id="npArtist">{np ? np.artist : '—'}{np?.sourceArtist ? <span className="np-source-inline"> · {np.sourceArtist}</span> : null}</div>
       <div className="np-rule"></div>
-      <h1 className={`np-title${titleLen > 28 ? ' title-long' : ''}${titleLen > 52 ? ' title-xlong' : ''}`} id="npTitle">{title}{np?.sourceTitle ? <span className="np-source-inline"> · {np.sourceTitle}</span> : null}</h1>
+      <h1 className={`np-title${titleLen > 28 ? ' title-long' : ''}${titleLen > 52 ? ' title-xlong' : ''}`} id="npTitle"><span className="np-title-main">{title}</span>{np?.sourceTitle ? <span className="np-source-inline"><span className="np-source-text">{np.sourceTitle}</span></span> : null}</h1>
       <div className="np-album" id="npAlbum">{np ? np.album : ''}</div>
       <div className="np-src">
         <div className="np-src-meta">

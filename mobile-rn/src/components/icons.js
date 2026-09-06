@@ -31,10 +31,25 @@ export const IconSearch = ({ size, color }) => (
   </I>
 );
 
+export const IconDiscover = ({ size = 22, color }) => (
+  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color}
+    strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <Path d="M12 2.8l1.75 5.45L19.2 10l-5.45 1.75L12 17.2l-1.75-5.45L4.8 10l5.45-1.75L12 2.8z" />
+    <Path d="M18.5 15.2l.72 2.08 2.08.72-2.08.72-.72 2.08-.72-2.08-2.08-.72 2.08-.72.72-2.08z" />
+  </Svg>
+);
+
 export const IconUser = ({ size, color }) => (
   <I size={size} color={color}>
     <Circle cx={12} cy={8} r={4} {...stroke(color)} />
     <Path d="M4.5 20c1.6-3.4 4.3-5 7.5-5s5.9 1.6 7.5 5" {...stroke(color)} />
+  </I>
+);
+
+export const IconProfileSwitch = ({ size = 22, color = '#f2f3ef' }) => (
+  <I size={size} color={color}>
+    <Circle cx={9} cy={7} r={3} {...stroke(color)} />
+    <Path d="M3 19v-1a6 6 0 0 1 11-3.3M16 5h5m-2-2 2 2-2 2M21 18h-5m2-2-2 2 2 2" {...stroke(color)} />
   </I>
 );
 

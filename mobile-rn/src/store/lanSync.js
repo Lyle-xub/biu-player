@@ -1,5 +1,5 @@
 import md5 from 'js-md5';
-import { endpoint, normalize, privateIPv4 } from '../../../renderer/library-sync';
+import { endpoint, normalize, profileCount, privateIPv4 } from '../../../renderer/library-sync';
 
 export const libraryRevision = (library) => md5(JSON.stringify(normalize(library)));
 export function discoveredPeer(service, scope) {
@@ -10,7 +10,7 @@ export function discoveredPeer(service, scope) {
   // the desktop's advertised private IPv4 interfaces without subnet scanning.
   const addresses = [...new Set([...String(txt.addresses || '').split(','), ...(service.addresses || [])])].filter(privateIPv4)
     .map((ip) => ip + ':' + service.port).filter((address) => { try { endpoint(address); return true; } catch { return false; } });
-  return addresses.length ? { name: service.name, id: txt.device, token: txt.token, addresses } : null;
+  return addresses.length ? { name: service.name, id: txt.device, token: txt.token, addresses, mobile: txt.kind === 'mobile' } : null;
 }
 
 export async function lanRequest(peer, scope, path, payload, signal) {
@@ -34,7 +34,7 @@ export async function lanRequest(peer, scope, path, payload, signal) {
       const result = await response.json();
       receivedResponse = true;
       if (signal?.aborted) throw new Error('同步已取消');
-      if (!response.ok) throw new Error(result.error || '电脑同步失败');
+      if (!response.ok) throw new Error(result.error || '设备同步失败');
       if (result.version !== 2 || result.account !== scope || result.deviceId !== peer.id) throw new Error('同步账号或设备不匹配');
       // Keep the verified working route first for status/sync/ack and subsequent polls.
       peer.addresses = [address, ...peer.addresses.filter((item) => item !== address)];
@@ -43,28 +43,28 @@ export async function lanRequest(peer, scope, path, payload, signal) {
       if (signal?.aborted) throw new Error('同步已取消');
       // A server error is not a failed route: don't repeat a write elsewhere.
       if (receivedResponse) throw e;
-      failure = new Error(timedOut ? `连接电脑超时（${address}）` : `无法连接电脑（${address}），请确认电脑端仍在运行`);
+      failure = new Error(timedOut ? `连接设备超时（${address}）` : `无法连接设备（${address}），请确认对方设备仍在运行`);
       failure.cause = e;
     }
     finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
   }
-  throw failure || new Error('无法连接电脑，等待自动重连');
+  throw failure || new Error('无法连接设备，等待自动重连');
 }
 
 // One runner per foreground account, independent of the current screen.
 // Only exchange full libraries when either side changed; idle polls are tiny.
-export function startAutoSync({ scope, clientId, discovery, storage, getLibrary, applyLibrary, syncCloudKey, onStatus, interval = 4000 }) {
+export function startAutoSync({ scope, clientId, discovery, implementation = 'DNSSD', storage, getLibrary, applyLibrary, syncCloudKey, getInboundStatus, onStatus, interval = 4000 }) {
   const peers = new Map(), baselines = new Map();
   const controller = new AbortController();
   const { signal } = controller;
-  let busy = false, timer, restartTimer, lastScan = Date.now();
+  let busy = false, timer;
   const report = (value) => { if (!signal.aborted) onStatus(value); };
   const scan = () => {
     if (signal.aborted) return;
-    // The NSD backend in 0.14 uses an unsupported "UTF_8" charset for TXT
-    // records. DNSSD decodes them correctly and returns all host addresses.
-    try { discovery.scan('biu-sync', 'tcp', 'local.', 'DNSSD'); }
-    catch (e) { report({ message: '局域网发现暂不可用，将自动重试' }); }
+    // A browse is continuous. Periodically calling stop/scan leaked descriptors in
+    // the old Android embedded DNSSD backend until it aborted the whole process.
+    try { discovery.scan('biu-sync', 'tcp', 'local.', implementation); }
+    catch (e) { report({ connected: false, message: '局域网发现暂不可用，请检查网络权限或重新进入 App' }); }
   };
   async function poll() {
     if (signal.aborted || busy) return;
@@ -81,9 +81,11 @@ export function startAutoSync({ scope, clientId, discovery, storage, getLibrary,
             try { value = raw ? normalize(JSON.parse(raw)) : null; } catch { /* First exchange after a damaged snapshot. */ }
             baselines.set(peer.id, value);
           }
-          const base = baselines.get(peer.id);
           const remote = await lanRequest(peer, scope, 'status', null, signal);
           if (peers.get(peer.id) !== peer) continue;
+          const supported = { discovery: remote.discoveryProfiles === true };
+          const savedBase = baselines.get(peer.id);
+          const base = savedBase ? normalize(savedBase, supported) : null;
           // Key changes are independent of library revisions, including an idle library.
           if(syncCloudKey && remote.cloudKey) {
             try {
@@ -92,13 +94,13 @@ export function startAutoSync({ scope, clientId, discovery, storage, getLibrary,
                 :keyResult==='synced'?'云同步密钥已自动同步':''});
             } catch {report({cloudKeyMessage:'云同步密钥暂未同步，将自动重试'});}
           }
-          const local = normalize(await getLibrary(scope));
+          const local = normalize(await getLibrary(scope), supported);
           if (signal.aborted) return;
           const sharedRevision = base && libraryRevision(base);
           if (!peer.synced || sharedRevision !== remote.revision || sharedRevision !== libraryRevision(local)) {
             const result = await lanRequest(peer, scope, 'sync', { clientId, base, library: local }, signal);
             if (signal.aborted) return;
-            const incoming = normalize(result.library);
+            const incoming = normalize(result.library, supported);
             if (typeof result.receipt !== 'string') throw new Error('同步确认信息缺失');
             await applyLibrary(incoming, local, scope);
             if (signal.aborted) return;
@@ -106,9 +108,9 @@ export function startAutoSync({ scope, clientId, discovery, storage, getLibrary,
             baselines.set(peer.id, incoming);
             await lanRequest(peer, scope, 'ack', { clientId, receipt: result.receipt }, signal);
             peer.synced = true;
-            report({ message: '已同步 · ' + incoming.likes.length + ' 首喜欢 · ' + incoming.library.length + ' 首音乐库 · ' + incoming.playlists.length + ' 个歌单 · ' + (incoming.recommendation ? incoming.recommendation.profiles.length + 1 : 0) + ' 份画像',
+            report({ message: '已同步 · ' + incoming.likes.length + ' 首喜欢 · ' + incoming.library.length + ' 首音乐库 · ' + incoming.playlists.length + ' 个歌单 · ' + profileCount(incoming) + ' 份画像',
               connected: true, lastSync: Date.now() });
-          } else report({ connected: true, message: '已同步 · ' + base.likes.length + ' 首喜欢 · ' + base.library.length + ' 首音乐库 · ' + base.playlists.length + ' 个歌单 · ' + (base.recommendation ? base.recommendation.profiles.length + 1 : 0) + ' 份画像' });
+          } else report({ connected: true, message: '已同步 · ' + base.likes.length + ' 首喜欢 · ' + base.library.length + ' 首音乐库 · ' + base.playlists.length + ' 个歌单 · ' + profileCount(base) + ' 份画像' });
           connected = true;
         } catch (e) {
           if (peers.get(peer.id) !== peer) continue;
@@ -117,16 +119,16 @@ export function startAutoSync({ scope, clientId, discovery, storage, getLibrary,
         }
       }
       if (!connected && failureMessage) report({ connected: false, message: failureMessage });
-      if (!peers.size) report({ connected: false, message: '正在寻找同一 Wi-Fi 内的同账号电脑…' });
-      if (!connected && Date.now() - lastScan >= 10000) {
-        lastScan = Date.now();
-        try { discovery.stop('DNSSD'); } catch {}
-        restartTimer = setTimeout(scan, 800);
+      if (!peers.size) {
+        const inbound = getInboundStatus?.();
+        report(inbound?.connected ? inbound : { connected: false, message: '正在寻找同一 Wi-Fi 内的同账号设备…' });
       }
     } finally { busy = false; }
   }
   discovery.on('resolved', (service) => {
     const peer = discoveredPeer(service, scope);
+    // One initiator per phone pair, so reverse requests cannot race with each other.
+    if (peer?.id === clientId || peer?.mobile && clientId > peer.id) return;
     if (peer) {
       const existing = peers.get(peer.id);
       if (existing && existing.token === peer.token) {
@@ -140,16 +142,16 @@ export function startAutoSync({ scope, clientId, discovery, storage, getLibrary,
   });
   discovery.on('remove', (name) => {
     for (const [id, peer] of peers) if (peer.name === name) peers.delete(id);
-    if (!peers.size) report({ connected: false, message: '电脑已断开，等待自动重连…' });
+    if (!peers.size && !getInboundStatus?.()?.connected) report({ connected: false, message: '设备已断开，等待自动重连…' });
   });
-  discovery.on('error', () => report({ connected: false, message: '局域网发现暂不可用，请检查网络权限，将自动重试' }));
+  discovery.on('error', () => report({ connected: false, message: '局域网发现暂不可用，请检查网络权限或重新进入 App' }));
   scan();
   timer = setInterval(poll, interval);
   poll();
   return () => {
     if (signal.aborted) return;
-    controller.abort(); clearInterval(timer); clearTimeout(restartTimer);
-    try { discovery.stop('DNSSD'); } catch {}
+    controller.abort(); clearInterval(timer);
+    try { discovery.stop(implementation); } catch {}
     discovery.removeDeviceListeners();
     discovery.removeAllListeners();
   };

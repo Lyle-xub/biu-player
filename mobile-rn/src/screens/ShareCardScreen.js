@@ -34,10 +34,10 @@ export default function ShareCardScreen({ navigation, route }) {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: 'transparent' },
   header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, paddingVertical: 8 },
-  back: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+  back: { width: 48, height: 48, alignItems: 'center', justifyContent: 'center' },
   title: { flex: 1, color: colors.text, fontSize: 16, fontWeight: '600', textAlign: 'center' },
   content: { paddingHorizontal: 12, paddingTop: 10, paddingBottom: 120 },
-  linkButton: { alignSelf: 'center', minWidth: 150, height: 44, paddingHorizontal: 24,
+  linkButton: { alignSelf: 'center', minWidth: 150, height: 48, paddingHorizontal: 24,
     borderRadius: 22, alignItems: 'center', justifyContent: 'center',
     backgroundColor: 'rgba(251,114,153,.13)', borderWidth: 1, borderColor: 'rgba(251,114,153,.55)' },
   linkButtonText: { color: colors.accent, fontSize: 13, fontWeight: '700' },

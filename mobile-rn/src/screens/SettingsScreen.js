@@ -30,7 +30,28 @@ export default function SettingsScreen({ navigation }) {
     lockScreenLyricsEnabled, setLockScreenLyricsEnabled,
     dynamicIslandLyricsEnabled, setDynamicIslandLyricsEnabled,
     recommendMode, setRecommendMode,
+    discoveryEnabled, setDiscoveryEnabled,
   } = usePlayer();
+
+  return <SettingsContent navigation={navigation} {...{
+    quality, setQuality, lyricEffect, setLyricEffect,
+    desktopLyricsEnabled, setDesktopLyricsEnabled,
+    lockScreenLyricsEnabled, setLockScreenLyricsEnabled,
+    dynamicIslandLyricsEnabled, setDynamicIslandLyricsEnabled,
+    recommendMode, setRecommendMode,
+    discoveryEnabled, setDiscoveryEnabled,
+  }} />;
+}
+
+// Playback ticks must not rebuild the settings ScrollView and its native views.
+const SettingsContent = React.memo(function SettingsContent({ navigation,
+  quality, setQuality, lyricEffect, setLyricEffect,
+  desktopLyricsEnabled, setDesktopLyricsEnabled,
+  lockScreenLyricsEnabled, setLockScreenLyricsEnabled,
+  dynamicIslandLyricsEnabled, setDynamicIslandLyricsEnabled,
+  recommendMode, setRecommendMode,
+  discoveryEnabled, setDiscoveryEnabled,
+}) {
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -61,6 +82,25 @@ export default function SettingsScreen({ navigation }) {
         </View>
 
         <RecommendationProfileCard />
+
+        <Text style={styles.sectionTitle}>卡片发现</Text>
+        <View style={styles.card}>
+          <View style={styles.featureSwitchRow}>
+            <View style={styles.switchInfo}>
+              <Text style={styles.rowTitle}>启用卡片发现</Text>
+              <Text style={styles.rowDesc}>在底部显示可滑动的独立推荐页</Text>
+            </View>
+            <Switch accessibilityLabel="启用卡片发现" value={discoveryEnabled}
+              onValueChange={setDiscoveryEnabled} trackColor={{ false: '#363832', true: colors.accentSoft }}
+              thumbColor={discoveryEnabled ? colors.accent : '#a4a69f'} />
+          </View>
+          {discoveryEnabled ? <View style={styles.discoveryOptions}>
+            <Text style={styles.rowTitle}>视频来源</Text>
+            <Text style={styles.rowDesc}>B 站 Web 推荐 → 标签匹配 → 相关视频</Text>
+            <Text style={styles.qualityDesc}>在发现页右上角切换画像；下方可管理发现页的独立画像。</Text>
+          </View> : null}
+        </View>
+        {discoveryEnabled ? <RecommendationProfileCard source="discovery" /> : null}
 
         <Text style={styles.sectionTitle}>播放</Text>
         <View style={styles.card}>
@@ -153,7 +193,7 @@ export default function SettingsScreen({ navigation }) {
       </ScrollView>
     </SafeAreaView>
   );
-}
+});
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: 'transparent' },
@@ -161,7 +201,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', gap: 10,
     paddingHorizontal: 10, paddingVertical: 8,
   },
-  backBtn: { padding: 6 },
+  backBtn: { width: 48, height: 48, alignItems: 'center', justifyContent: 'center' },
   title: { color: colors.text, fontSize: 16, fontWeight: '600', flex: 1 },
   content: { paddingBottom: 130 },
   sectionTitle: {
@@ -180,17 +220,22 @@ const styles = StyleSheet.create({
     borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.cardBorder,
   },
   switchInfo: { flex: 1, minWidth: 0 },
+  featureSwitchRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  discoveryOptions: {
+    marginTop: 16, paddingTop: 14,
+    borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.cardBorder,
+  },
   seg: {
     flexDirection: 'row', gap: 6, marginTop: 12,
     backgroundColor: 'rgba(255,255,255,0.05)', borderRadius: 12, padding: 4,
   },
   segBtn: {
-    flex: 1, height: 34, borderRadius: 9,
+    flex: 1, height: 48, borderRadius: 9,
     alignItems: 'center', justifyContent: 'center',
   },
   segBtnOn: { backgroundColor: colors.accentSoft },
   qualityOptions: { flexWrap: 'nowrap', gap: 4 },
-  qualityOption: { flex: 1, minWidth: 0, height: 38 },
+  qualityOption: { flex: 1, minWidth: 0, height: 48 },
   segText: { color: colors.text2, fontSize: 13 },
   segTextOn: { color: colors.accent, fontWeight: '600' },
   qualityDesc: { color: colors.text3, fontSize: 11, marginTop: 10 },

@@ -1,11 +1,12 @@
 import React from 'react';
-import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { FlatList, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors } from '../theme';
 import { usePlayer } from '../player/PlayerContext';
 import { canOpenTrackUp, openTrackUp } from '../player/openTrackUp';
 import { trackKeyOf } from '../player/track';
-import TrackRow from '../components/TrackRow';
+import CollectionTrackRow from '../components/CollectionTrackRow';
+import { useTrackActions } from '../components/TrackActions';
 import CollectionToolbar, { useCollectionView } from '../components/CollectionToolbar';
 import { IconBack, IconPlaylist } from '../components/icons';
 
@@ -13,6 +14,7 @@ export default function MusicLibraryScreen({ navigation }) {
   const { libraryTracks, playQueue, current, resolveTrackUp } = usePlayer();
   const openUp = (track) => openTrackUp(navigation, track, resolveTrackUp);
   const collection = useCollectionView(libraryTracks);
+  const actions = useTrackActions('library');
   const tracks = collection.visibleTracks;
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -25,22 +27,24 @@ export default function MusicLibraryScreen({ navigation }) {
       </View>
       <CollectionToolbar query={collection.query} onQuery={collection.setQuery} sort={collection.sort}
         onSort={collection.setSort} resultCount={tracks.length} />
-      <ScrollView contentContainerStyle={styles.content}>
-        {tracks.length ? tracks.map((track, index) => (
-          <TrackRow
+      {actions.feedback}
+      <FlatList data={tracks} keyExtractor={trackKeyOf} contentContainerStyle={styles.content}
+        renderItem={({ item: track, index }) => (
+          <CollectionTrackRow
             key={trackKeyOf(track) || index}
             track={track}
             active={trackKeyOf(current) === trackKeyOf(track)}
             onPress={() => playQueue(tracks, index)}
+            onMenu={() => actions.open(track)} onRemove={() => actions.remove(track)}
             onPressUp={canOpenTrackUp(track) ? () => openUp(track) : undefined}
           />
-        )) : !libraryTracks.length ? (
+        )} ListEmptyComponent={!libraryTracks.length ? (
           <View style={styles.emptyBox}>
             <IconPlaylist size={30} color={colors.text3} />
             <Text style={styles.empty}>音乐库还是空的{`\n`}喜欢歌曲，或从歌曲菜单加入音乐库</Text>
           </View>
-        ) : <Text style={styles.noResult}>没有找到匹配的歌曲</Text>}
-      </ScrollView>
+        ) : <Text style={styles.noResult}>没有找到匹配的歌曲</Text>} />
+      {actions.sheet}
     </SafeAreaView>
   );
 }

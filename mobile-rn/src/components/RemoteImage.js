@@ -57,7 +57,7 @@ export default function RemoteImage({ uri, width, height, style, fallback = null
           contentFit={props.contentFit || 'cover'}
           cachePolicy={cachePolicy}
           recyclingKey={uri}
-          transition={attempt ? 0 : 120}
+          transition={attempt ? 0 : (props.transition ?? 120)}
           onError={retry}
         />
       ) : null}
