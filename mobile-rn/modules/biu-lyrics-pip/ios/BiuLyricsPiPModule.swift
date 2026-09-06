@@ -79,7 +79,7 @@ private final class BiuLyricsPiPRenderer: NSObject,
   AVPictureInPictureControllerDelegate,
   AVPictureInPictureSampleBufferPlaybackDelegate {
   private let width = 900
-  private let height = 200
+  private let height = 100
   private let displayLayer = AVSampleBufferDisplayLayer()
   private var controller: AVPictureInPictureController?
   private weak var hostView: UIView?
@@ -91,6 +91,10 @@ private final class BiuLyricsPiPRenderer: NSObject,
   private var payload = BiuLyricsFrame.decode("{}")
   private var metrics: [BiuMonetMetrics?] = [nil, nil]
   private var clock = BiuLyricsClock()
+  private var colorFrom = BiuMonetPalette.background
+  private var colorTo = BiuMonetPalette.background
+  private var colorChangedAt: CFTimeInterval = 0
+  private var hasBackground = false
 
   override init() {
     super.init()
@@ -121,9 +125,19 @@ private final class BiuLyricsPiPRenderer: NSObject,
   func update(_ json: String) {
     let next = BiuLyricsFrame.decode(json)
     clock.update(next, at: Date())
+    let now = CACurrentMediaTime()
+    if !hasBackground {
+      colorFrom = next.backgroundColor
+      colorTo = next.backgroundColor
+      hasBackground = true
+    } else if !colorTo.isEqual(next.backgroundColor) {
+      colorFrom = backgroundColor(at: now)
+      colorTo = next.backgroundColor
+      colorChangedAt = now
+    }
     for slot in 0..<2 {
       if next.line(slot) != payload.line(slot) {
-        metrics[slot] = next.line(slot).map { BiuMonetMetrics(line: $0, fontSize: 44) }
+        metrics[slot] = next.line(slot).map { BiuMonetMetrics(line: $0, fontSize: 32) }
       }
     }
     payload = next
@@ -264,24 +278,46 @@ private final class BiuLyricsPiPRenderer: NSObject,
     return buffer
   }
 
+  private func backgroundColor(at time: CFTimeInterval) -> UIColor {
+    let progress = CGFloat(min(1, max(0, (time - colorChangedAt) / 0.9)))
+    let t = progress * progress * (3 - 2 * progress)
+    var r0: CGFloat = 0, g0: CGFloat = 0, b0: CGFloat = 0
+    var r1: CGFloat = 0, g1: CGFloat = 0, b1: CGFloat = 0
+    colorFrom.getRed(&r0, green: &g0, blue: &b0, alpha: nil)
+    colorTo.getRed(&r1, green: &g1, blue: &b1, alpha: nil)
+    return UIColor(red: r0 + (r1 - r0) * t, green: g0 + (g1 - g0) * t,
+      blue: b0 + (b1 - b0) * t, alpha: 1)
+  }
+
   private func drawLyrics(in context: CGContext) {
     let date = Date()
     let time = clock.time(at: date)
     let focus = payload.activeSlot ?? 0
     var hue: CGFloat = 0, saturation: CGFloat = 0
-    payload.backgroundColor.getHue(&hue, saturation: &saturation, brightness: nil, alpha: nil)
+    let ambientTime = CACurrentMediaTime()
+    backgroundColor(at: ambientTime).getHue(&hue, saturation: &saturation, brightness: nil, alpha: nil)
     // Mostly neutral charcoal, with cover color confined to soft light pools.
     // This keeps pale, highly saturated and skin-tone covers equally readable.
     UIColor(hue: hue, saturation: min(0.18, saturation * 0.25), brightness: 0.095, alpha: 1).setFill()
     context.fill(CGRect(x: 0, y: 0, width: width, height: height))
-    let drift = CGFloat(sin(time / 18))
-    let glowCenter = CGPoint(x: CGFloat(width) * (0.28 + 0.08 * drift), y: 0)
-    let tint = UIColor(hue: hue, saturation: min(0.48, saturation * 0.65), brightness: 0.46, alpha: 0.27)
-    if let glow = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: [
-      tint.cgColor, tint.withAlphaComponent(0).cgColor
-    ] as CFArray, locations: [0, 1]) {
-      context.drawRadialGradient(glow, startCenter: glowCenter, startRadius: 0,
-        endCenter: glowCenter, endRadius: CGFloat(width) * 0.58, options: [])
+    // A continuous ambient clock survives seeks and track changes. Broad,
+    // faint pools move behind the glyphs without shifting the lyric scan.
+    for pool in 0..<2 {
+      let phase = ambientTime / 9 + Double(pool) * .pi
+      let center = CGPoint(x: CGFloat(width) * (0.5 + 0.28 * CGFloat(sin(phase))),
+        y: CGFloat(height) * (0.5 + 0.4 * CGFloat(cos(phase * 0.7))))
+      let tint = UIColor(hue: hue, saturation: min(0.48, saturation * 0.65),
+        brightness: 0.50, alpha: pool == 0 ? 0.23 : 0.13)
+      if let glow = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: [
+        tint.cgColor, tint.withAlphaComponent(0).cgColor
+      ] as CFArray, locations: [0, 1]) {
+        context.saveGState()
+        context.translateBy(x: center.x, y: center.y)
+        context.scaleBy(x: 1, y: 0.32)
+        context.drawRadialGradient(glow, startCenter: .zero, startRadius: 0,
+          endCenter: .zero, endRadius: CGFloat(width) * 0.42, options: [])
+        context.restoreGState()
+      }
     }
     // Fixed, equal-size rows; a line change is an immediate replacement.
     for slot in 0..<2 {
@@ -289,22 +325,7 @@ private final class BiuLyricsPiPRenderer: NSObject,
         drawSlot(current, slot: slot, time: time, focused: focus == slot, in: context)
       }
     }
-    // PiP adds its own rounded mask. Keep the entire rim inside that mask,
-    // and paint it after lyric halos so they cannot wash out parts of it.
-    context.saveGState()
-    let rim = CGRect(x: 14, y: 14, width: CGFloat(width) - 28, height: CGFloat(height) - 28)
-    context.addPath(CGPath(roundedRect: rim, cornerWidth: 64, cornerHeight: 64, transform: nil))
-    context.setLineWidth(2.5)
-    context.replacePathWithStrokedPath()
-    context.clip()
-    if let highlight = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: [
-      UIColor.white.withAlphaComponent(0.30).cgColor,
-      UIColor.white.withAlphaComponent(0.14).cgColor
-    ] as CFArray, locations: [0, 1]) {
-      context.drawLinearGradient(highlight, start: .zero,
-        end: CGPoint(x: width, y: height), options: [])
-    }
-    context.restoreGState()
+    // The system PiP window supplies the outer mask; no inset rounded frame.
   }
 
   private func drawSlot(_ metrics: BiuMonetMetrics, slot: Int, time: Double, focused: Bool,
@@ -313,7 +334,7 @@ private final class BiuLyricsPiPRenderer: NSObject,
     let renderTime = focused ? time : min(time, metrics.line.from)
     let scroll = metrics.scroll(at: renderTime, viewport: viewport)
     let x = 44 + max(0, (viewport - metrics.width) / 2) - scroll
-    let y = CGFloat(slot == 0 ? 44 : 102)
+    let y = CGFloat(slot == 0 ? 10 : 52)
     context.saveGState()
     context.clip(to: CGRect(x: 30, y: 0, width: CGFloat(width) - 60, height: CGFloat(height)))
     context.setAlpha(focused ? 1 : 0.72)

@@ -5,19 +5,15 @@ import { trackKeyOf, segmentRange } from '../player/track';
 import { loadTrackLyrics } from '../player/loadLyrics';
 import { prepareSystemLyrics, systemLyricSlots } from '../player/systemLyrics';
 import { LyricsLiveActivity, LyricsWidget } from '../widgets/LyricsWidgets';
-import { extractCoverColor, setLyricsPiPEnabled, updateLyricsPiP } from 'biu-lyrics-pip';
+import { setLyricsPiPEnabled, updateLyricsPiP } from 'biu-lyrics-pip';
+import { loadCoverColor } from '../player/coverColor';
 
 const supported = Platform.OS === 'ios';
 const defaultCoverColor = [9 / 255, 9 / 255, 11 / 255];
-function artworkURL(value) {
-  const url = String(value || '').trim();
-  if (url.startsWith('//')) return `https:${url}`;
-  return url.replace(/^http:/, 'https:');
-}
 
 export default function LyricsActivitySync() {
   const {
-    current, position, playing, buffering, lyricSettings, seekRevision,
+    current, queue, index, position, playing, buffering, lyricSettings, seekRevision,
     desktopLyricsEnabled, lockScreenLyricsEnabled, dynamicIslandLyricsEnabled,
   } = usePlayer();
   const [lyricResult, setLyricResult] = useState({ key: null, lines: [] });
@@ -65,15 +61,23 @@ export default function LyricsActivitySync() {
   }, [needsLyrics, key, current?.cid, setting?.lines]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
+    if (!supported || !needsLyrics) return undefined;
     let cancelled = false;
-    setCoverColor(defaultCoverColor);
-    const url = artworkURL(current?.pic);
-    if (!supported || !url || !extractCoverColor) return undefined;
-    extractCoverColor(url).then((value) => {
-      if (!cancelled && Array.isArray(value)) setCoverColor(value);
-    }).catch(() => {});
+    // Retain the displayed color while an uncached cover loads; never insert
+    // a default-color frame between two songs (including split tracks).
+    loadCoverColor(current?.pic).then((value) => {
+      if (!cancelled && value) setCoverColor(value);
+    });
     return () => { cancelled = true; };
-  }, [key, current?.pic]);
+  }, [needsLyrics, current?.pic]);
+
+  useEffect(() => {
+    if (!supported || !needsLyrics || !queue?.length) return;
+    for (const offset of [1, 2, -1]) {
+      const next = queue[((index || 0) + offset + queue.length) % queue.length];
+      void loadCoverColor(next?.pic);
+    }
+  }, [needsLyrics, queue, index]);
 
   const preparedLines = useMemo(() => prepareSystemLyrics(lines), [lines]);
   // Loading lyrics or updating settings must not stamp an old position as a

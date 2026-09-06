@@ -277,6 +277,52 @@ test('system lyrics share offsets and seek timing, and cannot return after disab
   assert.equal(pip.at(-1), false);
 });
 
+test('desktop lyric cover colors prefetch, share split-track requests and never flash a default on switches', async () => {
+  const pending = new Map(), calls = [], frames = [];
+  const tracks = ['a', 'b', 'c'].map(bvid => ({ bvid, pic: `//covers/${bvid}` }));
+  let state = { current: tracks[0], queue: tracks, index: 0, position: 0, playing: true,
+    lyricSettings: {}, desktopLyricsEnabled: true };
+  const load = loader({
+    'react-native': { Platform: { OS: 'ios' } },
+    'src/player/PlayerContext': { usePlayer: () => state },
+    'src/player/loadLyrics': { loadTrackLyrics: async () => [] },
+    'biu-lyrics-pip': {
+      setLyricsPiPEnabled() {}, updateLyricsPiP: frame => frames.push(frame),
+      extractCoverColor: url => { calls.push(url); return new Promise(resolve => pending.set(url, resolve)); },
+    },
+  });
+  const Sync = load('src/components/LyricsActivitySync.js').default;
+  const { loadCoverColor } = load('src/player/coverColor.js');
+  let tree;
+  await act(async () => { tree = create(React.createElement(Sync)); });
+  assert.deepEqual(calls.sort(), ['https://covers/a', 'https://covers/b', 'https://covers/c']);
+  const a = [0.8, 0.2, 0.1], b = [0.1, 0.3, 0.9], c = [0.2, 0.7, 0.4];
+  await act(async () => { pending.get('https://covers/a')(a); pending.get('https://covers/b')(b); });
+  assert.deepEqual(frames.at(-1).coverColor, a);
+  const switchTo = async index => {
+    state = { ...state, current: tracks[index], index };
+    await act(async () => { tree.update(React.createElement(Sync)); });
+  };
+  const before = frames.length;
+  await switchTo(1);
+  assert.deepEqual(frames.at(-1).coverColor, b, 'next track already has its extracted color');
+  assert.ok(frames.slice(before).every(frame => frame.coverColor === a || frame.coverColor === b));
+  await switchTo(2);
+  assert.deepEqual(frames.at(-1).coverColor, b, 'uncached color retains previous background');
+  await switchTo(1);
+  await act(async () => pending.get('https://covers/c')(c));
+  assert.deepEqual(frames.at(-1).coverColor, b, 'late response cannot recolor a newer song');
+  assert.deepEqual(await loadCoverColor('http://covers/b'), b);
+  assert.equal(calls.length, 3, 'same video/split cover and normalized URLs reuse the cache');
+  const failed = loadCoverColor('https://covers/failure');
+  await act(async () => { await Promise.resolve(); pending.get('https://covers/failure')(null); });
+  assert.equal(await failed, null);
+  const retry = loadCoverColor('https://covers/failure');
+  await act(async () => { await Promise.resolve(); pending.get('https://covers/failure')(a); });
+  assert.deepEqual(await retry, a, 'transient failures are retryable');
+  await act(async () => tree.unmount());
+});
+
 test('desktop and mobile recommendations, ranking and search retain short videos', async () => {
   let detailCalls = 0;
   const videos = [12, 30, 60].map((duration) => ({ bvid: 'BVshort' + duration, duration,
