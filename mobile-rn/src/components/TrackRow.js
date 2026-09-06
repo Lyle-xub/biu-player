@@ -4,8 +4,11 @@ import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { colors, fmtDur } from '../theme';
 import { IconNote } from './icons';
 import RemoteImage from './RemoteImage';
+import { TrackTitle, TrackArtist } from './TrackAttribution';
+import { useTrackSource } from '../player/trackSource';
 
-export default function TrackRow({ track, onPress, onPressUp, onLongPress, active = false }) {
+export default function TrackRow({ track: originalTrack, onPress, onPressUp, onLongPress, active = false }) {
+  const track = useTrackSource(originalTrack);
   return (
     <TouchableOpacity style={styles.row} activeOpacity={0.75} onPress={onPress} onLongPress={onLongPress} delayLongPress={380}>
       <RemoteImage uri={track.pic} width={180} height={180} style={styles.cover}
@@ -13,16 +16,8 @@ export default function TrackRow({ track, onPress, onPressUp, onLongPress, activ
           <IconNote size={18} color={colors.accent} />
         </View>} />
       <View style={styles.body}>
-        <Text style={[styles.title, active && { color: colors.accent }]} numberOfLines={1}>
-          {track.title}
-        </Text>
-        {onPressUp && track.up ? (
-          <TouchableOpacity onPress={onPressUp} hitSlop={6}>
-            <Text style={[styles.up, styles.upLink]} numberOfLines={1}>{track.up}</Text>
-          </TouchableOpacity>
-        ) : (
-          <Text style={styles.up} numberOfLines={1}>{track.up}</Text>
-        )}
+        <TrackTitle track={track} style={[styles.title, active && { color: colors.accent }]} />
+        <View style={styles.upRow}><TrackArtist track={track} onPressUp={onPressUp} style={styles.up} /></View>
       </View>
       <Text style={styles.dur}>{fmtDur(track.duration)}</Text>
     </TouchableOpacity>
@@ -38,7 +33,7 @@ const styles = StyleSheet.create({
   coverFallback: { alignItems: 'center', justifyContent: 'center' },
   body: { flex: 1, minWidth: 0 },
   title: { color: colors.text, fontSize: 14, fontWeight: '500' },
-  up: { color: colors.text2, fontSize: 11, marginTop: 3 },
-  upLink: { color: colors.accent },
+  upRow: { marginTop: 3 },
+  up: { color: colors.text2, fontSize: 11 },
   dur: { color: colors.text3, fontSize: 11, fontVariant: ['tabular-nums'] },
 });

@@ -8,6 +8,7 @@ import { colors, fmtCount } from '../theme';
 import * as bili from '../api/bili';
 import { imageHeaders } from '../api/client';
 import { usePlayer } from '../player/PlayerContext';
+import { canOpenTrackUp, openTrackUp } from '../player/openTrackUp';
 import TrackRow from '../components/TrackRow';
 import { IconSearch, IconUser } from '../components/icons';
 
@@ -40,7 +41,8 @@ function UpRow({ up, onPress }) {
 }
 
 export default function SearchScreen({ navigation }) {
-  const { playQueue, current } = usePlayer();
+  const { playQueue, current, resolveTrackUp } = usePlayer();
+  const openUp = (track) => openTrackUp(navigation, track, resolveTrackUp);
   const [keyword, setKeyword] = useState('');
   const [seg, setSeg] = useState('video'); // video | up
   const [order, setOrder] = useState('');
@@ -156,7 +158,7 @@ export default function SearchScreen({ navigation }) {
               track={item}
               active={!!current && current.bvid === item.bvid}
               onPress={() => playQueue(list, index, 0, 'search')}
-              onPressUp={item.mid ? () => navigation.navigate('Up', { mid: item.mid }) : undefined}
+              onPressUp={canOpenTrackUp(item) ? () => openUp(item) : undefined}
             />
           ))}
           contentContainerStyle={styles.listContent}

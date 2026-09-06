@@ -750,10 +750,12 @@ const api = {
         version: '1', feed_version: 'V8', homepage_ver: '1', ps: '20',
         fresh_idx: String(index), brush: String(index), fresh_type: '4',
       });
-      const data = await jget(
+      const request = () => jget(
         'https://api.bilibili.com/x/web-interface/wbi/index/top/feed/rcmd?' + query,
-        { wbi: true },
-      );
+        { wbi: true });
+      let data;
+      try { data = await request(); }
+      catch { await new Promise((resolve) => setTimeout(resolve, 400)); data = await request(); }
       const candidates = (data.item || []).filter((item) =>
         item.goto === 'av' && item.bvid && item.owner && !seen.has(item.bvid));
       candidates.forEach((item) => seen.add(item.bvid));

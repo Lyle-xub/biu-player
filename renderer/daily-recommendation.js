@@ -101,6 +101,9 @@
     for (const k of ['cid', 'aid']) if (Number.isFinite(Number(t[k]))) out[k] = Number(t[k]);
     if (t.isSegment && Number.isFinite(t.from) && Number.isFinite(t.to) && t.from >= 0 && t.to > t.from) {
       Object.assign(out, { isSegment: true, from: t.from, to: t.to });
+      for (const key of ['parentBvid', 'parentTitle', 'parentUp', 'parentMid']) {
+        if (t[key] != null) out[key] = clean(t[key]);
+      }
     }
     if (t.recommendationReason) out.recommendationReason = clean(t.recommendationReason, 240);
     if (Array.isArray(t.matchedTags)) out.matchedTags = t.matchedTags.map((v) => clean(v, 40)).slice(0, 5);
@@ -125,7 +128,8 @@
         complete: !!v.complete && !(Array.isArray(v.tracks) ? v.tracks : []).some(rejected),
         rounds: (Array.isArray(v.tracks) ? v.tracks : []).some(rejected) ? 0 : Math.max(0, Math.min(3, Number(v.rounds) || 0)), error: clean(v.error, 180),
         themes: (Array.isArray(v.themes) ? v.themes : []).map((v) => clean(v, 40)).slice(0, 3) })), (v) => `${v.date}:${v.profileId}`)
-      .sort((a, b) => a.date.localeCompare(b.date) || a.profileId.localeCompare(b.profileId)).slice(-28);
+      .sort((a, b) => a.date.localeCompare(b.date) || a.profileId.localeCompare(b.profileId)).slice(-28)
+      .map((v) => ({ ...v, complete: v.complete && v.tracks.length >= 15 }));
     return { version: 1, duration, profileId: clean(value.profileId || 'auto', 40), profileAt: Math.max(0, Number(value.profileAt) || 0),
       ignored: rules(value.ignored), muted: rules(value.muted), blocked: rules(value.blocked), events, days,
       candidates: unique((Array.isArray(value.candidates) ? value.candidates : []).map(compact).filter(Boolean), (t) => t.bvid)

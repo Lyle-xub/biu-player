@@ -6,12 +6,17 @@ import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-nati
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors } from '../theme';
 import { usePlayer } from '../player/PlayerContext';
+import { canOpenTrackUp, openTrackUp } from '../player/openTrackUp';
 import { trackKeyOf } from '../player/track';
 import TrackRow from '../components/TrackRow';
+import CollectionToolbar, { useCollectionView } from '../components/CollectionToolbar';
 import { IconBack, IconHeart } from '../components/icons';
 
 export default function LikesScreen({ navigation }) {
-  const { likes, playQueue, current } = usePlayer();
+  const { likes, playQueue, current, resolveTrackUp } = usePlayer();
+  const openUp = (track) => openTrackUp(navigation, track, resolveTrackUp);
+  const collection = useCollectionView(likes);
+  const tracks = collection.visibleTracks;
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -22,23 +27,25 @@ export default function LikesScreen({ navigation }) {
         <Text style={styles.title}>我的喜欢</Text>
         <Text style={styles.count}>{likes.length} 首</Text>
       </View>
+      <CollectionToolbar query={collection.query} onQuery={collection.setQuery} sort={collection.sort}
+        onSort={collection.setSort} resultCount={tracks.length} />
       <ScrollView contentContainerStyle={styles.content}>
-        {likes.length ? (
-          likes.map((t, i) => (
+        {tracks.length ? (
+          tracks.map((t, i) => (
             <TrackRow
               key={trackKeyOf(t) || i}
               track={t}
               active={trackKeyOf(current) === trackKeyOf(t)}
-              onPress={() => playQueue(likes, i)}
-              onPressUp={t.mid ? () => navigation.navigate('Up', { mid: t.mid }) : undefined}
+              onPress={() => playQueue(tracks, i)}
+              onPressUp={canOpenTrackUp(t) ? () => openUp(t) : undefined}
             />
           ))
-        ) : (
+        ) : !likes.length ? (
           <View style={styles.emptyBox}>
             <IconHeart size={30} color={colors.text3} />
             <Text style={styles.empty}>还没有喜欢的歌曲{'\n'}播放页点小心心，歌就会收进来</Text>
           </View>
-        )}
+        ) : <Text style={styles.noResult}>没有找到匹配的歌曲</Text>}
       </ScrollView>
     </SafeAreaView>
   );
@@ -56,4 +63,5 @@ const styles = StyleSheet.create({
   content: { paddingBottom: 130 },
   emptyBox: { alignItems: 'center', marginTop: 96, gap: 14 },
   empty: { color: colors.text3, fontSize: 13, textAlign: 'center', lineHeight: 20 },
+  noResult: { color: colors.text3, fontSize: 13, textAlign: 'center', marginTop: 72 },
 });

@@ -21,6 +21,8 @@ function loadApi(platform, get) {
   const module = { exports: {} };
   new Function('require', 'module', 'exports', code)((name) => {
     if (name === './client') return { get };
+    if (name === './mediaUrl') return { mediaUrl: value => value };
+
     if (name === '../../../renderer/subtitles') return require('../renderer/subtitles');
     throw new Error('Unexpected import: ' + name);
   }, module, module.exports);

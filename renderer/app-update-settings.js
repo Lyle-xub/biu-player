@@ -45,12 +45,23 @@
     bridge.onUpdateStatus(render);
     bridge.updateStatus().then(render).catch(() => {});
   }
-  window.BiuAppUpdates = { mount(host) {
+  window.BiuAppUpdates = {
+    beginRecommendation() {
+      bridge.updateActivity?.(1).catch(() => {});
+      let ended = false;
+      return () => {
+        if (ended) return;
+        ended = true;
+        bridge.updateActivity?.(-1).catch(() => {});
+      };
+    },
+    mount(host) {
     if (!host) return;
     start(); host.innerHTML = markup; hosts.add(host); render(state);
     host.querySelector('[data-update="action"]').onclick = () => safely(action);
     for (const key of ['enabled', 'autoDownload']) host.querySelector(`[data-update="${key}"]`).onclick = () => safely(() => bridge.updateConfigure({ [key]: !state[key] }));
     return () => hosts.delete(host);
-  } };
+    },
+  };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true }); else start();
 })();

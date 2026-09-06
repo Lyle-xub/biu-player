@@ -1,6 +1,6 @@
 /* Biu Player RN · 迷你播放条：悬浮在底部 tab 栏上方，有 current 才显示 */
-import React, { useState } from 'react';
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Animated, Easing, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import { BlurView } from 'expo-blur';
@@ -38,21 +38,47 @@ function GlassBackground({ blurTarget }) {
   );
 }
 
-export default function MiniBar({ blurTarget }) {
+export default function MiniBar({ blurTarget, hasBottomTabs = true, visible = true }) {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation();
-  const { current, isLive, playing, togglePlay, next, position, duration } = usePlayer();
+  const { current, isLive, playing, buffering, togglePlay, next, position, duration } = usePlayer();
   const [queueOpen, setQueueOpen] = useState(false);
+  const lift = useRef(new Animated.Value(hasBottomTabs ? 1 : 0)).current;
+  const reveal = useRef(new Animated.Value(visible ? 1 : 0)).current;
+  useEffect(() => {
+    const animation = Animated.timing(lift, {
+      toValue: hasBottomTabs ? 1 : 0,
+      duration: 260,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    });
+    animation.start();
+    return () => animation.stop();
+  }, [hasBottomTabs, lift]);
+  useEffect(() => {
+    if (!visible) setQueueOpen(false);
+    const animation = Animated.timing(reveal, {
+      toValue: visible ? 1 : 0,
+      duration: visible ? 180 : 120,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    });
+    animation.start();
+    return () => animation.stop();
+  }, [reveal, visible]);
   if (!current) return null;
 
   const progress = !isLive && Number.isFinite(duration) && duration > 0 && Number.isFinite(position)
     ? Math.max(0, Math.min(1, position / duration)) : 0;
-  // 贴底 tab 栏默认高度 49 + 安全区
-  const bottom = 49 + insets.bottom + 8;
+  const translateY = lift.interpolate({ inputRange: [0, 1], outputRange: [0, -49] });
 
   return (
     <>
-      <View style={[styles.bar, { bottom }]}>
+      <Animated.View pointerEvents={visible ? 'auto' : 'none'} style={[styles.bar, {
+        bottom: insets.bottom + 8,
+        opacity: reveal,
+        transform: [{ translateY }, { translateY: reveal.interpolate({ inputRange: [0, 1], outputRange: [16, 0] }) }],
+      }]}>
         <GlassBackground blurTarget={blurTarget} />
         <TouchableOpacity style={styles.openPlayer} activeOpacity={0.9}
           accessibilityRole="button" accessibilityLabel={`打开播放页：${current.title}`}
@@ -82,9 +108,10 @@ export default function MiniBar({ blurTarget }) {
             <Text style={styles.up} numberOfLines={1}>{current.up}</Text>
           </View>
         </TouchableOpacity>
-        <TouchableOpacity style={styles.ctrlBtn} onPress={togglePlay}
-          accessibilityRole="button" accessibilityLabel={playing ? '暂停' : '播放'}>
-          {playing ? <IconPause size={18} color="#fff" /> : <IconPlay size={18} color="#fff" />}
+        <TouchableOpacity style={styles.ctrlBtn} onPress={togglePlay} disabled={buffering}
+          accessibilityRole="button" accessibilityState={{ busy: buffering }} accessibilityLabel={buffering ? '正在加载' : (playing ? '暂停' : '播放')}>
+          {buffering ? <ActivityIndicator size="small" color="#fff" />
+            : playing ? <IconPause size={18} color="#fff" /> : <IconPlay size={18} color="#fff" />}
         </TouchableOpacity>
         <TouchableOpacity style={styles.ctrlBtn} onPress={next}
           accessibilityRole="button" accessibilityLabel={isLive ? '下一电台' : '下一首'}>
@@ -94,7 +121,7 @@ export default function MiniBar({ blurTarget }) {
           accessibilityRole="button" accessibilityLabel="打开播放列表">
           <IconQueue size={20} color="rgba(255,255,255,0.85)" />
         </TouchableOpacity>
-      </View>
+      </Animated.View>
       <BottomSheet visible={queueOpen} onClose={() => setQueueOpen(false)} style={styles.queueSheet}>
         <PlaybackQueue onClose={() => setQueueOpen(false)} />
       </BottomSheet>
@@ -110,6 +137,7 @@ const styles = StyleSheet.create({
     paddingLeft: 4, paddingRight: 6,
     shadowColor: '#000', shadowOpacity: 0.35, shadowRadius: 18, shadowOffset: { width: 0, height: 10 },
     elevation: 12,
+    zIndex: 80,
   },
   glassClip: {
     position: 'absolute', top: 0, left: 0, right: 0, height: 58,

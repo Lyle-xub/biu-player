@@ -3,7 +3,7 @@
  * 在线播放清晰度：音画共用视频流，保留 biu.quality 以兼容旧设置。
  */
 import React from 'react';
-import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Platform, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors } from '../theme';
 import { usePlayer } from '../player/PlayerContext';
@@ -25,7 +25,11 @@ const RECOMMEND_MODES = [
 
 export default function SettingsScreen({ navigation }) {
   const {
-    quality, setQuality, lyricEffect, setLyricEffect, recommendMode, setRecommendMode,
+    quality, setQuality, lyricEffect, setLyricEffect,
+    desktopLyricsEnabled, setDesktopLyricsEnabled,
+    lockScreenLyricsEnabled, setLockScreenLyricsEnabled,
+    dynamicIslandLyricsEnabled, setDynamicIslandLyricsEnabled,
+    recommendMode, setRecommendMode,
   } = usePlayer();
 
   return (
@@ -98,6 +102,37 @@ export default function SettingsScreen({ navigation }) {
           <Text style={styles.qualityDesc}>
             {(LYRIC_EFFECTS.find((x) => x.key === lyricEffect) || LYRIC_EFFECTS[0]).desc}
           </Text>
+          {Platform.OS === 'ios' ? (
+            <View>
+              <View style={styles.switchRow}>
+                <View style={styles.switchInfo}>
+                  <Text style={styles.rowTitle}>锁屏歌词</Text>
+                  <Text style={styles.rowDesc}>在锁屏实时活动中显示当前歌词</Text>
+                </View>
+                <Switch accessibilityLabel="锁屏歌词" value={lockScreenLyricsEnabled}
+                  onValueChange={setLockScreenLyricsEnabled} trackColor={{ false: '#363832', true: colors.accentSoft }}
+                  thumbColor={lockScreenLyricsEnabled ? colors.accent : '#a4a69f'} />
+              </View>
+              <View style={styles.switchRow}>
+                <View style={styles.switchInfo}>
+                  <Text style={styles.rowTitle}>灵动岛歌词</Text>
+                  <Text style={styles.rowDesc}>在支持灵动岛的 iPhone 上显示当前歌词</Text>
+                </View>
+                <Switch accessibilityLabel="灵动岛歌词" value={dynamicIslandLyricsEnabled}
+                  onValueChange={setDynamicIslandLyricsEnabled} trackColor={{ false: '#363832', true: colors.accentSoft }}
+                  thumbColor={dynamicIslandLyricsEnabled ? colors.accent : '#a4a69f'} />
+              </View>
+              <View style={styles.switchRow}>
+                <View style={styles.switchInfo}>
+                  <Text style={styles.rowTitle}>桌面歌词</Text>
+                  <Text style={styles.rowDesc}>以画中画悬浮窗持续显示莫奈歌词</Text>
+                </View>
+                <Switch accessibilityLabel="桌面歌词" value={desktopLyricsEnabled}
+                  onValueChange={setDesktopLyricsEnabled} trackColor={{ false: '#363832', true: colors.accentSoft }}
+                  thumbColor={desktopLyricsEnabled ? colors.accent : '#a4a69f'} />
+              </View>
+            </View>
+          ) : null}
         </View>
 
         <Text style={styles.sectionTitle}>同步</Text>
@@ -140,6 +175,11 @@ const styles = StyleSheet.create({
   },
   rowTitle: { color: colors.text, fontSize: 14, fontWeight: '600' },
   rowDesc: { color: colors.text3, fontSize: 11, marginTop: 4 },
+  switchRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 16, paddingTop: 14,
+    borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.cardBorder,
+  },
+  switchInfo: { flex: 1, minWidth: 0 },
   seg: {
     flexDirection: 'row', gap: 6, marginTop: 12,
     backgroundColor: 'rgba(255,255,255,0.05)', borderRadius: 12, padding: 4,

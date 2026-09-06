@@ -73,6 +73,10 @@
       <p>本地收藏</p>
     </div>
     <div class="card side" id="dailyHome"><div class="cover" data-cover="8"></div><h3>每日推荐</h3><p>为今天挑选</p></div>
+    <div class="card side" id="cardLibrary">
+      <div class="cover" data-cover="12"><span class="count shelf-count"><span class="count-play"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></span><span class="count-label" id="shelfLibraryCount">0 首歌曲</span></span></div>
+      <h3>我的音乐库</h3><p>喜欢与主动收藏</p>
+    </div>
     <div class="card side side-r" id="cardRank">
       <div class="cover" data-cover="5"><span class="count shelf-count"><span class="count-play"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></span><span class="count-label">B 站音乐区</span></span></div>
       <h3>音乐区热榜</h3>
@@ -153,11 +157,33 @@
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>
           随机播放
         </button>
+        <div class="pl-search-inline" id="plCollectionSearchWrap" hidden>
+          <button type="button" class="pl-search-toggle" id="plCollectionSearchToggle" title="搜索歌曲" aria-label="搜索歌曲" aria-expanded="false">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/></svg>
+          </button>
+          <input id="plCollectionSearch" placeholder="搜索歌曲或歌手" autocomplete="off" aria-label="搜索歌曲或歌手" disabled>
+        </div>
       </div>
     </div>
   </div>
-  <div class="tlist">
-    <div class="thead"><span>#</span><span>标题</span><span>UP 主</span><span>时长</span><span></span></div>
+  <div class="tlist" id="playlistTrackList">
+    <div class="thead"><span>#</span><span>标题</span><span>UP 主</span><span>时长</span><span>
+      <div class="pl-sort-menu" id="plCollectionSortWrap" hidden>
+        <button type="button" class="pl-list-sort" id="plCollectionSort" data-sort="added-desc" title="排序：加入时间 · 新到旧" aria-label="排序方式：加入时间新到旧" aria-expanded="false">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M4 6h9M4 12h7M4 18h5m8-11v11m-3-3 3 3 3-3"/></svg>
+          <b>加入时间 · 新到旧</b>
+          <svg class="pl-sort-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <div class="pl-sort-dropdown" id="plCollectionSortMenu" role="menu" hidden>
+          <button type="button" class="on" data-collection-sort="added-desc"><span>加入时间</span><small>新到旧</small></button>
+          <button type="button" data-collection-sort="added-asc"><span>加入时间</span><small>旧到新</small></button>
+          <button type="button" data-collection-sort="title-asc"><span>歌曲标题</span><small>正序</small></button>
+          <button type="button" data-collection-sort="title-desc"><span>歌曲标题</span><small>逆序</small></button>
+          <button type="button" data-collection-sort="artist-asc"><span>UP 主</span><small>正序</small></button>
+          <button type="button" data-collection-sort="artist-desc"><span>UP 主</span><small>逆序</small></button>
+        </div>
+      </div>
+    </span></div>
     <div id="list-playlist"></div>
   </div>
 </section>
@@ -262,6 +288,10 @@
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V6l10-2v11"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="15" r="2.5"/></svg>
           <span>歌词</span>
         </button>
+        <button type="button" class="np-src-split" id="btnShare" title="分享音乐">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="m8.2 10.8 7.6-4.5M8.2 13.2l7.6 4.5"/></svg>
+          <span>分享</span>
+        </button>
         </div>
       </div>
       <div class="np-actions" id="npActions">
@@ -276,6 +306,10 @@
         <button type="button" class="np-fav-btn" id="btnAddPl" title="加入本地歌单" aria-haspopup="true" aria-expanded="false">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h10M4 12h10M4 18h6M18 9v8M14 13h8"/></svg>
           <span>歌单</span>
+        </button>
+        <button type="button" class="np-fav-btn" id="btnLibrary" aria-pressed="false" title="加入音乐库">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h12M4 10h12M4 15h8"/><circle cx="17" cy="17" r="4"/><path d="M17 15v4M15 17h4"/></svg>
+          <span>音乐库</span>
         </button>
       </div>
     </div>
@@ -694,6 +728,19 @@
     <div class="pl-dialog-actions">
       <button class="btn-ghost" id="lyricAuto" type="button">恢复自动歌词</button>
       <button class="btn-primary" id="lyricClose" type="button">完成</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 分享拍立得卡片 ============ -->
+<div class="pl-dialog-mask share-card-mask" id="shareCardMask" hidden>
+  <div class="share-card-dialog" role="dialog" aria-modal="true" aria-label="分享音乐卡片">
+    <canvas id="shareCardCanvas" width="720" height="960"></canvas>
+    <div class="pl-dialog-actions">
+      <button class="btn-ghost" id="shareCardClose" type="button">关闭</button>
+      <button class="btn-ghost" id="shareCardLink" type="button">分享链接</button>
+      <button class="btn-ghost" id="shareCardCopy" type="button">复制卡片</button>
+      <button class="btn-primary" id="shareCardSave" type="button">保存卡片</button>
     </div>
   </div>
 </div>

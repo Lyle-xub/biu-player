@@ -124,7 +124,7 @@ test('Electron bridge and RN transport preserve binary bytes and retain the exis
   };
   new Function('require', 'module', 'exports', 'fetch', code)((name) => name === '@react-native-async-storage/async-storage'
     ? { getItem: async () => JSON.stringify({ SESSDATA: 'fixture-session', buvid3: 'fixture-buvid' }) }
-    : require(require.resolve(name, { paths: [mobile] })), module, module.exports, authenticatedFetch);
+    : name === './mediaUrl' ? { mediaUrl: value => value } : require(require.resolve(name, { paths: [mobile] })), module, module.exports, authenticatedFetch);
   const result = await module.exports.get('https://api.bilibili.com/test', { responseType: 'bytes', headers: { Accept: 'application/octet-stream' } });
   assert.deepEqual(result.body, bytes);
 });

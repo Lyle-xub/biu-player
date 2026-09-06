@@ -203,6 +203,7 @@ function activateShelfCard(card) {
   if (!card) return;
   if (card.id === 'cardLike') openPlaylist(likesPlaylist());
   else if (card.id === 'dailyHome') recommendationProfiles.openDaily();
+  else if (card.id === 'cardLibrary') openPlaylist(musicLibraryPlaylist());
   else if (card.id === 'cardRank') openPlaylist(rankingPlaylist());
   else if (card.id === 'cardHistory') openPlaylist(historyPlaylist());
 }
@@ -225,6 +226,7 @@ function initShelfCarousel() {
   const info = [
     ['我喜欢', () => `${likes.length} 首歌曲<i>·</i>本地收藏`],
     ['每日推荐', () => `${window.BiuDaily.current(recommendationProfiles.manager().getSnapshot().daily)?.tracks.length || 0} 首歌曲<i>·</i>为今天挑选`],
+    ['我的音乐库', () => `${musicLibraryTracks().length} 首歌曲<i>·</i>喜欢与主动收藏`],
     ['音乐区热榜', () => `${state.ranking.length || 20} 首歌曲<i>·</i>B 站音乐区`],
     ['我的历史', () => `${playHistory.length} 首<i>·</i>最近播放`],
   ];
@@ -526,6 +528,7 @@ window.biuProfiles = recommendationProfiles;
 async function loadBuckets() {
   const adopt = {
     'biu-likes': (v) => { likes = v; publish('likes', likes.slice()); },
+    'biu-library': (v) => { musicLibrary = v; },
     'biu-playlists': (v) => { customPlaylists = v; },
     'biu-history': (v) => { playHistory = v; },
   };
@@ -553,7 +556,7 @@ async function switchDataNs(ns) {
   recommendationProfiles.manager();
   if (ns && !prev) {
     // 游客 → 登录：账号桶为空时把游客数据拷过去（不搬动，游客数据保留）
-    for (const base of ['biu-likes', 'biu-playlists', 'biu-history']) {
+    for (const base of ['biu-likes', 'biu-library', 'biu-playlists', 'biu-history']) {
       try {
         const to = `${base}@${ns}`;
         let existing = api.hasBridge && window.bili.storeGet ? await window.bili.storeGet(to) : null;
@@ -1278,7 +1281,7 @@ function renderFavButtons() {
   // 喜欢/收藏按钮的状态 class 由组件按 'npActions' slice 渲染（btnLike/btnFav/ppLike/vsFavBtn）
   const liked = isLiked(state.current); // 本地「我喜欢」，与列表页心形同源
   const favored = !!(favFoldersCache && favFoldersCache.some((f) => f.favored));
-  patchSlice('npActions', { liked, favored, vsFavOn: favored });
+  patchSlice('npActions', { liked, favored, inLibrary: isInMusicLibrary(state.current), vsFavOn: favored });
 }
 
 function closeFavPop() {
@@ -1386,7 +1389,7 @@ const trackKey = (t) => {
 // 拷贝曲目进本地集合：分切段必须带上区间与歌词引用，否则退化成整曲甚至撞 bvid 被覆盖
 const trackCopy = (t) => ({
   bvid: t.bvid, aid: t.aid, cid: t.cid, title: t.title,
-  up: t.up, duration: t.duration, pic: t.pic,
+  up: t.up, mid: t.mid, duration: t.duration, pic: t.pic,
   ...(t.isSegment ? { isSegment: true, from: t.from, to: t.to, lyricRef: t.lyricRef } : {}),
 });
 
@@ -1920,8 +1923,13 @@ function splitCreatePlaylist() {
     .filter((s) => s.name.trim() && s.to > s.from)
     .map((s) => ({
       bvid: t.bvid, cid: t.cid, aid: t.aid,
+      parentBvid: t.parentBvid || t.bvid,
+      parentTitle: t.parentTitle || t.title,
+      parentUp: t.parentUp || t.up,
+      parentMid: t.parentMid || t.mid,
       title: (s.match && s.match.title) || s.name.trim(),
       up: (s.match && s.match.artist) || t.up,
+      mid: s.match ? undefined : t.mid,
       duration: Math.round(s.to - s.from),
       pic: (s.match && s.match.pic) || t.pic,
       from: Math.max(0, s.from), to: s.to, isSegment: true,
@@ -1955,6 +1963,8 @@ function destroyHls() {
 /* ---------- 「我喜欢」本地收藏 ---------- */
 let likes = [];
 try { likes = JSON.parse(localStorage.getItem('biu-likes') || '[]'); } catch (e) { likes = []; }
+let musicLibrary = [];
+try { musicLibrary = JSON.parse(localStorage.getItem('biu-library') || '[]'); } catch (e) { musicLibrary = []; }
 // 双写：主进程 JSON（主存储，抗崩溃）+ localStorage（冗余镜像）
 const saveLikes = () => {
   try { localStorage.setItem(dataKey('biu-likes'), JSON.stringify(likes)); } catch (e) {}
@@ -1962,6 +1972,37 @@ const saveLikes = () => {
   recommendationProfiles.manager().refresh().catch(() => {});
 };
 const isLiked = (t) => !!(t && trackKey(t) && likes.some((l) => trackKey(l) === trackKey(t)));
+const isInMusicLibrary = (t) => !!(t && trackKey(t)
+  && [...likes, ...musicLibrary].some((item) => trackKey(item) === trackKey(t)));
+const saveMusicLibrary = () => {
+  store.set(dataKey('biu-library'), musicLibrary);
+  if (api.hasBridge && window.bili.storeSet) window.bili.storeSet(dataKey('biu-library'), musicLibrary);
+};
+function musicLibraryTracks() {
+  const seen = new Set();
+  return [...likes, ...musicLibrary].filter((track) => {
+    const key = trackKey(track);
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+function toggleMusicLibrary(t) {
+  if (!t || t.isLive || !t.bvid) { toast('当前曲目不支持加入音乐库'); return; }
+  const key = trackKey(t);
+  const explicit = musicLibrary.some((item) => trackKey(item) === key);
+  if (!explicit && isLiked(t)) { toast('我喜欢的歌曲会自动保留在音乐库'); return; }
+  if (explicit) {
+    musicLibrary = musicLibrary.filter((item) => trackKey(item) !== trackKey(t));
+    toast(isLiked(t) ? '仍会通过我喜欢保留在音乐库' : '已从音乐库移除');
+  } else {
+    musicLibrary.unshift({ ...trackCopy(t), addedAt: Date.now() });
+    toast('已加入音乐库');
+  }
+  saveMusicLibrary();
+  refreshMusicLibraryUI();
+  renderFavButtons();
+}
 function toggleLike(t) {
   if (!t || t.isLive) { toast('直播不支持收藏'); return; }
   if (!t.bvid) { toast('预览模式不支持收藏'); return; }
@@ -1969,11 +2010,12 @@ function toggleLike(t) {
     likes = likes.filter((l) => trackKey(l) !== trackKey(t));
     toast('已取消喜欢');
   } else {
-    likes.unshift(trackCopy(t));
+    likes.unshift({ ...trackCopy(t), addedAt: Date.now() });
     toast('已加入我喜欢');
   }
   saveLikes();
   refreshLikeUI();
+  refreshMusicLibraryUI();
   renderMyPlaylists();
   publish('likes', likes.slice());
 }
@@ -1985,6 +2027,82 @@ function refreshLikeUI() {
   if (state.playlist && state.playlist.isLikes
       && document.body.dataset.view === 'playlist') openPlaylist(likesPlaylist());
 }
+
+function refreshMusicLibraryUI() {
+  const tracks = musicLibraryTracks();
+  const count = $('shelfLibraryCount');
+  if (count) count.textContent = `${tracks.length} 首歌曲`;
+  if (state.playlist?.isMusicLibrary && document.body.dataset.view === 'playlist') openPlaylist(musicLibraryPlaylist());
+}
+
+let sharedTrack = null;
+function roundedPath(ctx, x, y, width, height, radius) {
+  const r = Math.min(radius, width / 2, height / 2);
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + width, y, x + width, y + height, r);
+  ctx.arcTo(x + width, y + height, x, y + height, r); ctx.arcTo(x, y + height, x, y, r);
+  ctx.arcTo(x, y, x + width, y, r); ctx.closePath();
+}
+function cardText(ctx, text, x, y, width, lineHeight, maxLines) {
+  const chars = [...String(text || '')], lines = []; let line = '';
+  for (const char of chars) {
+    if (ctx.measureText(line + char).width <= width || !line) line += char;
+    else { lines.push(line); line = char; if (lines.length === maxLines - 1) break; }
+  }
+  if (line && lines.length < maxLines) lines.push(line);
+  if (lines.join('').length < chars.length) lines[lines.length - 1] = lines.at(-1).replace(/.$/, '…');
+  lines.forEach((value, index) => ctx.fillText(value, x, y + index * lineHeight));
+}
+function drawShareCard(track, image) {
+  const canvas = $('shareCardCanvas'), ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, 720, 960);
+  const bg = ctx.createLinearGradient(0, 0, 720, 960);
+  bg.addColorStop(0, '#382830'); bg.addColorStop(.55, '#181c15'); bg.addColorStop(1, '#080a07');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, 720, 960);
+  const glow = (x, y, radius, color) => {
+    const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
+    gradient.addColorStop(0, color); gradient.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = gradient; ctx.fillRect(x - radius, y - radius, radius * 2, radius * 2);
+  };
+  glow(90, 90, 310, 'rgba(251,114,153,.28)'); glow(650, 790, 270, 'rgba(143,185,102,.18)');
+  const source = document.createElement('canvas'); source.width = 720; source.height = 960;
+  source.getContext('2d').drawImage(canvas, 0, 0);
+  ctx.save(); roundedPath(ctx, 70, 58, 580, 820, 25); ctx.clip(); ctx.filter = 'blur(28px) saturate(1.35)';
+  ctx.globalAlpha = .72; ctx.drawImage(source, -24, -24, 768, 1008); ctx.restore();
+  ctx.save(); ctx.shadowColor = 'rgba(0,0,0,.48)'; ctx.shadowBlur = 44; ctx.shadowOffsetY = 25;
+  roundedPath(ctx, 70, 58, 580, 820, 25); ctx.fillStyle = 'rgba(244,241,232,.13)'; ctx.fill(); ctx.restore();
+  roundedPath(ctx, 70, 58, 580, 820, 25); ctx.strokeStyle = 'rgba(255,255,255,.42)'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.save(); roundedPath(ctx, 94, 82, 532, 532, 12); ctx.clip();
+  if (image) {
+    const scale = Math.max(532 / image.naturalWidth, 532 / image.naturalHeight);
+    const w = image.naturalWidth * scale, h = image.naturalHeight * scale;
+    ctx.drawImage(image, 94 + (532 - w) / 2, 82 + (532 - h) / 2, w, h);
+  } else {
+    const fallback = ctx.createLinearGradient(94, 82, 626, 614);
+    fallback.addColorStop(0, '#fb7299'); fallback.addColorStop(1, '#4b5738');
+    ctx.fillStyle = fallback; ctx.fillRect(94, 82, 532, 532);
+    ctx.fillStyle = 'rgba(255,255,255,.86)'; ctx.font = '700 132px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('B', 360, 405); ctx.textAlign = 'left';
+  }
+  ctx.restore(); ctx.fillStyle = '#fff';
+  ctx.font = '700 39px -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif';
+  cardText(ctx, track.title || 'Biu Player', 112, 680, 496, 50, 2);
+  ctx.fillStyle = 'rgba(255,255,255,.65)'; ctx.font = '400 22px -apple-system,"PingFang SC",sans-serif';
+  ctx.fillText(String(track.up || '未知音乐人').slice(0, 28), 112, 790);
+  ctx.fillStyle = 'rgba(255,255,255,.22)'; ctx.fillRect(112, 818, 496, 1);
+  ctx.fillStyle = '#ff85a7'; ctx.font = '700 17px -apple-system,sans-serif';
+  ctx.fillText('B I U  P L A Y E R  ·  今 日 留 声', 112, 850);
+  ctx.fillStyle = 'rgba(255,255,255,.25)'; ctx.font = '500 12px sans-serif'; ctx.fillText('PLAY / KEEP / SHARE', 507, 932);
+}
+async function openShareCard(track) {
+  if (!track) return;
+  sharedTrack = track; $('shareCardMask').hidden = false; drawShareCard(track, null);
+  if (!track.pic || !window.bili?.image) return;
+  const requestTrack = track, dataUrl = await window.bili.image(track.pic).catch(() => null);
+  if (!dataUrl || sharedTrack !== requestTrack) return;
+  const image = new Image(); image.onload = () => { if (sharedTrack === requestTrack) drawShareCard(track, image); };
+  image.src = dataUrl;
+}
+function closeShareCard() { sharedTrack = null; $('shareCardMask').hidden = true; }
 
 /* ---------- 播放队列 ---------- */
 function setQueue(tracks, name, startIdx = 0) {
@@ -2313,6 +2431,8 @@ function fillPlayingBase(t) {
   publish('np', {
     title: t.title || '—',
     artist: t.up || '—',
+    sourceTitle: t.isSegment && t.parentTitle && t.parentTitle !== t.title ? t.parentTitle : '',
+    sourceArtist: t.isSegment && t.parentUp && t.parentUp !== t.up ? t.parentUp : '',
     src: t.isLive
       ? '直播 · ' + (t.area || '音乐电台')
       : '来源 · ' + (t.bvid || '本地预览'),
@@ -3639,6 +3759,19 @@ function likesPlaylist() {
     tracks: likes,
   };
 }
+function musicLibraryPlaylist() {
+  const tracks = musicLibraryTracks();
+  return {
+    isMusicLibrary: true,
+    label: '音乐库 · 本地',
+    title: '我的音乐库',
+    desc: '我喜欢的歌曲和主动加入音乐库的歌曲都会保存在这里。',
+    meta: `${tracks.length} 首`,
+    cover: tracks[0] || { seed: 12 },
+    emptyHint: '音乐库还是空的，可以从歌曲菜单加入',
+    tracks,
+  };
+}
 /* ---------- 播放历史（本地，最多 60 条，新播放的排在最前） ---------- */
 let playHistory = store.get('biu-history', []);
 if (!Array.isArray(playHistory)) playHistory = [];
@@ -3699,6 +3832,7 @@ function openPlaylist(pl) {
     customId: pl.customId ?? null,
     favId: pl.favId ?? null,
     isLikes: !!pl.isLikes,
+    isMusicLibrary: !!pl.isMusicLibrary,
     tracks: pl.tracks,
     current: state.current,
     emptyHint: pl.emptyHint || null,
@@ -3713,6 +3847,9 @@ function openPlaylist(pl) {
 function patchPlaylist(patch) {
   const cur = peek('playlist');
   if (cur) publish('playlist', { ...cur, ...patch });
+}
+function setPlaylistViewTracks(tracks) {
+  if (state.playlist) state.playlist.visibleTracks = Array.isArray(tracks) ? tracks : state.playlist.tracks;
 }
 
 // 自建歌单删除曲目：删除动画由 TrackList 组件播放，280ms 后调到这里真正移除
@@ -4097,6 +4234,7 @@ async function loadLibrary({ force = false } = {}) {
   // 后续收藏、新建、编辑与删除各自更新卡片，不在页面导航时重新发布数据。
   if (!libraryLocalReady) {
     refreshLikeUI();
+    refreshMusicLibraryUI();
     renderMyPlaylists();
     libraryLocalReady = true;
   }
@@ -4693,9 +4831,16 @@ function initLanSync() {
   window.bili?.onLanSyncStatus?.(renderLanSync);
   window.bili?.onLanSyncLibrary?.(({ scope, library, base }) => {
     if (scope !== dataNs) return;
-    const merged = BiuLibrarySync.reconcile(base, { version: 1, likes, playlists: customPlaylists }, library);
+    const localLibrary = typeof musicLibrary === 'undefined' ? [] : musicLibrary;
+    const merged = BiuLibrarySync.reconcile(base,
+      { version: 1, likes, library: localLibrary, playlists: customPlaylists }, library);
     likes = merged.likes; customPlaylists = merged.playlists;
-    saveLikes(); saveCustomPlaylists(); refreshLikeUI(); renderMyPlaylists(); renderFavButtons();
+    if (typeof musicLibrary !== 'undefined') musicLibrary = merged.library;
+    saveLikes(); saveCustomPlaylists();
+    if (typeof saveMusicLibrary === 'function') saveMusicLibrary();
+    refreshLikeUI();
+    if (typeof refreshMusicLibraryUI === 'function') refreshMusicLibraryUI();
+    renderMyPlaylists(); renderFavButtons();
     publish('likes', likes.slice());
     const current = customPlaylists.find((p) => p.id === state.playlist?.customId);
     if (current && document.body.dataset.view === 'playlist') openPlaylist(customPlaylistDetail(current));
@@ -4836,11 +4981,13 @@ function init() {
   initRadioInfiniteScroll();
   bindLyricScrolling();
   $('btnPlayAll').addEventListener('click', () => {
-    if (state.playlist && state.playlist.tracks.length) setQueue(state.playlist.tracks, state.playlist.title, 0);
+    const tracks = state.playlist?.visibleTracks || state.playlist?.tracks || [];
+    if (tracks.length) setQueue(tracks, state.playlist.title, 0);
   });
   $('btnPlShuffle').addEventListener('click', () => {
-    if (!state.playlist || !state.playlist.tracks.length) return;
-    const shuffled = [...state.playlist.tracks].sort(() => Math.random() - 0.5);
+    const tracks = state.playlist?.visibleTracks || state.playlist?.tracks || [];
+    if (!tracks.length) return;
+    const shuffled = [...tracks].sort(() => Math.random() - 0.5);
     setQueue(shuffled, state.playlist.title, 0);
   });
 
@@ -4896,6 +5043,31 @@ function init() {
     if (plPopOpen) closePlPop();
     else openPlPop();
   });
+  $('btnLibrary').addEventListener('click', () => toggleMusicLibrary(state.current));
+  $('btnShare').addEventListener('click', () => {
+    if (!state.current) return toast('还没有正在播放的歌曲');
+    openShareCard(state.current);
+  });
+  $('shareCardClose').addEventListener('click', closeShareCard);
+  $('shareCardMask').addEventListener('click', (event) => {
+    if (event.target === $('shareCardMask')) closeShareCard();
+  });
+  $('shareCardLink').addEventListener('click', async () => {
+    if (!sharedTrack?.bvid) return toast('当前歌曲没有可分享的链接');
+    try { await window.bili.shareLinkCopy(`https://www.bilibili.com/video/${sharedTrack.bvid}`); toast('歌曲链接已复制'); }
+    catch (error) { toast(error.message || '复制链接失败'); }
+  });
+  $('shareCardCopy').addEventListener('click', async () => {
+    try { await window.bili.shareCardCopy($('shareCardCanvas').toDataURL('image/png')); toast('分享卡片已复制'); }
+    catch (error) { toast(error.message || '复制失败'); }
+  });
+  $('shareCardSave').addEventListener('click', async () => {
+    try {
+      const title = String(sharedTrack?.title || '音乐').slice(0, 36);
+      const result = await window.bili.shareCardSave({ dataUrl: $('shareCardCanvas').toDataURL('image/png'), filename: `Biu-${title}.png` });
+      if (result?.ok) toast('分享卡片已保存');
+    } catch (error) { toast(error.message || '保存失败'); }
+  });
   document.addEventListener('click', (event) => {
     if (favPopOpen && !event.target.closest('.np-actions') && !event.target.closest('.fav-pop')) closeFavPop();
     if (plPopOpen && !event.target.closest('.np-actions') && !event.target.closest('#plPop')) closePlPop();
@@ -4909,6 +5081,7 @@ function init() {
     if (event.key === 'Escape' && favPopOpen) closeFavPop();
     if (event.key === 'Escape' && plPopOpen) closePlPop();
     if (event.key === 'Escape' && splitPopFor >= 0) { closeSplitPop(); return; }
+    if (event.key === 'Escape' && !$('shareCardMask').hidden) { closeShareCard(); return; }
     if (event.key === 'Escape' && !$('splitMask').hidden) closeSplitPanel();
   });
   window.addEventListener('resize', () => { if (favPopOpen) closeFavPop(); if (plPopOpen) closePlPop(); });
@@ -5345,7 +5518,7 @@ function init() {
 // 供 React 外壳 onClick 调用的桥（替代旧版内联 onclick 依赖的全局函数）
 window.biuUi = { go, openPanel, closePanel };
 // 供 React 视图组件（LibraryGrids 等）触发的行为桥
-window.biuActions = { openPlaylist, likesPlaylist, rankingPlaylist, customPlaylistDetail, openPlDialog, setQueue, openFavFolder, showLogin, isLiked, toggleLike, plDeleteTrack, plReorder, togglePlEditing, pickInlineCover, openUpPage, toggleFollow, playDynVideo, playIndex, toggleFavFolder, toggleTrackInPlaylist,
+window.biuActions = { openPlaylist, likesPlaylist, rankingPlaylist, customPlaylistDetail, openPlDialog, setQueue, setPlaylistViewTracks, openFavFolder, showLogin, isLiked, toggleLike, plDeleteTrack, plReorder, togglePlEditing, pickInlineCover, openUpPage, toggleFollow, playDynVideo, playIndex, toggleFavFolder, toggleTrackInPlaylist,
   // 设置面板（SettingsView）
   setRecommendMode, setQuality, setVQuality, toggleDanmaku, toggleSyncHistory, toggleDeskLyric,
   setLanSyncEnabled,

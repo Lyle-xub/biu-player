@@ -11,6 +11,9 @@ export const mediaScreenOptions = Platform.OS === 'android' ? {
 } : {
   animation: 'slide_from_bottom', gestureDirection: 'vertical',
   fullScreenGestureEnabled: true, animationMatchesGesture: true,
+  // iOS cancels React touches when its native dismiss recognizer begins.
+  // Keep dismissal on the header so it cannot steal the playback scrubber.
+  gestureResponseDistance: { top: 0, bottom: 140 },
 };
 
 export default function useMediaTransition(navigation) {

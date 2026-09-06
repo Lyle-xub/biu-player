@@ -62,7 +62,7 @@ async function jget(url, opts) {
   if (r.status !== 200) throw new Error(r.status === -1 ? (r.body || '网络请求失败') : ('HTTP ' + r.status));
   let d;
   try { d = JSON.parse(r.body); } catch (e) { throw new Error('接口返回解析失败'); }
-  if (d.code !== 0) throw new Error(d.message || ('code ' + d.code));
+  if (d.code !== 0) throw Object.assign(new Error(d.message || ('code ' + d.code)), { code: d.code });
   return d.data;
 }
 
@@ -70,8 +70,16 @@ async function jget(url, opts) {
 
 // 音乐区排行（首页推荐流不可用时的兜底列表）
 export async function ranking() {
-  const data = await jget('https://api.bilibili.com/x/web-interface/ranking/v2?rid=3&ps=100');
-  return (data.list || []).map(toTrack);
+  try {
+    const data = await jget('https://api.bilibili.com/x/web-interface/ranking/v2?rid=3&ps=100');
+    return (data.list || []).map(toTrack);
+  } catch (error) {
+    if (Number(error.code) !== -352) throw error;
+    // The v2 chart can reject anonymous sessions. The public music-region
+    // chart returns data as an array and does not require an account.
+    const data = await jget('https://api.bilibili.com/x/web-interface/ranking/region?rid=3&day=3&original=0');
+    return (Array.isArray(data) ? data : data.list || []).map(toTrack);
+  }
 }
 
 // B 站首页的真实个性推荐。该接口依赖当前账号 Cookie，并直接保留服务端推荐顺序。
@@ -81,10 +89,12 @@ export async function personalizedRecommendations(freshIdx = 0, limit = 12) {
     version: '1', feed_version: 'V8', homepage_ver: '1', ps: String(Math.min(30, Math.max(1, limit))),
     fresh_idx: String(index), brush: String(index), fresh_type: '4',
   });
-  const data = await jget(
+  const request = () => jget(
     'https://api.bilibili.com/x/web-interface/wbi/index/top/feed/rcmd?' + query,
-    { wbi: true },
-  );
+    { wbi: true });
+  let data;
+  try { data = await request(); }
+  catch { await new Promise((resolve) => setTimeout(resolve, 400)); data = await request(); }
   const seen = new Set();
   return (data.item || [])
     .filter((item) => {

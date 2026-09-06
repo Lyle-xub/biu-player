@@ -4,6 +4,7 @@ import * as Application from 'expo-application';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useSyncExternalStore } from 'react';
 import appConfig from '../../app.json';
+import { isRecommendationBusy, onRecommendationIdle } from './networkGate';
 const { androidRelease, compareVersions } = require('../../../renderer/update-release');
 
 const Native = Platform.OS === 'android' ? requireOptionalNativeModule('BiuUpdates') : null;
@@ -14,6 +15,7 @@ let state = { currentVersion: (isRunningInExpoGo() ? appConfig.expo.version : Ap
   supported: !isRunningInExpoGo() && !__DEV__ && (Platform.OS === 'ios' || !!Native) };
 const listeners = new Set();
 let started = false, checking, downloading = false, release, attemptedAt = 0, pollTimer;
+let pendingCheck = false, pendingDownload = false;
 const emit = patch => { state = { ...state, ...patch }; listeners.forEach(fn => fn()); return state; };
 const subscribe = fn => { listeners.add(fn); return () => listeners.delete(fn); };
 const fail = error => emit({ phase: 'error', message: error?.message || '更新暂时不可用，请稍后重试' });
@@ -38,7 +40,9 @@ async function poll() {
 async function check(manual = false) {
   if (!state.supported) return emit({ message: '请在正式安装包中使用应用更新' });
   if (checking || ['downloading', 'ready'].includes(state.phase)) return state;
+  if (!manual && isRecommendationBusy()) { pendingCheck = true; return state; }
   if (!manual && (!state.enabled || Date.now() - attemptedAt < INTERVAL)) return state;
+  pendingCheck = false;
   attemptedAt = Date.now();
   emit({ phase: 'checking', message: '正在检查更新' });
   checking = (async () => {
@@ -53,7 +57,10 @@ async function check(manual = false) {
     }
     emit({ phase: release ? 'available' : 'current', version: release?.version || '', checkedAt: Date.now(),
       message: release ? `发现新版本 ${release.version}` : '已是最新版本' });
-    if (release && Native && state.autoDownload && Native.unmetered()) void download(true);
+    if (release && Native && state.autoDownload && Native.unmetered()) {
+      if (isRecommendationBusy()) pendingDownload = true;
+      else void download(true);
+    }
     else if (release && Native && state.autoDownload) emit({ message: '发现新版本，连接 Wi-Fi 后自动下载' });
   })().catch(error => fail(new Error(error.name === 'AbortError' ? '检查更新超时，请稍后重试' : error.message))).finally(() => { checking = null; });
   await checking;
@@ -83,7 +90,10 @@ async function configure(patch) {
   try {
     await AsyncStorage.setItem(KEY, JSON.stringify(next)); emit(next);
     if (next.enabled) void check();
-    if (next.autoDownload && Native?.unmetered() && state.phase === 'available') void download(true);
+    if (next.autoDownload && Native?.unmetered() && state.phase === 'available') {
+      if (isRecommendationBusy()) pendingDownload = true;
+      else void download(true);
+    }
   } catch { emit({ message: '更新设置保存失败，请重试' }); }
 }
 async function start() {
@@ -101,5 +111,14 @@ async function start() {
   });
   setInterval(() => { if (AppState.currentState === 'active') void check(); }, INTERVAL);
 }
+onRecommendationIdle(() => {
+  if (pendingDownload && state.autoDownload && state.phase === 'available') {
+    pendingDownload = false;
+    void download(true);
+  } else if (pendingCheck) {
+    pendingCheck = false;
+    void check();
+  }
+});
 export const appUpdates = { start, check: () => check(true), download: () => download(false), install, configure };
 export function useAppUpdates() { return useSyncExternalStore(subscribe, () => state, () => state); }

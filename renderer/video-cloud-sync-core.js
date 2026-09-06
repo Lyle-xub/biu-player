@@ -183,7 +183,7 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
           await writeLibrary(scope,merged,local);
           config.base=remote;config.baseSnapshotId=part.snapshotId;config.baseSequence=part.sequence;remember(part.snapshotId,remote);
           config.activeBvid=archive.bvid;save();
-          emit({type:'merge',message:`已合并 ${merged.likes.length} 首喜欢、${merged.playlists.length} 个歌单`});break;
+          emit({type:'merge',message:`已合并 ${merged.likes.length} 首喜欢、${merged.library.length} 首音乐库、${merged.playlists.length} 个歌单`});break;
         }
         if(!remote)throw new Error('云端两个快照都无法恢复，已保留本地数据');
         if(config.baseSnapshotId!==archive.meta.snapshotId) {

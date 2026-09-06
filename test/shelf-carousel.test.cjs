@@ -31,7 +31,7 @@ function harness(file) {
   const source = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
   const shelf = node('shelf');
   const nodes = new Map(['shelfTitle', 'shelfMeta'].map((id) => [id, node(id)]));
-  for (const id of ['cardLike', 'cardRank', 'cardHistory']) {
+  for (const id of ['cardLike', 'cardDaily', 'cardMusicLibrary', 'cardRank', 'cardHistory']) {
     const card = node(id), cover = node('cover');
     cover.prepend(node('capsule'));
     cover.prepend(node('art'));
@@ -41,9 +41,11 @@ function harness(file) {
   }
   const images = [], window = node('window');
   window.devicePixelRatio = 2;
+  window.BiuDaily = { current: () => null };
   const ctx = vm.createContext({
     document: { querySelector: () => shelf }, window,
     $: (id) => nodes.get(id), likes: [], playHistory: [], state: { ranking: [] },
+    recommendationProfiles: { manager: () => ({ getSnapshot: () => ({}) }) }, musicLibraryTracks: () => [],
     activateShelfCard() {}, performance: { now: () => 0 }, setTimeout() {},
     Image: function () {
       const img = node('art');
@@ -77,7 +79,7 @@ for (const file of ['renderer/app.js', 'web/src/legacy/controller.js']) {
       let prevented = false;
       h.shelf.emit('wheel', { ...delta, preventDefault() { prevented = true; } });
       assert.equal(prevented, true);
-      assert.equal(h.nodes.get('cardRank').getAttribute('aria-current'), 'true');
+      assert.equal(h.nodes.get('cardDaily').getAttribute('aria-current'), 'true');
     }
   });
 

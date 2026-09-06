@@ -49,7 +49,7 @@ export function buildLineTokens(text, from, to) {
     (sum, seg) => sum + (seg.isWordLike ? splitLyricGraphemes(seg.segment).length : 0), 0);
   const unit = timedGraphemes > 0 ? Math.max(0, to - from) / timedGraphemes : 0;
   let cursor = from;
-  return segments.map((seg, index) => {
+  return joinLyricSeparators(segments.map((seg, index) => {
     const tokenText = seg.segment;
     if (!seg.isWordLike || unit <= 0) {
       return { text: tokenText, t0: null, t1: null, timed: false };
@@ -59,7 +59,40 @@ export function buildLineTokens(text, from, to) {
     const t1 = index === segments.length - 1 ? to : cursor + unit * count;
     cursor = t1;
     return { text: tokenText, t0, t1, timed: true };
-  }).filter((token) => token.text);
+  }).filter((token) => token.text));
+}
+
+// Punctuation and spaces share the neighbouring word's geometry and clock.
+// Keeping them as untimed drawing runs left holes in the sweep and made the
+// horizontal scroll cursor jump at every separator.
+export function joinLyricSeparators(tokens) {
+  const result = [];
+  let prefix = '';
+  for (const token of tokens) {
+    if (!token.timed && /^[\s\p{P}\p{S}]+$/u.test(token.text)) {
+      if (result.length) {
+        const previous = result[result.length - 1];
+        previous.text += token.text;
+        if (previous.graphemeTimings?.length) {
+          previous.graphemeTimings = previous.graphemeTimings.concat(
+            splitLyricGraphemes(token.text).map(() => ({ startTime: previous.t1, endTime: previous.t1 })),
+          );
+        }
+      }
+      else prefix += token.text;
+    } else {
+      const next = { ...token, text: prefix + token.text };
+      if (prefix && token.graphemeTimings?.length) {
+        next.graphemeTimings = splitLyricGraphemes(prefix)
+          .map(() => ({ startTime: token.t0, endTime: token.t0 }))
+          .concat(token.graphemeTimings);
+      }
+      result.push(next);
+      prefix = '';
+    }
+  }
+  if (prefix) result.push({ text: prefix, timed: false, t0: null, t1: null });
+  return result;
 }
 
 /* 间奏圆点：间隔 > 3s 插入 '......'，6 个圆点均分时长 */

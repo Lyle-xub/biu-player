@@ -9,6 +9,7 @@ import TrackRow from '../components/TrackRow';
 import BottomSheet from '../components/BottomSheet';
 import { IconBack, IconPlay, IconPlus, IconRepeat, IconMore } from '../components/icons';
 import { createPlaylist } from '../store/playlists';
+import { canOpenTrackUp, openTrackUp } from '../player/openTrackUp';
 
 export function DailyCard({ navigation }) {
   const { recommendationManager: manager, recommendationProfile: state, libraryReady } = usePlayer();
@@ -32,7 +33,7 @@ function Cover({ profileId = 'auto', small = false }) {
     <Text style={[styles.date, small && { fontSize: 40 }]}>{dayKey().slice(-2)}</Text></View>;
 }
 export default function DailyScreen({ navigation }) {
-  const { recommendationManager: manager, recommendationProfile: state, playQueue, current, libraryReady } = usePlayer();
+  const { recommendationManager: manager, recommendationProfile: state, playQueue, current, libraryReady, resolveTrackUp } = usePlayer();
   const entry = dailyCurrent(state.daily), tracks = entry?.tracks || [];
   const insets = useSafeAreaInsets();
   const [selected, setSelected] = useState(null), [message, setMessage] = useState(''), [saving, setSaving] = useState(false);
@@ -65,7 +66,8 @@ export default function DailyScreen({ navigation }) {
       <View style={styles.listHeading}><Text style={styles.listTitle}>今日歌单</Text><Text style={styles.hint}>{tracks.length} 首歌曲</Text></View>
       {tracks.map((track, i) => <View key={track.bvid} style={styles.trackItem}>
         <View style={styles.track}><View style={{ flex: 1 }}><TrackRow track={track} active={current?.bvid === track.bvid}
-          onPress={() => playQueue(tracks, i)} onLongPress={() => setSelected(track)} /></View>
+          onPress={() => playQueue(tracks, i)} onLongPress={() => setSelected(track)}
+          onPressUp={canOpenTrackUp(track) ? () => openTrackUp(navigation, track, resolveTrackUp) : undefined} /></View>
           <TouchableOpacity accessibilityLabel={`查看${track.title}的推荐理由和反馈`} onPress={() => setSelected(track)} style={styles.more}><IconMore size={20} color={colors.text2} /></TouchableOpacity></View>
       </View>)}
       {!tracks.length && !state.dailyBusy && <Text style={styles.message}>暂无匹配内容。可以先喜欢几首音乐，再重新生成。</Text>}

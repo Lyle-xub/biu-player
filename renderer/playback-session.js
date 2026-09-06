@@ -10,7 +10,8 @@
     if (!value || typeof value !== 'object') return null;
     if (value.isLive ? !(Number(value.roomid) > 0) : !/^BV[\w]+$/.test(value.bvid || '')) return null;
     const out = {};
-    for (const name of ['bvid', 'aid', 'cid', 'title', 'up', 'duration', 'pic', 'roomid', 'area', 'online']) {
+    for (const name of ['bvid', 'aid', 'cid', 'mid', 'title', 'up', 'duration', 'pic', 'roomid', 'area', 'online',
+      'parentBvid', 'parentTitle', 'parentUp', 'parentMid']) {
       if (typeof value[name] === 'string' || Number.isFinite(value[name])) out[name] = value[name];
     }
     if (typeof out.pic !== 'string' || out.pic.startsWith('blob:')) delete out.pic;

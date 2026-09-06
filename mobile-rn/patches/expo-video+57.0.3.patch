@@ -1,0 +1,963 @@
+diff --git a/node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/ExpoVideoPlaybackService.kt b/node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/ExpoVideoPlaybackService.kt
+index 54c0ad0..b02c104 100644
+--- a/node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/ExpoVideoPlaybackService.kt
++++ b/node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/ExpoVideoPlaybackService.kt
+@@ -45,6 +45,8 @@ class ExpoVideoPlaybackService : MediaSessionService() {
+ 
+   private val commandSeekForward = SessionCommand(SEEK_FORWARD_COMMAND, Bundle.EMPTY)
+   private val commandSeekBackward = SessionCommand(SEEK_BACKWARD_COMMAND, Bundle.EMPTY)
++  private val commandNextTrack = SessionCommand(NEXT_TRACK_COMMAND, Bundle.EMPTY)
++  private val commandPreviousTrack = SessionCommand(PREVIOUS_TRACK_COMMAND, Bundle.EMPTY)
+   private val seekForwardButton = CommandButton.Builder()
+     .setDisplayName("rewind")
+     .setSessionCommand(commandSeekForward)
+@@ -57,6 +59,18 @@ class ExpoVideoPlaybackService : MediaSessionService() {
+     .setIconResId(R.drawable.seek_backwards_10s)
+     .build()
+ 
++  private val nextTrackButton = CommandButton.Builder()
++    .setDisplayName("next")
++    .setSessionCommand(commandNextTrack)
++    .setIconResId(androidx.media3.session.R.drawable.media3_icon_next)
++    .build()
++
++  private val previousTrackButton = CommandButton.Builder()
++    .setDisplayName("previous")
++    .setSessionCommand(commandPreviousTrack)
++    .setIconResId(androidx.media3.session.R.drawable.media3_icon_previous)
++    .build()
++
+   fun setShowNotification(showNotification: Boolean, player: ExoPlayer) {
+     appContext.mainQueue.launch {
+       val sessionExtras = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+@@ -79,10 +93,10 @@ class ExpoVideoPlaybackService : MediaSessionService() {
+         return@launch
+       }
+ 
+-      val mediaSession = MediaSession.Builder(this@ExpoVideoPlaybackService, player)
++      val mediaSession = MediaSession.Builder(this@ExpoVideoPlaybackService, RemoteCommandPlayer(videoPlayer))
+         .setId("ExpoVideoPlaybackService_${player.hashCode()}")
+-        .setCallback(VideoMediaSessionCallback())
+-        .setCustomLayout(ImmutableList.of(seekBackwardButton, seekForwardButton))
++        .setCallback(VideoMediaSessionCallback(videoPlayer))
++        .setCustomLayout(ImmutableList.of(previousTrackButton, nextTrackButton))
+         .build()
+ 
+       // Replace the basic media session with a session connected to our playback service.
+@@ -242,6 +256,8 @@ class ExpoVideoPlaybackService : MediaSessionService() {
+   companion object {
+     const val SEEK_FORWARD_COMMAND = "SEEK_FORWARD"
+     const val SEEK_BACKWARD_COMMAND = "SEEK_REWIND"
++    const val NEXT_TRACK_COMMAND = "BIU_NEXT_TRACK"
++    const val PREVIOUS_TRACK_COMMAND = "BIU_PREVIOUS_TRACK"
+     const val CHANNEL_ID = "PlaybackService"
+     const val SESSION_SHOW_NOTIFICATION = "showNotification"
+     const val SEEK_INTERVAL_MS = 10000L
+diff --git a/node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/RemoteCommandPlayer.kt b/node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/RemoteCommandPlayer.kt
+new file mode 100644
+index 0000000..59f3816
+--- /dev/null
++++ b/node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/RemoteCommandPlayer.kt
+@@ -0,0 +1,36 @@
++package expo.modules.video.playbackService
++
++import androidx.media3.common.ForwardingPlayer
++import androidx.media3.common.Player
++import expo.modules.video.player.VideoPlayer
++
++/** Exposes app-queue navigation as standard Android media commands. */
++class RemoteCommandPlayer(private val videoPlayer: VideoPlayer) : ForwardingPlayer(videoPlayer.player) {
++  override fun getAvailableCommands(): Player.Commands = super.getAvailableCommands()
++    .buildUpon()
++    .add(Player.COMMAND_SEEK_TO_PREVIOUS)
++    .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
++    .add(Player.COMMAND_SEEK_TO_NEXT)
++    .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
++    .build()
++
++  override fun isCommandAvailable(command: Int): Boolean = when (command) {
++    Player.COMMAND_SEEK_TO_PREVIOUS,
++    Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM,
++    Player.COMMAND_SEEK_TO_NEXT,
++    Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM -> true
++    else -> super.isCommandAvailable(command)
++  }
++
++  override fun hasPreviousMediaItem(): Boolean = true
++
++  override fun hasNextMediaItem(): Boolean = true
++
++  override fun seekToPrevious() = videoPlayer.emitRemotePrevious()
++
++  override fun seekToPreviousMediaItem() = videoPlayer.emitRemotePrevious()
++
++  override fun seekToNext() = videoPlayer.emitRemoteNext()
++
++  override fun seekToNextMediaItem() = videoPlayer.emitRemoteNext()
++}
+diff --git a/node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/VideoMediaSessionCallback.kt b/node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/VideoMediaSessionCallback.kt
+index 1ca90e0..81ef541 100644
+--- a/node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/VideoMediaSessionCallback.kt
++++ b/node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/VideoMediaSessionCallback.kt
+@@ -6,11 +6,12 @@ import androidx.media3.session.MediaSession
+ import androidx.media3.session.SessionCommand
+ import androidx.media3.session.SessionResult
+ import com.google.common.util.concurrent.ListenableFuture
++import com.google.common.util.concurrent.Futures
+ import androidx.annotation.OptIn
+ import androidx.media3.common.util.UnstableApi
+ 
+ @OptIn(UnstableApi::class)
+-class VideoMediaSessionCallback : MediaSession.Callback {
++class VideoMediaSessionCallback(private val videoPlayer: expo.modules.video.player.VideoPlayer) : MediaSession.Callback {
+   override fun onConnect(
+     session: MediaSession,
+     controller: MediaSession.ControllerInfo
+@@ -23,12 +24,18 @@ class VideoMediaSessionCallback : MediaSession.Callback {
+           MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS.buildUpon()
+             .add(Player.COMMAND_SEEK_FORWARD)
+             .add(Player.COMMAND_SEEK_BACK)
++            .add(Player.COMMAND_SEEK_TO_PREVIOUS)
++            .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
++            .add(Player.COMMAND_SEEK_TO_NEXT)
++            .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+             .build()
+         )
+         .setAvailableSessionCommands(
+           MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS.buildUpon()
+             .add(SessionCommand(ExpoVideoPlaybackService.SEEK_BACKWARD_COMMAND, Bundle.EMPTY))
+             .add(SessionCommand(ExpoVideoPlaybackService.SEEK_FORWARD_COMMAND, Bundle.EMPTY))
++            .add(SessionCommand(ExpoVideoPlaybackService.NEXT_TRACK_COMMAND, Bundle.EMPTY))
++            .add(SessionCommand(ExpoVideoPlaybackService.PREVIOUS_TRACK_COMMAND, Bundle.EMPTY))
+             .build()
+         )
+         .build()
+@@ -41,7 +48,10 @@ class VideoMediaSessionCallback : MediaSession.Callback {
+     when (customCommand.customAction) {
+       ExpoVideoPlaybackService.SEEK_FORWARD_COMMAND -> session.player.seekTo(session.player.currentPosition + ExpoVideoPlaybackService.SEEK_INTERVAL_MS)
+       ExpoVideoPlaybackService.SEEK_BACKWARD_COMMAND -> session.player.seekTo(session.player.currentPosition - ExpoVideoPlaybackService.SEEK_INTERVAL_MS)
++      ExpoVideoPlaybackService.NEXT_TRACK_COMMAND -> videoPlayer.emitRemoteNext()
++      ExpoVideoPlaybackService.PREVIOUS_TRACK_COMMAND -> videoPlayer.emitRemotePrevious()
++      else -> return super.onCustomCommand(session, controller, customCommand, args)
+     }
+-    return super.onCustomCommand(session, controller, customCommand, args)
++    return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+   }
+ }
+diff --git a/node_modules/expo-video/android/src/main/java/expo/modules/video/player/PlayerEvent.kt b/node_modules/expo-video/android/src/main/java/expo/modules/video/player/PlayerEvent.kt
+index 5fcf3e5..61076d7 100644
+--- a/node_modules/expo-video/android/src/main/java/expo/modules/video/player/PlayerEvent.kt
++++ b/node_modules/expo-video/android/src/main/java/expo/modules/video/player/PlayerEvent.kt
+@@ -143,6 +143,14 @@ sealed class PlayerEvent {
+     override val name = "playToEnd"
+   }
+ 
++  class NextTrack : PlayerEvent() {
++    override val name = "nextTrack"
++  }
++
++  class PreviousTrack : PlayerEvent() {
++    override val name = "previousTrack"
++  }
++
+   data class TargetViewChanged(val newTargetView: VideoView?, val oldTargetView: VideoView?) : PlayerEvent() {
+     override val name = "targetViewChange"
+     override val emitToJS = false
+diff --git a/node_modules/expo-video/android/src/main/java/expo/modules/video/player/VideoPlayer.kt b/node_modules/expo-video/android/src/main/java/expo/modules/video/player/VideoPlayer.kt
+index 8bae522..6c7dbed 100644
+--- a/node_modules/expo-video/android/src/main/java/expo/modules/video/player/VideoPlayer.kt
++++ b/node_modules/expo-video/android/src/main/java/expo/modules/video/player/VideoPlayer.kt
+@@ -531,6 +531,10 @@ class VideoPlayer(val context: Context, appContext: AppContext, source: VideoSou
+     }
+   }
+ 
++  fun emitRemoteNext() = sendEvent(PlayerEvent.NextTrack())
++
++  fun emitRemotePrevious() = sendEvent(PlayerEvent.PreviousTrack())
++
+   private fun createFirstFrameEventGenerator(): FirstFrameEventGenerator {
+     val appContext = appContext
+       ?: throw Exceptions.AppContextLost()
+diff --git a/node_modules/expo-video/build/VideoPlayer.types.d.ts b/node_modules/expo-video/build/VideoPlayer.types.d.ts
+index 8acf5e5..3fb252c 100644
+--- a/node_modules/expo-video/build/VideoPlayer.types.d.ts
++++ b/node_modules/expo-video/build/VideoPlayer.types.d.ts
+@@ -121,6 +121,8 @@ export declare class VideoPlayer extends SharedObject<VideoPlayerEvents> {
+      * @platform ios
+      */
+     showNowPlayingNotification: boolean;
++    /** Current lyric shown by the iOS 27 system Now Playing session. */
++    nowPlayingLyric: string;
+     /**
+      * Determines whether the player should continue playing after the app enters the background.
+      *
+diff --git a/node_modules/expo-video/build/VideoPlayerEvents.types.d.ts b/node_modules/expo-video/build/VideoPlayerEvents.types.d.ts
+index 2de2f7b..dd2aea3 100644
+--- a/node_modules/expo-video/build/VideoPlayerEvents.types.d.ts
++++ b/node_modules/expo-video/build/VideoPlayerEvents.types.d.ts
+@@ -27,6 +27,10 @@ export type VideoPlayerEvents = {
+      * Handler for an event emitted when the player plays to the end of the current source.
+      */
+     playToEnd(): void;
++    /** Handler for the system media controller next-track command. */
++    nextTrack(): void;
++    /** Handler for the system media controller previous-track command. */
++    previousTrack(): void;
+     /**
+      * Handler for an event emitted in a given interval specified by the `timeUpdateEventInterval`.
+      */
+diff --git a/node_modules/expo-video/ios/NowPlayingManager.swift b/node_modules/expo-video/ios/NowPlayingManager.swift
+index c276c5c..c3da566 100644
+--- a/node_modules/expo-video/ios/NowPlayingManager.swift
++++ b/node_modules/expo-video/ios/NowPlayingManager.swift
+@@ -2,288 +2,332 @@
+ 
+ import Foundation
+ import MediaPlayer
++import AVFoundation
++import UIKit
+ import ExpoModulesCore
+ 
+ /**
+- * A class meant to manage the "NowPlaying" widget based on currently playing players. When multiple players
+- * are present the one that has most recently started playing and will be used as the source of information for the widget.
+- * Paused player will be used as a data source for "NowPlaying" only if no other players are currently playing.
++ * Biu has one transport owner. VideoView disables AVKit's automatic publication;
++ * publish metadata and commands through the application centers on every iOS version.
++ * Do not attach MPNowPlayingSession to the AVPlayer used by AVPlayerViewController:
++ * AVKit owns that player's session (see Apple's MPNowPlayingSession documentation).
++ * All mutable state and command target lifetimes below belong to the main queue.
+  */
+ class NowPlayingManager: VideoPlayerObserverDelegate {
+-  static var shared = NowPlayingManager()
++  static let shared = NowPlayingManager()
+ 
+-  private let skipTimeInterval = 10.0
+-  private var timeObserver: Any?
+-  private weak var mostRecentInteractionPlayer: AVPlayer?
++  private let commandCenter = MPRemoteCommandCenter.shared()
++  private let infoCenter = MPNowPlayingInfoCenter.default()
+   private var players = NSHashTable<VideoPlayer>.weakObjects()
++  private weak var mostRecentInteractionPlayer: AVPlayer?
++  private var timeObserver: Any?
++  private var targets: [(MPRemoteCommand, Any)] = []
++  private var updateNowPlayingTask: Task<Void, Never>?
+   private var artworkDataTask: URLSessionDataTask?
++  private var metadataRevision = UUID()
++  private let artworkCache: NSCache<NSURL, MPMediaItemArtwork> = {
++    let cache = NSCache<NSURL, MPMediaItemArtwork>()
++    cache.countLimit = 12
++    return cache
++  }()
++  private lazy var fallbackArtwork: MPMediaItemArtwork = {
++    let size = CGSize(width: 256, height: 256)
++    let image = UIGraphicsImageRenderer(size: size).image { context in
++      UIColor(red: 0.16, green: 0.09, blue: 0.18, alpha: 1).setFill()
++      context.fill(CGRect(origin: .zero, size: size))
++      let text = "Biu" as NSString
++      let attributes: [NSAttributedString.Key: Any] = [
++        .font: UIFont.systemFont(ofSize: 76, weight: .bold),
++        .foregroundColor: UIColor(red: 1, green: 0.48, blue: 0.68, alpha: 1)
++      ]
++      let bounds = text.size(withAttributes: attributes)
++      text.draw(at: CGPoint(x: (size.width - bounds.width) / 2,
++                            y: (size.height - bounds.height) / 2), withAttributes: attributes)
++    }
++    return MPMediaItemArtwork(boundsSize: size) { _ in image }
++  }()
+ 
+-  private var playTarget: Any?
+-  private var pauseTarget: Any?
+-  private var skipForwardTarget: Any?
+-  private var skipBackwardTarget: Any?
+-  private var playbackPositionTarget: Any?
+-  private var updateNowPlayingTask: Task<(), Never>?
+-
+-  init() {
+-    let commandCenter = MPRemoteCommandCenter.shared()
+-
+-    commandCenter.skipForwardCommand.preferredIntervals = [NSNumber(value: skipTimeInterval)]
+-    commandCenter.skipBackwardCommand.preferredIntervals = [NSNumber(value: skipTimeInterval)]
++  private func onMain(_ action: @escaping () -> Void) {
++    if Thread.isMainThread { action() } else { DispatchQueue.main.async(execute: action) }
+   }
+ 
+   func registerPlayer(_ player: VideoPlayer) {
+-    players.add(player)
+-    player.observer?.registerDelegate(delegate: self)
+-
+-    if mostRecentInteractionPlayer == nil {
+-      setMostRecentInteractionPlayer(player: player.ref)
++    onMain { [self] in
++      guard !players.contains(player) else { return }
++      players.add(player)
++      player.observer?.registerDelegate(delegate: self)
++      if mostRecentInteractionPlayer == nil || player.ref.rate != 0 {
++        setMostRecentInteractionPlayer(player.ref)
++      }
+     }
+   }
+ 
+   func unregisterPlayer(_ player: VideoPlayer) {
+-    players.remove(player)
++    // releasePlayer can call this from deinit; never retain its VideoPlayer in
++    // an escaping cleanup block. Keep only the underlying AVPlayer alive.
++    let ref = player.ref
+     player.observer?.unregisterDelegate(delegate: self)
+-
+-    if mostRecentInteractionPlayer == player.ref {
+-      let newPlayer = players.allObjects.first(where: { $0.playbackRate != 0 })
+-      setMostRecentInteractionPlayer(player: newPlayer?.ref)
+-    }
+-
+-    if players.allObjects.isEmpty {
+-      let commandCenter = MPRemoteCommandCenter.shared()
+-
+-      removeNowPlayingTargets(commandCenter: commandCenter)
+-      MPNowPlayingInfoCenter.default().nowPlayingInfo = [:]
++    onMain { [self, weak player] in
++      if let player { players.remove(player) }
++      if mostRecentInteractionPlayer === ref {
++        let remaining = players.allObjects
++        setMostRecentInteractionPlayer((remaining.first { $0.ref.rate != 0 } ?? remaining.first)?.ref)
++      }
+     }
+   }
+ 
+-  private func setMostRecentInteractionPlayer(player: AVPlayer?) {
+-    if player == mostRecentInteractionPlayer {
+-      return
+-    }
+-    // Cancel existing update task, since the mostRecentInteractionPlayer will change
++  private func setMostRecentInteractionPlayer(_ player: AVPlayer?) {
++    guard player !== mostRecentInteractionPlayer else { return }
+     updateNowPlayingTask?.cancel()
+-
+-    if let timeObserver {
+-      mostRecentInteractionPlayer?.removeTimeObserver(timeObserver)
+-    }
+     artworkDataTask?.cancel()
+     artworkDataTask = nil
+-
+-    self.mostRecentInteractionPlayer = player
+-    refreshNowPlaying()
+-
+-    timeObserver = player?.addPeriodicTimeObserver(
+-      forInterval: CMTimeMake(value: 1, timescale: 4),
+-      queue: .main,
+-      using: { [weak self] _ in
+-        self?.updateNowPlayingDynamicValues()
+-      })
+-  }
+-
+-  private func setupNowPlayingControls() {
+-    let commandCenter = MPRemoteCommandCenter.shared()
+-
+-    removeNowPlayingTargets(commandCenter: commandCenter)
+-
+-    guard self.mostRecentInteractionPlayer != nil else {
++    metadataRevision = UUID()
++    if let timeObserver { mostRecentInteractionPlayer?.removeTimeObserver(timeObserver) }
++    timeObserver = nil
++    mostRecentInteractionPlayer = player
++
++    guard let player else {
++      removeNowPlayingTargets()
++      infoCenter.nowPlayingInfo = nil
++      infoCenter.playbackState = .stopped
++      UIApplication.shared.endReceivingRemoteControlEvents()
+       return
+     }
+-    addNowPlayingTargets(commandCenter: commandCenter)
++    // VideoManager is the sole owner of AVAudioSession category/mode/activation.
++    VideoManager.shared.setAppropriateAudioSessionOrWarn()
++    UIApplication.shared.beginReceivingRemoteControlEvents()
++    setupNowPlayingControls()
++    updateNowPlayingInfo()
++    timeObserver = player.addPeriodicTimeObserver(
++      forInterval: CMTimeMake(value: 1, timescale: 4), queue: .main
++    ) { [weak self] _ in self?.updateNowPlayingDynamicValues() }
+   }
+ 
+-  private func updateNowPlayingInfo() {
+-    guard let player = mostRecentInteractionPlayer, let currentItem = player.currentItem else {
+-      return
++  private func setupNowPlayingControls() {
++    guard mostRecentInteractionPlayer != nil else { return }
++    if targets.isEmpty {
++      add(commandCenter.playCommand) { player, _ in player.play(); return .success }
++      add(commandCenter.pauseCommand) { player, _ in player.pause(); return .success }
++      add(commandCenter.togglePlayPauseCommand) { player, _ in
++        player.rate == 0 ? player.play() : player.pause()
++        return .success
++      }
++      add(commandCenter.nextTrackCommand) { [weak self] player, _ in
++        self?.emitTrackCommand("nextTrack", for: player) ?? .commandFailed
++      }
++      add(commandCenter.previousTrackCommand) { [weak self] player, _ in
++        self?.emitTrackCommand("previousTrack", for: player) ?? .commandFailed
++      }
++      add(commandCenter.changePlaybackPositionCommand) { [weak self] player, event in
++        guard let self, let event = event as? MPChangePlaybackPositionCommandEvent,
++          event.positionTime.isFinite, let item = player.currentItem,
++          let owner = self.players.allObjects.first(where: { $0.ref === player }) else { return .commandFailed }
++        let window = Self.playbackWindow(for: item)
++        let target = window.sourceTime(event.positionTime)
++        var seek = BiuSystemSeekEvent()
++        seek.sourceTime = target
++        let videoItem = item as? VideoPlayerItem
++        seek.mediaKey = (videoItem?.nowPlayingMetadata ?? videoItem?.videoSource.metadata)?.biuMediaKey ?? ""
++        seek.segmentStart = window.start
++        seek.segmentDuration = window.duration
++        // Notify JS before the seek's time/end events so stale ticks cannot
++        // finish the segment or override the user's new position.
++        owner.safeEmit(event: "systemSeek", payload: seek)
++        // Use the same zero-tolerance seeker as in-app scrubbing. The raw
++        // AVPlayer seek permits nearby keyframes outside a short song segment.
++        // This path does not pause or force-play a previously paused player.
++        owner.currentTime = target
++        return .success
++      }
+     }
+-    let videoPlayerItem = currentItem as? VideoPlayerItem
+-
+-    // Metadata explicitly specified by the user
+-    let userMetadata = videoPlayerItem?.videoSource.metadata
+-
+-    updateNowPlayingTask = Task {
+-      // Metadata fetched with the video
+-      let assetMetadata = try? await loadMetadata(for: currentItem)
+-
+-      let title = assetMetadata?.first(where: {
+-        $0.commonKey == .commonKeyTitle
+-      })
+-
+-      let artist = assetMetadata?.first(where: {
+-        $0.commonKey == .commonKeyArtist
+-      })
+-
+-      let artwork = assetMetadata?.first(where: {
+-        $0.commonKey == .commonKeyArtwork
+-      })
+-
+-      var nowPlayingInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
++    // Skip-interval and seek-direction commands compete with previous/next slots.
++    commandCenter.skipForwardCommand.isEnabled = false
++    commandCenter.skipBackwardCommand.isEnabled = false
++    commandCenter.seekForwardCommand.isEnabled = false
++    commandCenter.seekBackwardCommand.isEnabled = false
++    for (command, _) in targets { command.isEnabled = true }
++  }
+ 
+-      nowPlayingInfo[MPMediaItemPropertyTitle] = userMetadata?.title ?? title
+-      nowPlayingInfo[MPMediaItemPropertyArtist] = userMetadata?.artist ?? artist
+-      nowPlayingInfo[MPMediaItemPropertyPlaybackDuration] = currentItem.duration.seconds
+-      nowPlayingInfo[MPNowPlayingInfoPropertyElapsedPlaybackTime] = currentItem.currentTime().seconds
+-      nowPlayingInfo[MPNowPlayingInfoPropertyIsLiveStream] = currentItem.duration.isIndefinite
+-      nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = await player.rate
+-      nowPlayingInfo[MPNowPlayingInfoPropertyMediaType] = MPNowPlayingInfoMediaType.video.rawValue // Using MPNowPlayingInfoMediaType.video causes a crash
+-      if let artworkUrl = userMetadata?.artwork, artworkDataTask?.originalRequest?.url != artworkUrl {
+-        artworkDataTask?.cancel()
+-        artworkDataTask = fetchArtwork(url: artworkUrl) { artwork in
+-          // We can't reuse the `nowPlayingInfo` as the actual nowPlayingInfo might've changed while the image was being fetched
+-          var currentNowPlayingInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
+-          currentNowPlayingInfo[MPMediaItemPropertyArtwork] = artwork
+-          MPNowPlayingInfoCenter.default().nowPlayingInfo = currentNowPlayingInfo
++  private func add(
++    _ command: MPRemoteCommand,
++    handler: @escaping (AVPlayer, MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus
++  ) {
++    let target = command.addTarget { [weak self] event in
++      let perform = { () -> MPRemoteCommandHandlerStatus in
++        guard let player = self?.mostRecentInteractionPlayer, player.currentItem != nil else {
++          return .noActionableNowPlayingItem
+         }
+-      } else if userMetadata?.artwork == nil {
+-        self.artworkDataTask = nil
+-        nowPlayingInfo[MPMediaItemPropertyArtwork] = artwork
++        return handler(player, event)
+       }
+-
+-      MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
++      return Thread.isMainThread ? perform() : DispatchQueue.main.sync(execute: perform)
+     }
++    targets.append((command, target))
+   }
+ 
+-  private func loadMetadata(for mediaItem: AVPlayerItem) async throws -> [AVMetadataItem] {
+-    return try await mediaItem.asset.loadMetadata(for: .iTunesMetadata)
++  private func emitTrackCommand(_ event: String, for player: AVPlayer) -> MPRemoteCommandHandlerStatus {
++    guard let videoPlayer = players.allObjects.first(where: { $0.ref === player }) else { return .commandFailed }
++    videoPlayer.safeEmit(event: event)
++    return .success
+   }
+ 
+-  // Updates nowPlaying information that changes dynamically during playback e.g. progress
+-  private func updateNowPlayingDynamicValues() {
+-    guard let player = mostRecentInteractionPlayer, let currentItem = player.currentItem else {
+-      return
+-    }
+-
+-    guard var nowPlayingInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo else {
+-      return
+-    }
+-
+-    nowPlayingInfo[MPMediaItemPropertyPlaybackDuration] = currentItem.duration.seconds
+-    nowPlayingInfo[MPNowPlayingInfoPropertyElapsedPlaybackTime] = currentItem.currentTime().seconds.rounded()
+-    nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = player.rate
+-    MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
++  private func removeNowPlayingTargets() {
++    // Never pass nil: removeTarget(nil) removes OTHER owners' handlers as well.
++    for (command, target) in targets { command.removeTarget(target) }
++    targets.removeAll()
+   }
+ 
+-  private func addNowPlayingTargets(commandCenter: MPRemoteCommandCenter) {
+-    // Adding and removing targets has to be dispatched from the main queue.
+-    // Otherwise they enter race conditions when addTargets is called right after calling removeExistingTargets
+-    // swiftlint:disable:next closure_body_length
+-    DispatchQueue.main.async { [weak self] in
+-      guard let self else {
+-        return
+-      }
+-
+-      playTarget = commandCenter.playCommand.addTarget { [weak self] _ in
+-        guard let self, let player = self.mostRecentInteractionPlayer else {
+-          return .commandFailed
+-        }
+-
+-        if player.rate == 0.0 {
+-          player.play()
++  private func updateNowPlayingInfo() {
++    updateNowPlayingTask?.cancel()
++    artworkDataTask?.cancel()
++    artworkDataTask = nil
++    metadataRevision = UUID()
++    let revision = metadataRevision
++    guard let player = mostRecentInteractionPlayer, let item = player.currentItem else { return }
++    let source = (item as? VideoPlayerItem)?.videoSource
++    let metadata = (item as? VideoPlayerItem)?.nowPlayingMetadata ?? source?.metadata
++    let cachedArtwork = metadata?.artwork.flatMap { artworkCache.object(forKey: $0 as NSURL) }
++    // Never publish an artwork-free intermediate card. Keep the previous image
++    // only while a replacement is loading; failures/no-art sources use Biu.
++    let loadingArtwork = metadata?.artwork != nil
++      ? infoCenter.nowPlayingInfo?[MPMediaItemPropertyArtwork] as? MPMediaItemArtwork : nil
++
++    // Publish the supplied title immediately; a slow network metadata read must
++    // not delay the entire system card or restore the previous track's card.
++    var info: [String: Any] = [
++      MPMediaItemPropertyTitle: metadata?.title ?? "Biu Player",
++      MPMediaItemPropertyArtist: metadata?.artist ?? "",
++      MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
++      MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0,
++      MPMediaItemPropertyArtwork: cachedArtwork ?? loadingArtwork ?? fallbackArtwork
++    ]
++    applyDynamicValues(to: &info, player: player, item: item)
++    // The simulator does not infer playback state from AVAudioSession. Rate
++    // metadata alone leaves the system paused and its media controls disappear.
++    infoCenter.nowPlayingInfo = info
++    infoCenter.playbackState = player.rate > 0 ? .playing : .paused
++
++    if let url = metadata?.artwork, cachedArtwork == nil {
++      artworkDataTask = fetchArtwork(url: url) { [weak self, weak player, weak item] artwork in
++        DispatchQueue.main.async {
++          guard let self, let player, let item,
++            self.metadataRevision == revision,
++            self.mostRecentInteractionPlayer === player, player.currentItem === item,
++            var info = self.infoCenter.nowPlayingInfo else { return }
++          self.artworkDataTask = nil
++          if let artwork { self.artworkCache.setObject(artwork, forKey: url as NSURL) }
++          info[MPMediaItemPropertyArtwork] = artwork ?? self.fallbackArtwork
++          self.infoCenter.nowPlayingInfo = info
+         }
+-        return .success
+       }
++    }
+ 
+-      pauseTarget = commandCenter.pauseCommand.addTarget { [weak self] _ in
+-        guard let self, let player = self.mostRecentInteractionPlayer else {
+-          return .commandFailed
+-        }
+-
+-        for player in players.allObjects {
+-          player.ref.pause()
+-        }
+-        return .success
++    guard metadata?.title == nil || metadata?.artist == nil || metadata?.artwork == nil else { return }
++    updateNowPlayingTask = Task { @MainActor [weak self, weak player, weak item] in
++      guard let item else { return }
++      let assetMetadata = try? await item.asset.loadMetadata(for: .iTunesMetadata)
++      guard !Task.isCancelled, let self, let player,
++        self.metadataRevision == revision,
++        self.mostRecentInteractionPlayer === player, player.currentItem === item,
++        var info = self.infoCenter.nowPlayingInfo else { return }
++      if metadata?.title == nil {
++        info[MPMediaItemPropertyTitle] = assetMetadata?.first { $0.commonKey == .commonKeyTitle }?.stringValue ?? "Biu Player"
+       }
+-
+-      skipBackwardTarget = commandCenter.skipBackwardCommand.addTarget { [weak self] _ in
+-        guard let self, let player = self.mostRecentInteractionPlayer else {
+-          return .commandFailed
+-        }
+-        let newTime = player.currentTime() - CMTime(seconds: skipTimeInterval, preferredTimescale: .max)
+-        player.seek(to: newTime)
+-        return .success
++      if metadata?.artist == nil {
++        info[MPMediaItemPropertyArtist] = assetMetadata?.first { $0.commonKey == .commonKeyArtist }?.stringValue ?? ""
++      }
++      if metadata?.artwork == nil,
++        let data = assetMetadata?.first(where: { $0.commonKey == .commonKeyArtwork })?.dataValue,
++        let image = UIImage(data: data) {
++        info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+       }
++      self.infoCenter.nowPlayingInfo = info
++    }
++  }
+ 
+-      skipForwardTarget = commandCenter.skipForwardCommand.addTarget { [weak self] _ in
+-        guard let self, let player = self.mostRecentInteractionPlayer else {
+-          return .commandFailed
+-        }
++  private static func playbackWindow(for item: AVPlayerItem) -> BiuPlaybackWindow {
++    let videoItem = item as? VideoPlayerItem
++    let metadata = videoItem?.nowPlayingMetadata ?? videoItem?.videoSource.metadata
++    return BiuPlaybackWindow(sourceDuration: item.duration.seconds,
++      segmentStart: metadata?.biuSegmentStart, segmentEnd: metadata?.biuSegmentEnd)
++  }
+ 
+-        let newTime = player.currentTime() + CMTime(seconds: skipTimeInterval, preferredTimescale: .max)
+-        player.seek(to: newTime)
+-        return .success
+-      }
++  private func applyDynamicValues(to info: inout [String: Any], player: AVPlayer, item: AVPlayerItem) {
++    let window = Self.playbackWindow(for: item)
++    info[MPMediaItemPropertyPlaybackDuration] = window.duration
++    info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = window.elapsed(item.currentTime().seconds)
++    info[MPNowPlayingInfoPropertyIsLiveStream] = window.duration == nil && item.duration.isIndefinite
++    info[MPNowPlayingInfoPropertyPlaybackRate] = player.rate
++  }
+ 
+-      playbackPositionTarget = commandCenter.changePlaybackPositionCommand.addTarget { [weak self] event in
+-        guard let self, let player = self.mostRecentInteractionPlayer else {
+-          return .commandFailed
+-        }
+-        if let event = event as? MPChangePlaybackPositionCommandEvent {
+-          player.seek(to: CMTime(seconds: event.positionTime, preferredTimescale: .max)) { _ in
+-            player.play()
+-          }
+-          return .success
+-        }
+-        return .commandFailed
+-      }
++  private func updateNowPlayingDynamicValues() {
++    guard let player = mostRecentInteractionPlayer, let item = player.currentItem,
++      var info = infoCenter.nowPlayingInfo else { return }
++    applyDynamicValues(to: &info, player: player, item: item)
++    infoCenter.nowPlayingInfo = info
++    infoCenter.playbackState = player.rate > 0 ? .playing : .paused
++  }
+ 
+-      // `MPRemoteCommandCenter` is a process-wide singleton that other modules (e.g. expo-audio) disable on
+-      // teardown, so re-enable the commands we handle to keep the lock screen controls working. (issue #46711)
+-      commandCenter.playCommand.isEnabled = true
+-      commandCenter.pauseCommand.isEnabled = true
+-      commandCenter.skipForwardCommand.isEnabled = true
+-      commandCenter.skipBackwardCommand.isEnabled = true
+-      commandCenter.changePlaybackPositionCommand.isEnabled = true
+-    }
++  func updateNowPlayingLyric(player: VideoPlayer, lyric: String) {
++    // Lyrics stay in the independent Live Activity; keep media metadata stable.
+   }
+ 
+-  private func removeNowPlayingTargets(commandCenter: MPRemoteCommandCenter) {
+-    // Use the main queue to avoid race conditions with adding the targets (see comment in `addNowPlayingTargets`)
+-    DispatchQueue.main.async { [weak self] in
+-      commandCenter.playCommand.removeTarget(self?.playTarget)
+-      commandCenter.pauseCommand.removeTarget(self?.pauseTarget)
+-      commandCenter.skipForwardCommand.removeTarget(self?.skipForwardTarget)
+-      commandCenter.skipBackwardCommand.removeTarget(self?.skipBackwardTarget)
+-      commandCenter.changePlaybackPositionCommand.removeTarget(self?.playbackPositionTarget)
+-    }
++  func updateMetadata(player: VideoPlayer, metadata: VideoMetadata) {
++    guard let item = player.ref.currentItem as? VideoPlayerItem,
++      item.videoSource.metadata?.biuMediaKey == metadata.biuMediaKey else { return }
++    item.nowPlayingMetadata = metadata
++    if mostRecentInteractionPlayer === player.ref { updateNowPlayingInfo() }
+   }
+ 
+   func onItemChanged(player: AVPlayer, oldVideoPlayerItem: VideoPlayerItem?, newVideoPlayerItem: VideoPlayerItem?) {
+-    refreshNowPlaying()
++    onMain { [self] in
++      guard mostRecentInteractionPlayer === player else { return }
++      refreshNowPlaying()
++    }
+   }
+ 
+   func onRateChanged(player: AVPlayer, oldRate: Float?, newRate: Float) {
+-    if newRate == 0 && mostRecentInteractionPlayer == player {
+-      if let newPlayer = players.allObjects.first(where: { $0.ref.rate != 0 }) {
+-        setMostRecentInteractionPlayer(player: newPlayer.ref)
++    onMain { [self] in
++      guard players.allObjects.contains(where: { $0.ref === player }) else { return }
++      if newRate != 0 && mostRecentInteractionPlayer !== player {
++        setMostRecentInteractionPlayer(player)
++      } else if newRate == 0 && mostRecentInteractionPlayer === player,
++        let other = players.allObjects.first(where: { $0.ref.rate != 0 }) {
++        setMostRecentInteractionPlayer(other.ref)
++      } else if mostRecentInteractionPlayer === player {
++        setupNowPlayingControls()
++        updateNowPlayingDynamicValues()
+       }
+-    } else if newRate != 0 && mostRecentInteractionPlayer != player {
+-      setMostRecentInteractionPlayer(player: player)
+     }
+   }
+ 
+   func onPlayerItemStatusChanged(player: AVPlayer, oldStatus: AVPlayerItem.Status?, newStatus: AVPlayerItem.Status) {
+-    // The player can be registered before it's item has loaded. We have to re-update the notification when item data is loaded
+-    if player == mostRecentInteractionPlayer && newStatus == .readyToPlay {
++    onMain { [self] in
++      guard player === mostRecentInteractionPlayer, newStatus == .readyToPlay else { return }
+       refreshNowPlaying()
+     }
+   }
+ 
+   func refreshNowPlaying() {
+-    setupNowPlayingControls()
+-    updateNowPlayingInfo()
++    onMain { [self] in
++      setupNowPlayingControls()
++      updateNowPlayingInfo()
++    }
+   }
+ }
+ 
+ private func fetchArtwork(url: URL, completion: @escaping (MPMediaItemArtwork?) -> Void) -> URLSessionDataTask {
+-  let task = URLSession.shared.dataTask(with: url) { data, response, error in
++  var request = URLRequest(url: url, cachePolicy: .returnCacheDataElseLoad, timeoutInterval: 12)
++  if let host = url.host, host == "hdslb.com" || host.hasSuffix(".hdslb.com") {
++    request.setValue("https://www.bilibili.com/", forHTTPHeaderField: "Referer")
++  }
++  let task = URLSession.shared.dataTask(with: request) { data, response, error in
+     if let error = error {
+       log.warn("[expo-video] Couldn't fetch the artwork: \(error.localizedDescription)")
+       completion(nil)
+       return
+     }
+ 
+-    guard let data, response is HTTPURLResponse else {
++    guard let data, let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode) else {
+       log.warn("[expo-video] Couldn't display the artwork: the response was empty")
+       completion(nil)
+       return
+diff --git a/node_modules/expo-video/ios/Records/VideoMetadata.swift b/node_modules/expo-video/ios/Records/VideoMetadata.swift
+index f897db1..844047b 100644
+--- a/node_modules/expo-video/ios/Records/VideoMetadata.swift
++++ b/node_modules/expo-video/ios/Records/VideoMetadata.swift
+@@ -12,5 +12,49 @@ internal struct VideoMetadata: Record {
+ 
+   @Field
+   var artwork: URL? = nil
++
++  @Field
++  var biuMediaKey: String? = nil
++
++  @Field
++  var biuSegmentStart: Double? = nil
++
++  @Field
++  var biuSegmentEnd: Double? = nil
+ }
+ // swiftlint:enable redundant_optional_initialization
++
++internal struct BiuSystemSeekEvent: Record {
++  @Field var sourceTime: Double = 0
++  @Field var mediaKey: String = ""
++  @Field var segmentStart: Double = 0
++  @Field var segmentDuration: Double? = nil
++}
++
++// AVPlayer uses source time; system media controls use the selected song's time.
++struct BiuPlaybackWindow {
++  let start: Double
++  let duration: Double?
++
++  init(sourceDuration: Double, segmentStart: Double?, segmentEnd: Double?) {
++    let sourceEnd = sourceDuration.isFinite && sourceDuration > 0 ? sourceDuration : nil
++    if let from = segmentStart, let to = segmentEnd,
++      from.isFinite, to.isFinite, from >= 0, to > from,
++      min(to, sourceEnd ?? to) > from {
++      start = from
++      duration = min(to, sourceEnd ?? to) - from
++    } else {
++      start = 0
++      duration = sourceEnd
++    }
++  }
++
++  func elapsed(_ sourceTime: Double) -> Double {
++    guard sourceTime.isFinite else { return 0 }
++    return min(duration ?? .infinity, max(0, sourceTime - start))
++  }
++
++  func sourceTime(_ elapsed: Double) -> Double {
++    start + min(duration ?? .infinity, max(0, elapsed.isFinite ? elapsed : 0))
++  }
++}
+diff --git a/node_modules/expo-video/ios/VideoModule.swift b/node_modules/expo-video/ios/VideoModule.swift
+index 2bf2f75..c6e817b 100644
+--- a/node_modules/expo-video/ios/VideoModule.swift
++++ b/node_modules/expo-video/ios/VideoModule.swift
+@@ -249,6 +249,13 @@ public final class VideoModule: Module {
+         player.showNowPlayingNotification = showNowPlayingNotification
+       }
+ 
++      Property("nowPlayingLyric") { player -> String in
++        return player.nowPlayingLyric
++      }
++      .set { (player, lyric: String) in
++        player.nowPlayingLyric = lyric
++      }
++
+       Property("status") { player in
+         return player.status.rawValue
+       }
+@@ -341,6 +348,12 @@ public final class VideoModule: Module {
+         player.ref.pause()
+       }
+ 
++      AsyncFunction("updateMetadata") { (player: VideoPlayer, metadata: VideoMetadata) in
++        await MainActor.run {
++          NowPlayingManager.shared.updateMetadata(player: player, metadata: metadata)
++        }
++      }
++
+       Function("replace") { (player, source: Either<String, VideoSource>?) in
+         let videoSource = parseSource(source: source)
+         try player.replaceCurrentItem(with: videoSource)
+diff --git a/node_modules/expo-video/ios/VideoPlayer.swift b/node_modules/expo-video/ios/VideoPlayer.swift
+index ab8807e..f3ead8c 100644
+--- a/node_modules/expo-video/ios/VideoPlayer.swift
++++ b/node_modules/expo-video/ios/VideoPlayer.swift
+@@ -107,6 +107,14 @@ internal final class VideoPlayer: SharedRef<AVPlayer>, Hashable, VideoPlayerObse
+     }
+   }
+ 
++  var nowPlayingLyric = "" {
++    didSet {
++      if oldValue != nowPlayingLyric && showNowPlayingNotification {
++        NowPlayingManager.shared.updateNowPlayingLyric(player: self, lyric: nowPlayingLyric)
++      }
++    }
++  }
++
+   // TODO: @behenate - Once the Player instance is available in OnStartObserving we can automatically start/stop the interval.
+   var timeUpdateEventInterval: Double = 0 {
+     didSet {
+diff --git a/node_modules/expo-video/ios/VideoPlayerItem.swift b/node_modules/expo-video/ios/VideoPlayerItem.swift
+index 6499afe..af88341 100644
+--- a/node_modules/expo-video/ios/VideoPlayerItem.swift
++++ b/node_modules/expo-video/ios/VideoPlayerItem.swift
+@@ -6,6 +6,7 @@ import AVKit
+ class VideoPlayerItem: AVPlayerItem {
+   let urlAsset: VideoAsset
+   let videoSource: VideoSource
++  var nowPlayingMetadata: VideoMetadata?
+   let isHls: Bool
+   var videoTracks: [VideoTrack] {
+     get async {
+diff --git a/node_modules/expo-video/ios/VideoPlayerObserver.swift b/node_modules/expo-video/ios/VideoPlayerObserver.swift
+index 3962b25..14e1cc2 100644
+--- a/node_modules/expo-video/ios/VideoPlayerObserver.swift
++++ b/node_modules/expo-video/ios/VideoPlayerObserver.swift
+@@ -377,6 +377,7 @@ class VideoPlayerObserver: VideoSourceLoaderListener {
+ 
+     stopTimeUpdates()
+     self.periodicTimeObserver = player?.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] _ in
++      self?.publishBiuPlaybackClock()
+       guard let self, let player, let owner else {
+         return
+       }
+@@ -489,6 +490,7 @@ class VideoPlayerObserver: VideoSourceLoaderListener {
+   }
+ 
+   private func onTimeControlStatusChanged(_ player: AVPlayer, _ change: NSKeyValueObservedChange<AVPlayer.TimeControlStatus>) {
++    publishBiuPlaybackClock()
+     // iOS changes timeControlStatus after an error, so we need to check for errors.
+     if player.status == .failed || player.currentItem?.status == .failed {
+       isPlaying = false
+@@ -516,6 +518,18 @@ class VideoPlayerObserver: VideoSourceLoaderListener {
+     }
+   }
+ 
++  private func publishBiuPlaybackClock() {
++    let publish = { [weak self] in
++      guard let player = self?.player, let item = player.currentItem as? VideoPlayerItem,
++        let key = item.videoSource.metadata?.biuMediaKey else { return }
++      NotificationCenter.default.post(name: Notification.Name("BiuPlayerPlaybackClock"), object: nil,
++        userInfo: ["mediaKey": key, "position": item.currentTime().seconds,
++          "playing": player.rate > 0 && player.timeControlStatus == .playing,
++          "updatedAt": Date().timeIntervalSince1970])
++    }
++    if Thread.isMainThread { publish() } else { DispatchQueue.main.async(execute: publish) }
++  }
++
+   private func onIsBufferEmptyChanged(_ playerItem: AVPlayerItem, _ change: NSKeyValueObservedChange<Bool>) {
+     if playerItem.isPlaybackBufferEmpty {
+       status = .loading
+diff --git a/node_modules/expo-video/src/VideoPlayer.types.ts b/node_modules/expo-video/src/VideoPlayer.types.ts
+index 76436a4..46fbc7c 100644
+--- a/node_modules/expo-video/src/VideoPlayer.types.ts
++++ b/node_modules/expo-video/src/VideoPlayer.types.ts
+@@ -141,6 +141,9 @@ export declare class VideoPlayer extends SharedObject<VideoPlayerEvents> {
+    */
+   showNowPlayingNotification: boolean;
+ 
++  /** Current lyric shown by the iOS 27 system Now Playing session. */
++  nowPlayingLyric: string;
++
+   /**
+    * Determines whether the player should continue playing after the app enters the background.
+    *
+@@ -291,6 +294,9 @@ export declare class VideoPlayer extends SharedObject<VideoPlayerEvents> {
+    */
+   replaceAsync(source: VideoSource): Promise<void>;
+ 
++  /** Update a reused item's system media card without replacing its stream. @platform ios */
++  updateMetadata(metadata: VideoMetadata): Promise<void>;
++
+   /**
+    * Seeks the playback by the given number of seconds. The time to which the player seeks may differ from the specified requested time for efficiency,
+    * depending on the encoding and what is currently buffered by the player. Use this function to implement playback controls that seek by specific amount of time,
+@@ -415,6 +421,11 @@ export type PlayerError = {
+  * @platform ios
+  */
+ export type VideoMetadata = {
++  /** Biu source identity, used to reject stale media-card updates. @platform ios */
++  biuMediaKey?: string;
++  /** Source-time bounds for the selected song in iOS system media controls. */
++  biuSegmentStart?: number | null;
++  biuSegmentEnd?: number | null;
+   /**
+    * The title of the video.
+    * @platform android
+diff --git a/node_modules/expo-video/src/VideoPlayerEvents.types.ts b/node_modules/expo-video/src/VideoPlayerEvents.types.ts
+index 96bff11..6d4e64f 100644
+--- a/node_modules/expo-video/src/VideoPlayerEvents.types.ts
++++ b/node_modules/expo-video/src/VideoPlayerEvents.types.ts
+@@ -41,6 +41,15 @@ export type VideoPlayerEvents = {
+    */
+   playToEnd(): void;
+ 
++  /** Handler for the system media controller next-track command. */
++  nextTrack(): void;
++
++  /** Handler for the system media controller previous-track command. */
++  previousTrack(): void;
++
++  /** iOS system scrubber target, in source time; the native seek is already issued. */
++  systemSeek(payload: { sourceTime: number; mediaKey: string; segmentStart: number; segmentDuration?: number | null }): void;
++
+   /**
+    * Handler for an event emitted in a given interval specified by the `timeUpdateEventInterval`.
+    */

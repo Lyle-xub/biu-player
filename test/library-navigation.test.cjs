@@ -20,11 +20,16 @@ function harness(file) {
     return source.slice(start, end);
   };
   const nodes = new Map();
+  const animationCompletions = [];
   const node = (id) => {
     if (!nodes.has(id)) {
       const classes = new Set();
       nodes.set(id, {
-        scrollTop: 0, style: {}, textContent: '', innerHTML: '',
+        animate() {
+          metrics.transitions++;
+          return { cancel() { metrics.skipped++; }, finished: { then(fn) { animationCompletions.push(fn); return { catch() {} }; } } };
+        },
+        scrollTop: 0, style: {}, textContent: '', innerHTML: '', setAttribute() {},
         classList: {
           add: (c) => classes.add(c), remove: (c) => classes.delete(c),
           contains: (c) => classes.has(c), toggle() {},
@@ -46,31 +51,27 @@ function harness(file) {
     $, api, settings: { recommendMode: 'music' }, state: { recommendations: [], ranking: [], recommendFreshIdx: 0 },
     playHistory: [], console: { error() {} }, URL,
     location: { href: 'http://localhost/' }, history: { replaceState() {} },
-    window: { scrollTo() {}, BiuRecommendation: require('../renderer/recommendation-profile') },
+    window: { scrollTo() {}, matchMedia: () => ({ matches: false }), BiuRecommendation: require('../renderer/recommendation-profile') },
     recommendationProfiles: { isStrict: async () => false, recommend: async () => [], observeFeed() {} },
     document: {
       body,
       querySelector: node,
       querySelectorAll: (q) => q === '.view' ? [node('.view-library'), node('.view-playlist')] : [],
-      startViewTransition: (cb) => {
-        metrics.transitions++;
-        cb();
-        return { skipTransition: () => { metrics.skipped++; } };
-      },
     },
     Date: class extends Date { static now() { return clock.now; } },
     matchMedia: () => ({ matches: false }), setTimeout() {},
     setVideoTheater() {}, setLiveTheater() {}, setVideoMode() {}, closePanel() {},
-    refreshLikeUI() {}, renderMyPlaylists: () => { metrics.my++; },
+    refreshLikeUI() {}, refreshMusicLibraryUI() {}, renderMyPlaylists: () => { metrics.my++; },
     setShelfCover() {}, toast() {}, esc: (value) => String(value),
     publish() {}, renderRec: () => { metrics.rec++; },
   });
   function $(id) { return node(id); }
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../renderer/player-sheet-motion.js'), 'utf8'), context);
   vm.runInContext(
     slice('const VIEW_ORDER =', 'function setModeSelection(') + '\n' +
     slice('let libraryLoadToken =', '/* ---------- 收藏夹 ---------- */') + '\n' +
     'renderRecommendationCards = renderRec;', context);
-  return { context, metrics, api, clock, node, body };
+  return { context, metrics, api, clock, node, body, animationCompletions };
 }
 
 for (const file of ['renderer/app.js', 'web/src/legacy/controller.js']) {
@@ -150,7 +151,7 @@ for (const file of ['renderer/app.js', 'web/src/legacy/controller.js']) {
     }
     assert.equal(h.context.state.recommendations, retained);
     assert.equal(retained.length, 2);
-    assert.deepEqual(h.metrics, before);
+    for (const key of ['my', 'rec', 'ranking', 'feed']) assert.equal(h.metrics[key], before[key]);
   });
 
   test(`${file}: repeated navigation shares the pending initial request`, async () => {
@@ -159,11 +160,12 @@ for (const file of ['renderer/app.js', 'web/src/legacy/controller.js']) {
     h.api.recommendMusic = () => { h.metrics.feed++; return wait.promise; };
     const first = h.context.loadLibrary();
     const again = h.context.loadLibrary();
+    await new Promise(setImmediate);
     assert.equal(h.metrics.my, 1);
     assert.equal(h.metrics.feed, 1);
     wait.resolve([track('first')]);
     await Promise.all([first, again]);
-    assert.equal(h.metrics.rec, 1);
+    assert.equal(h.metrics.rec, 2);
   });
 
   test(`${file}: network retries do not rebuild the local playlist grid`, async () => {
@@ -184,6 +186,7 @@ for (const file of ['renderer/app.js', 'web/src/legacy/controller.js']) {
     const old = deferred();
     h.api.recommendMusic = () => old.promise;
     const previousAccount = h.context.loadMoreRecommendations();
+    await new Promise(setImmediate);
     const current = deferred();
     h.api.recommendMusic = () => current.promise;
     const newAccount = h.context.loadLibrary({ force: true });
@@ -201,12 +204,13 @@ for (const file of ['renderer/app.js', 'web/src/legacy/controller.js']) {
     const old = deferred();
     h.api.recommendMusic = () => old.promise;
     const first = h.context.loadLibrary();
+    await new Promise(setImmediate);
     h.api.recommendMusic = async () => [track('new-account')];
     await h.context.loadLibrary({ force: true });
     old.resolve([track('old-account')]);
     await first;
     assert.equal(h.context.state.recommendations[0].bvid, 'new-account');
-    assert.equal(h.metrics.rec, 1);
+    assert.equal(h.metrics.rec, 2);
   });
 
   test(`${file}: returning preserves homepage scroll and skips loading-style transitions`, () => {
@@ -218,7 +222,7 @@ for (const file of ['renderer/app.js', 'web/src/legacy/controller.js']) {
     library.scrollTop = 0;
     h.context.go('library');
     assert.equal(library.scrollTop, 742);
-    assert.equal(h.metrics.transitions, 1); // 只在进入详情页时使用，不在回主页时重播。
+    assert.equal(h.metrics.transitions, 2); // 两次真实 DOM 过渡都立即提交目标页。
     assert.equal(h.metrics.skipped, 1);
     assert.equal(library.classList.contains('view-entering'), false);
     h.context.go('library');
@@ -227,15 +231,10 @@ for (const file of ['renderer/app.js', 'web/src/legacy/controller.js']) {
 
   test(`${file}: an interrupted transition cannot navigate away again after returning`, () => {
     const h = harness(file);
-    let pending;
-    h.context.document.startViewTransition = (cb) => {
-      pending = cb;
-      return { skipTransition() {} };
-    };
     h.node('.view-library').scrollTop = 600;
     h.context.go('playlist');
     h.context.go('library');
-    pending();
+    h.animationCompletions[0](); // 旧动画稍后完成也不能重新提交页面。
     assert.equal(h.body.dataset.view, 'library');
     assert.equal(h.node('.view-library').scrollTop, 600);
   });

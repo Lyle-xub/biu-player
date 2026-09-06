@@ -139,7 +139,8 @@ function createLanSync({ readLibrary, writeLibrary, cloudKeyStatus, exchangeClou
         const result = reconcile(body.base || null, before, body.library);
         if (JSON.stringify(before) !== JSON.stringify(result)) writeLibrary(current.scope, result, before);
         const receipt = { id: crypto.randomUUID(), revision: revision(result),
-          counts: { likes: result.likes.length, playlists: result.playlists.length, profiles: result.recommendation ? result.recommendation.profiles.length + 1 : 0 } };
+          counts: { likes: result.likes.length, library: result.library.length,
+            playlists: result.playlists.length, profiles: result.recommendation ? result.recommendation.profiles.length + 1 : 0 } };
         if (current.receipts.size >= 64) current.receipts.delete(current.receipts.keys().next().value);
         current.receipts.set(body.clientId, receipt);
         send(res, 200, { revision: receipt.revision, receipt: receipt.id, library: result });

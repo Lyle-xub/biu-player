@@ -106,9 +106,9 @@ export function startAutoSync({ scope, clientId, discovery, storage, getLibrary,
             baselines.set(peer.id, incoming);
             await lanRequest(peer, scope, 'ack', { clientId, receipt: result.receipt }, signal);
             peer.synced = true;
-            report({ message: '已同步 · ' + incoming.likes.length + ' 首喜欢 · ' + incoming.playlists.length + ' 个歌单 · ' + (incoming.recommendation ? incoming.recommendation.profiles.length + 1 : 0) + ' 份画像',
+            report({ message: '已同步 · ' + incoming.likes.length + ' 首喜欢 · ' + incoming.library.length + ' 首音乐库 · ' + incoming.playlists.length + ' 个歌单 · ' + (incoming.recommendation ? incoming.recommendation.profiles.length + 1 : 0) + ' 份画像',
               connected: true, lastSync: Date.now() });
-          } else report({ connected: true, message: '已同步 · ' + base.likes.length + ' 首喜欢 · ' + base.playlists.length + ' 个歌单 · ' + (base.recommendation ? base.recommendation.profiles.length + 1 : 0) + ' 份画像' });
+          } else report({ connected: true, message: '已同步 · ' + base.likes.length + ' 首喜欢 · ' + base.library.length + ' 首音乐库 · ' + base.playlists.length + ' 个歌单 · ' + (base.recommendation ? base.recommendation.profiles.length + 1 : 0) + ' 份画像' });
           connected = true;
         } catch (e) {
           if (peers.get(peer.id) !== peer) continue;

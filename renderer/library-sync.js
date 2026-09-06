@@ -9,7 +9,7 @@
   function track(v) {
     if (!object(v) || (v.isLive ? !(Number(v.roomid) > 0) : !/^BV\w+$/.test(v.bvid || ''))) throw new Error('歌曲数据无效');
     const out = {};
-    for (const k of ['bvid', 'aid', 'cid', 'mid', 'title', 'up', 'duration', 'roomid', 'area', 'online', 'parentBvid', 'parentTitle']) {
+    for (const k of ['bvid', 'aid', 'cid', 'mid', 'title', 'up', 'duration', 'roomid', 'area', 'online', 'parentBvid', 'parentTitle', 'parentUp', 'parentMid', 'addedAt']) {
       if (text(v[k]) || Number.isFinite(v[k])) out[k] = v[k];
     }
     if (text(v.pic, 8192) && /^https?:\/\//i.test(v.pic)) out.pic = v.pic;
@@ -38,7 +38,8 @@
   function normalize(v) {
     if (!object(v) || v.version !== 1 || !Array.isArray(v.playlists) || v.playlists.length > 1000) throw new Error('同步数据格式或版本不兼容');
     const likes = tracks(v.likes);
-    let count = likes.length;
+    const library = tracks(v.library || []);
+    let count = likes.length + library.length;
     const playlists = v.playlists.map((p) => {
       if (!object(p) || !(text(p.id, 128) && p.id || Number.isSafeInteger(p.id) && p.id > 0)
         || !text(p.title) || !p.title.trim()) throw new Error('歌单数据无效');
@@ -51,7 +52,7 @@
       return out;
     });
     if (new Set(playlists.map((p) => String(p.id))).size !== playlists.length) throw new Error('歌单标识重复');
-    return { version: 1, likes, playlists,
+    return { version: 1, likes, library, playlists,
       ...(v.recommendation === undefined ? {} : { recommendation: recommendation.syncState(v.recommendation) }) };
   }
   function merge(a, b) {
@@ -62,7 +63,8 @@
       playlists.set(String(p.id), existing
         ? { ...p, ...existing, tracks: unique([...existing.tracks, ...p.tracks], trackKey) } : p);
     });
-    return normalize({ version: 1, likes: unique([...local.likes, ...remote.likes], trackKey), playlists: [...playlists.values()],
+    return normalize({ version: 1, likes: unique([...local.likes, ...remote.likes], trackKey),
+      library: unique([...local.library, ...remote.library], trackKey), playlists: [...playlists.values()],
       recommendation: recommendation.reconcile(undefined, local.recommendation, remote.recommendation) });
   }
   // First contact is additive. Later exchanges compare with the last shared copy,
@@ -97,7 +99,8 @@
       result.tracks = list(b?.tracks || [], l.tracks, r.tracks, trackKey);
       return result;
     });
-    return normalize({ version: 1, likes: list(base.likes, local.likes, remote.likes, trackKey), playlists,
+    return normalize({ version: 1, likes: list(base.likes, local.likes, remote.likes, trackKey),
+      library: list(base.library, local.library, remote.library, trackKey), playlists,
       recommendation: recommendation.reconcile(base.recommendation, local.recommendation, remote.recommendation) });
   }
   function privateIPv4(address) {

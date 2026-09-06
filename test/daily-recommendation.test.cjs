@@ -150,6 +150,7 @@ test('daily generation streams stable prefixes, fixes the day, persists across r
   assert.equal(D.current(manager.getSnapshot().daily).tracks.length, 0, 'old daily queues and feed candidates cannot bypass the 日推 search');
   assert.equal(baseCalls,0);
   assert.deepEqual(pending.map(v=>new URL(v.url).searchParams.get('keyword')),['日推','日推','日推']);
+  assert.deepEqual(pending.map(v=>new URL(v.url).searchParams.get('order')),['pubdate','pubdate',null]);
   assert.equal(pending.length, 3);
   const batch = (offset) => ({ result: Array.from({ length: 8 }, (_, i) => ({ ...track(offset + i), type: 'video', typeid: 3, tag: '钢琴' })) });
   pending[1].resolve(response(batch(0))); await new Promise(setImmediate);
@@ -193,7 +194,8 @@ test('daily strict selection rejects unrelated partitions and videos; failed sea
   blocked = false;
   const result = await manager.generateDaily(true);
   assert.deepEqual(result.tracks.map((v) => v.bvid), ['BVdailyshort']);
-  assert.equal(calls, 12, 'at most three rounds of three search pages');
+  assert.equal(result.complete, false); assert.match(result.error, /只找到 1 首/);
+  assert.equal(calls, 18, 'fewer than 15 matches searches at most five rounds of three pages');
   manager.dispose();
   assert.throws(() => D.validate({ ...D.normalize(), candidates: [{ bvid: 'bad' }] }), /同步数据/);
 });
@@ -217,8 +219,14 @@ test('daily diversity survives early single-tag batches; explicit single-tag pro
   const manager = R.createManager({ read: async () => R.normalize({ profiles: [{ id: 'mix', name: '混合', tags: [{ name: '阿门', weight: 100 }, { name: '钢琴', weight: 2 }, { name: '爵士', weight: 1 }] }], daily: { profileId: 'mix' } }),
     write: async () => {}, getLikes: () => [], get: async (url) => { urls.push(new URL(url)); return response({ result: [] }); } });
   await manager.generateDaily();
-  assert.equal(urls.length, 9);
+  assert.equal(urls.length, 15);
   assert.ok(urls.every(url=>url.searchParams.get('keyword')==='日推'));
-  assert.deepEqual(urls.map(url=>Number(url.searchParams.get('page'))),[1,2,3,4,5,6,7,8,9]);
+  assert.deepEqual(urls.map(url=>[url.searchParams.get('order') || 'default',Number(url.searchParams.get('page'))]),[
+    ['pubdate',1],['pubdate',2],['default',1],
+    ['pubdate',3],['pubdate',4],['default',2],
+    ['pubdate',5],['pubdate',6],['default',3],
+    ['pubdate',7],['pubdate',8],['default',4],
+    ['pubdate',9],['pubdate',10],['default',5],
+  ]);
   manager.dispose();
 });

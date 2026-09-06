@@ -95,6 +95,10 @@ function ViewLibrary() {
             <p>本地收藏</p>
           </div>
           <div className="card side" id="dailyHome"><div className="cover" data-cover="8" /><h3>每日推荐</h3><p>为今天挑选</p></div>
+          <div className="card side" id="cardLibrary">
+            <div className="cover" data-cover="12"><span className="count shelf-count"><span className="count-play"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></span><span className="count-label" id="shelfLibraryCount">0 首歌曲</span></span></div>
+            <h3>我的音乐库</h3><p>喜欢与主动收藏</p>
+          </div>
           <div className="card side side-r" id="cardRank">
             <div className="cover" data-cover="5"><span className="count shelf-count"><span className="count-play"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></span><span className="count-label">B 站音乐区</span></span></div>
             <h3>音乐区热榜</h3>
@@ -476,6 +480,22 @@ function SplitMask() {
   );
 }
 
+function ShareCardMask() {
+  return (
+    <div className="pl-dialog-mask share-card-mask" id="shareCardMask" hidden={true}>
+      <div className="share-card-dialog" role="dialog" aria-modal="true" aria-label="分享音乐">
+        <canvas id="shareCardCanvas" width="720" height="960"></canvas>
+        <div className="pl-dialog-actions">
+          <button className="btn-ghost" id="shareCardClose" type="button">关闭</button>
+          <button className="btn-ghost" id="shareCardLink" type="button">分享链接</button>
+          <button className="btn-ghost" id="shareCardCopy" type="button">复制卡片</button>
+          <button className="btn-primary" id="shareCardSave" type="button">保存卡片</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function Shell() {
   return (
     <>
@@ -497,6 +517,7 @@ export default function Shell() {
       <PlDialog />
       <SplitMask />
       <LyricMask />
+      <ShareCardMask />
       <div className="toast" id="toast"></div>
       <audio id="audio" preload="auto" crossOrigin="anonymous"></audio>
     </>

@@ -1,7 +1,7 @@
 /* 与桌面端一致：游客使用原键，登录账号使用 base@mid。 */
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-export const ACCOUNT_LIBRARY_KEYS = ['biu.likes', 'biu.history', 'biu.playlists'];
+export const ACCOUNT_LIBRARY_KEYS = ['biu.likes', 'biu.history', 'biu.playlists', 'biu.library'];
 
 export const accountKey = (base, scope = '') => (scope ? `${base}@${scope}` : base);
 

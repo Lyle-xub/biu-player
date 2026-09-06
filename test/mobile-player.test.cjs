@@ -10,6 +10,17 @@ const babel = fromMobile('@babel/core');
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
 function loader(mocks = {}) {
+  mocks = {
+    'biu-lyric-monet': {},
+    'expo-asset': { Asset: { fromModule: () => ({ downloadAsync: async () => {}, localUri: null }) } },
+    'expo-application': { nativeApplicationVersion: '1.0.6', nativeBuildVersion: '20' },
+    'biu-lyrics-pip': { setLyricsPiPEnabled() {}, updateLyricsPiP() {}, extractCoverColor: async () => null },
+    'src/widgets/LyricsWidgets': { LyricsLiveActivity: { getInstances: () => [], start() {} }, LyricsWidget: { updateSnapshot() {} } },
+    'expo-sharing': { isAvailableAsync: async () => false, shareAsync: async () => {} },
+    'react-native-view-shot': { captureRef: async () => 'fixture.png' },
+    'src/updates/service': { appUpdates: {}, useAppUpdates: () => ({ supported: false, loaded: false }) },
+    ...mocks,
+  };
   const cache = new Map();
   const load = (file) => {
     file = path.resolve(root, file);
@@ -29,7 +40,7 @@ function loader(mocks = {}) {
         const relative = path.relative(root, target).replaceAll('\\', '/');
         return relative in mocks ? mocks[relative] : load(target);
       }
-      return fromMobile(name);
+      try { return fromMobile(name); } catch (error) { error.message = `${name} imported by ${path.relative(root, file)}: ${error.message}`; throw error; }
     };
     new Function('require', 'module', 'exports', code)(req, module, module.exports);
     return module.exports;
@@ -39,6 +50,232 @@ function loader(mocks = {}) {
 
 const motion = loader({ 'biu-lyric-monet': {} })('src/player/lyricMotion.js');
 const trackModel = loader()('src/player/track.js');
+
+test('system lyric slots alternate 1/2, 3/2, 3/4 and recover after seeks without interlude parity drift', () => {
+  const model = loader({ 'biu-lyric-monet': {} })('src/player/systemLyrics.js');
+  const lines = model.prepareSystemLyrics([
+    { from: 0, to: 3, text: '第一句' },
+    { from: 3, to: 6, text: '第二句' },
+    { from: 6, to: 8, text: '......', interlude: true },
+    { from: 8, to: 11, text: '第三句' },
+    { from: 11, to: 14, text: '第四句' },
+    { from: 14, to: 17, text: '第五句' },
+  ]);
+  const at = (time) => {
+    const result = model.systemLyricSlots(lines, time);
+    return [result.activeSlot, result.slots.map((line) => line?.text || '')];
+  };
+  assert.deepEqual(at(-1), [0, ['第一句', '第二句']]);
+  assert.deepEqual(at(2.99), [0, ['第一句', '第二句']]);
+  assert.deepEqual(at(3), [1, ['第三句', '第二句']]);
+  assert.deepEqual(at(6), [1, ['第三句', '第二句']],
+    'the completed line stays focused through an instrumental gap');
+  assert.deepEqual(at(8), [0, ['第三句', '第四句']], 'the row changes when the next lyric starts');
+  assert.deepEqual(at(11), [1, ['第五句', '第四句']]);
+  assert.deepEqual(at(9), [0, ['第三句', '第四句']], 'backward seeks recover the same physical slots');
+  assert.deepEqual(at(99), [0, ['第五句', '']]);
+  assert.deepEqual(model.systemLyricSlots([], 0), { slots: [null, null], activeSlot: 0 });
+  assert.equal(lines[0].words.at(-1)[0], 3, 'compact word timing retains every grapheme');
+  const realistic = model.prepareSystemLyrics(Array.from({ length: 2 }, (_, i) => ({
+    text: '如果有一天我们沿着这条漫长的街道继续向前走去直到看见远方微弱的光芒', from: i * 10, to: i * 10 + 10,
+  })));
+  assert.equal(realistic[0].words.length, 1,
+    'line-timed LRC follows Folia as one timed token instead of guessed concurrent words');
+  assert.ok(Buffer.byteLength(JSON.stringify(model.systemLyricSlots(realistic, 5))) < 3000,
+    'word timing leaves room for metadata within ActivityKit’s 4 KB content budget');
+});
+
+test('Monet punctuation shares the adjacent word clock without losing text or moving word boundaries', () => {
+  const tokens = motion.buildLineTokens('“Hello, 世界！”', 2, 8);
+  assert.equal(tokens.map((t) => t.text).join(''), '“Hello, 世界！”');
+  assert.ok(tokens.every((t) => t.timed), 'visible punctuation cannot be skipped by the renderer');
+  assert.equal(tokens[0].t0, 2);
+  assert.equal(tokens.at(-1).t1, 8);
+  const source = [
+    { text: '「', timed: false }, { text: '你好', timed: true, t0: 1, t1: 2 },
+    { text: '， ', timed: false }, { text: '世界', timed: true, t0: 3, t1: 4 },
+    { text: '！」', timed: false },
+  ];
+  const joined = motion.joinLyricSeparators(source);
+  assert.deepEqual(joined.map((t) => [t.text, t.t0, t.t1]), [['「你好， ', 1, 2], ['世界！」', 3, 4]]);
+  assert.equal(source[1].text, '你好', 'cached source tokens are not mutated');
+  const model = loader({ 'biu-lyric-monet': {} })('src/player/systemLyrics.js');
+  const [line] = model.prepareSystemLyrics([{ text: source.map((t) => t.text).join(''), from: 1, to: 4, tokens: source }]);
+  assert.ok(line.words.every((word) => word[1] >= 0 && word[2] > word[1]));
+  assert.equal(line.words.at(-1)[0], motion.splitLyricGraphemes(line.text).length);
+});
+
+test('system lyric renderers avoid unsupported widget lifecycle clocks and preserve seek identity', () => {
+  const swift = fs.readFileSync(path.join(root, 'node_modules/expo-widgets/ios/Widgets/WidgetLiveActivity.swift'), 'utf8');
+  const model = fs.readFileSync(path.join(root, 'node_modules/expo-widgets/ios/Widgets/BiuMonetLyrics.swift'), 'utf8');
+  const sync = fs.readFileSync(path.join(root, 'src/components/LyricsActivitySync.js'), 'utf8');
+  assert.match(swift, /\.id\("\\\(payload\.animationID\):\\\(line\.id\):\\\(pageIndex\)"\)/);
+  assert.doesNotMatch(swift, /line\.id\):\\\(focused/,
+    'focus changes cannot recreate a short-line scan view');
+  assert.match(swift, /ProgressView\(timerInterval: interval, countsDown: false\)/,
+    'system-owned date progress advances without repeated activity animations');
+  assert.match(swift, /BiuSystemLyricSweep\(text: text/,
+    'the whole line and its highlight remain in one coordinate system');
+  assert.match(swift, /\.offset\(x: inset \+ origin\)/);
+  assert.match(swift, /\.clipped\(\)/, 'the scrolling viewport crops content without fading it');
+  assert.match(swift, /Image\(decorative: bitmap/, 'stable glyph bitmaps avoid system text replacement fades');
+  assert.doesNotMatch(swift, /scrollToEnd|scrollDuration/, 'hard-cut pages have no scrolling animation targets');
+  assert.match(swift, /let started = focused && time >= line.from/, 'future lyrics cannot start their timer early');
+  assert.match(swift, /glyphImage\(\)\.foregroundStyle\(biuLyricText\)\.mask/,
+    'the system timer layer reveals glyphs directly, without a JS progress callback');
+  assert.match(swift, /\.contentTransition\(\.identity\)/,
+    'text changes must disable WidgetKit default blurred content transitions');
+  assert.match(swift, /\.animation\(nil, value: focused\)/,
+    'focus and highlight replacement must not inherit the one-second scan animation');
+  assert.doesNotMatch(swift + model, /var animatableData|\.animation\(nil, value: time\)/,
+    'remote snapshots animate standard masks and offsets, not a custom app-side clock');
+  assert.doesNotMatch(swift, /TimelineView|@State|Transaction\(|\.onAppear|\.onChange|\.id\(payload\.updatedAt/,
+    'remote WidgetKit rendering cannot depend on App view lifecycle callbacks or transactions');
+  assert.doesNotMatch(swift, /BiuMonetStrip|BiuSimpleLyricStrip/,
+    'a new snapshot cannot restart a one-second glyph animation');
+  assert.match(swift, /DynamicIslandExpandedRegion\(\.bottom\)/,
+    'expanded lyrics use the widest Dynamic Island region available to apps');
+  assert.doesNotMatch(model, /min\(0\.75/,
+    'delayed ActivityKit updates cannot freeze the clock after 0.75 seconds');
+  assert.match(sync, /_timeline: preparedLines/,
+    'native playback receives the full timeline so delayed JS cannot freeze line changes');
+  assert.match(swift, /payload\.backgroundColor/,
+    'the Live Activity background uses the color extracted from current artwork');
+  const observer = fs.readFileSync(path.join(root, 'node_modules/expo-video/ios/VideoPlayerObserver.swift'), 'utf8');
+  const controls = fs.readFileSync(path.join(root, 'node_modules/expo-video/ios/NowPlayingManager.swift'), 'utf8');
+  assert.match(observer, /addPeriodicTimeObserver[\s\S]*?self\?\.publishBiuPlaybackClock\(\)/);
+  assert.match(observer, /Notification\.Name\("BiuPlayerPlaybackClock"\)/);
+  assert.doesNotMatch(controls, /Notification\.Name\("BiuPlayerPlaybackClock"\)/,
+    'the lyric clock must survive a missing or replaced Now Playing card');
+});
+
+test('anonymous music ranking falls back on -352 while preserving other failures', async () => {
+  const requests = [];
+  let code = -352;
+  const api = loader({ './client': { get: async (url) => {
+    requests.push(url);
+    return { status: 200, body: JSON.stringify(url.includes('/ranking/v2')
+      ? { code, message: String(code) }
+      : { code: 0, data: [{ bvid: 'BVguest', title: '音乐榜', duration: 30, owner: { name: 'UP' } }] }) };
+  } } })('src/api/bili.js');
+  assert.equal((await api.ranking())[0].bvid, 'BVguest');
+  assert.equal(requests.length, 2);
+  assert.match(requests[1], /ranking\/region\?rid=3&day=3&original=0$/);
+  code = -500;
+  await assert.rejects(api.ranking(), (error) => error.code === -500);
+  assert.equal(requests.length, 3, 'unrelated failures are not retried against other endpoints');
+});
+
+test('system lyrics share offsets and seek timing, and cannot return after disable or unmount', async () => {
+  let state = {
+    current: { bvid: 'lyrics-a', title: 'A' }, position: 7, playing: true, buffering: false,
+    lyricSettings: { 'lyrics-a': { offset: 2 } }, seekRevision: 0,
+    desktopLyricsEnabled: true, lockScreenLyricsEnabled: true, dynamicIslandLyricsEnabled: true,
+  };
+  const events = [], pip = [], snapshots = [], pipFrames = [];
+  let releaseLyrics;
+  const loadedLyrics = new Promise((resolve) => { releaseLyrics = resolve; });
+  let instances = [], holdUpdate = null;
+  const makeInstance = (name) => ({
+    update: async (payload) => {
+      events.push(['update', payload]);
+      if (holdUpdate) await holdUpdate;
+    },
+    end: async (policy) => {
+      events.push(['end', name, policy]);
+      instances = instances.filter((item) => item !== instanceByName[name]);
+    },
+  });
+  const instanceByName = { old: makeInstance('old') };
+  instances = [instanceByName.old];
+  let starts = 0;
+  const Sync = loader({
+    'react-native': { Platform: { OS: 'ios' } },
+    'biu-lyric-monet': {},
+    'src/player/PlayerContext': { usePlayer: () => state },
+    'src/player/track': { trackKeyOf: (track) => track?.bvid || '', segmentRange: trackModel.segmentRange },
+    'src/player/loadLyrics': { loadTrackLyrics: () => loadedLyrics },
+    'src/widgets/LyricsWidgets': {
+      LyricsWidget: { updateSnapshot: (props) => {
+        // Expo Widgets writes props straight into UserDefaults, which rejects
+        // null (including an empty lyric slot nested in an array).
+        const checkPropertyList = (value) => {
+          assert.notEqual(value, null, 'widget snapshots must be valid property lists');
+          assert.notEqual(value, undefined);
+          if (typeof value === 'object') Object.values(value).forEach(checkPropertyList);
+        };
+        checkPropertyList(props);
+        snapshots.push(props);
+      } },
+      LyricsLiveActivity: {
+        getInstances: () => instances.slice(),
+        start: (payload) => {
+          const name = `new-${++starts}`;
+          events.push(['start', payload]);
+          instanceByName[name] = makeInstance(name);
+          instances.push(instanceByName[name]);
+        },
+      },
+    },
+    'biu-lyrics-pip': {
+      setLyricsPiPEnabled: (value) => pip.push(value), updateLyricsPiP: (frame) => pipFrames.push(frame),
+    },
+  })('src/components/LyricsActivitySync.js').default;
+  let tree;
+  const latest = () => events.filter(([type]) => type === 'start' || type === 'update').at(-1)[1];
+  const update = async (patch) => {
+    state = { ...state, ...patch };
+    await act(async () => { tree.update(React.createElement(Sync)); });
+  };
+  await act(async () => { tree = create(React.createElement(Sync)); });
+  assert.deepEqual(events[0], ['end', 'old', 'immediate'], 'cold launch removes the orphan before starting');
+  assert.equal(snapshots.at(-1).currentLine, '', 'cold launch publishes before lyrics have loaded');
+  assert.deepEqual(pipFrames.at(-1).slots, [null, null], 'PiP retains the two empty JSON slots');
+  await act(async () => { releaseLyrics([
+    { from: 0, to: 10, text: '第一句' }, { from: 10, to: 20, text: '第二句很长也不缩小字号' },
+  ]); });
+  assert.equal(latest().position, 9);
+  assert.equal(latest().slots[latest().activeSlot].text, '第一句');
+  assert.equal(latest().activeSlot, 0);
+  assert.deepEqual(latest().slots.map((line) => line?.text), ['第一句', '第二句很长也不缩小字号']);
+  assert.equal((latest().position - latest().slots[0].from) / (latest().slots[0].to - latest().slots[0].from), 0.9);
+  await update({ lyricSettings: { 'lyrics-a': { offset: 4 } } });
+  assert.equal(latest().position, 11);
+  assert.equal(latest().slots[latest().activeSlot].text, '第二句很长也不缩小字号');
+  assert.equal(latest().activeSlot, 1);
+  assert.equal(latest().slots[0], null, 'the final line stays in its original lower slot');
+  assert.equal(snapshots.at(-1).currentLine, '第二句很长也不缩小字号');
+  assert.equal(snapshots.at(-1).nextLine, '');
+  assert.equal(pipFrames.at(-1).slots[0], null, 'PiP keeps the final line in the lower slot too');
+  const snapshotCount = snapshots.length;
+  await update({ position: 7.1, seekRevision: 1 });
+  assert.equal(latest().position, 11.1, 'a seek inside the same half-second bucket still publishes');
+  assert.equal(latest().clockRevision, 'lyrics-a:1:4');
+  assert.equal(snapshots.length, snapshotCount, 'unchanged text does not reload the static widget');
+  assert.equal(pipFrames.at(-1).position, 11.1, 'PiP animation still receives progress when widget text is unchanged');
+  assert.equal(latest()._audioOffset, 4);
+  assert.equal(latest()._timeline.length, 2);
+  const activityCount = events.length;
+  await update({ position: 8.1 });
+  assert.equal(events.length, activityCount, 'ordinary JS progress must not compete with native ActivityKit updates');
+  await update({ buffering: true });
+  assert.equal(latest().playing, false, 'a buffering player cannot advance the lyric clock');
+  await update({ buffering: false, playing: false });
+  assert.equal(latest().playing, false);
+  let release;
+  holdUpdate = new Promise((resolve) => { release = resolve; });
+  await update({ position: 8, seekRevision: 2 });
+  await update({ desktopLyricsEnabled: false, lockScreenLyricsEnabled: false, dynamicIslandLyricsEnabled: false });
+  await act(async () => { release(); await holdUpdate; });
+  holdUpdate = null;
+  assert.equal(instances.length, 0, 'disabling waits for the old update, then removes both Live Activity surfaces');
+  assert.equal(pip.at(-1), false);
+  await update({ desktopLyricsEnabled: true, lockScreenLyricsEnabled: true, dynamicIslandLyricsEnabled: true });
+  assert.equal(instances.length, 1);
+  await act(async () => { tree.unmount(); });
+  assert.equal(instances.length, 0);
+  assert.equal(pip.at(-1), false);
+});
 
 test('desktop and mobile recommendations, ranking and search retain short videos', async () => {
   let detailCalls = 0;
@@ -131,10 +368,12 @@ test('segment track identities distinguish two songs from one video; invalid ran
   assert.deepEqual(trackModel.segmentRange(tracks[1]), { from: 10, to: 30 });
   assert.equal(tracks[1].duration, 20);
   assert.equal(trackModel.segmentRange({ isSegment: true, from: 10, to: 5 }), null);
-  const matched = trackModel.segmentTracks({ bvid: 'BV1', cid: 4, title: 'Mix', up: 'Uploader' }, [
+  const matched = trackModel.segmentTracks({ bvid: 'BV1', cid: 4, mid: 42, title: 'Mix', up: 'Uploader' }, [
     { from: 10, to: 30, name: 'Draft', match: { title: 'Song', artist: 'Singer', pic: 'cover', source: 'shazam', lrcSource: 'qq', songmid: 'q1' } },
   ])[0];
   assert.equal(matched.title, 'Song'); assert.equal(matched.up, 'Singer'); assert.equal(matched.pic, 'cover');
+  assert.equal(matched.parentTitle, 'Mix'); assert.equal(matched.parentUp, 'Uploader'); assert.equal(matched.parentMid, 42);
+  assert.equal(matched.mid, undefined, 'recognized artist is not paired with the source uploader mid');
   assert.deepEqual(matched.lyricRef, { source: 'qq', id: undefined, songmid: 'q1' });
 });
 
@@ -329,6 +568,89 @@ const click = async (tree, label) => {
   await act(async () => { node.props.onPress(); });
 };
 const textOf = (tree) => JSON.stringify(tree.toJSON());
+
+test('recognized tracks show source attribution and only the uploader link opens the UP page on both platforms', async () => {
+  const track = trackModel.segmentTracks({ bvid: 'BVsource', cid: 1, mid: 42,
+    title: '原视频合集', up: '原视频UP' }, [{ from: 0, to: 30,
+    match: { title: '很长的识别歌曲名称'.repeat(5), artist: '识别歌手' } }])[0];
+  const daily = require('../renderer/daily-recommendation.js');
+  const compact = daily.compact(track);
+  assert.equal(compact.parentTitle, track.parentTitle);
+  assert.equal(compact.parentUp, track.parentUp);
+  assert.equal(String(compact.parentMid), '42');
+  for (const platform of ['ios', 'android']) {
+    const load = loader({ 'react-native': { ...rn, Platform: { OS: platform } },
+      '@react-native-async-storage/async-storage': storage,
+      'src/api/bili': { view: async () => { throw Error('complete tracks must not fetch metadata'); } },
+      'src/components/RemoteImage': { __esModule: true, default: 'RemoteImage' },
+      'src/components/icons': iconMock });
+    const { openTrackUp, canOpenTrackUp } = load('src/player/openTrackUp.js');
+    assert.equal(canOpenTrackUp(track), true);
+    for (const name of ['TrackRow', 'TrackCard']) {
+      const Component = load(`src/components/${name}.js`).default;
+      let tree, stopped = 0, played = 0;
+      const navigations = [];
+      const navigation = { navigate: (...args) => navigations.push(args) };
+      await act(async () => { tree = create(React.createElement(Component, { track,
+        onPress: () => { played++; },
+        onPressUp: () => openTrackUp(navigation, track, async (item) => item.parentMid) })); });
+      const texts = tree.root.findAllByType('Text');
+      assert.ok(texts.some((node) => node.props.children === track.title));
+      assert.ok(texts.some((node) => JSON.stringify(node.props.children).includes('原视频合集')));
+      assert.ok(texts.some((node) => node.props.children === '识别歌手'));
+      assert.equal(tree.root.findAll((node) => node.type === 'TouchableOpacity'
+        && node.props.accessibilityRole === 'link').length, 1);
+      const link = touch(tree, '打开 原视频UP 的 UP 主页');
+      assert.ok(link, `${platform} ${name}: original uploader must remain clickable`);
+      await act(async () => link.props.onPress({ stopPropagation: () => { stopped++; } }));
+      assert.deepEqual(navigations, [['Up', { mid: 42 }]]);
+      assert.equal(stopped, 1); assert.equal(played, 0);
+      await act(async () => tree.update(React.createElement(Component,
+        { track: { ...track, isSegment: false, title: '普通视频', up: '普通UP' } })));
+      assert.doesNotMatch(tree.root.findAllByType('Text').map((node) => node.props.children).flat().join(''),
+        /原视频合集|原视频UP/);
+      await act(async () => tree.unmount());
+    }
+  }
+});
+
+test('legacy segment rows recover source metadata once per video, persist it, and reject recycled-row results', async () => {
+  const disk = new Map();
+  const requests = [];
+  const a = deferred(), b = deferred();
+  const store = { getItem: async (key) => disk.get(key) ?? null,
+    setItem: async (key, value) => { disk.set(key, value); } };
+  const mocks = { 'react-native': rn, '@react-native-async-storage/async-storage': store,
+    'src/components/RemoteImage': { __esModule: true, default: 'RemoteImage' },
+    'src/components/icons': iconMock,
+    'src/api/bili': { view: (bvid) => { requests.push(bvid); return bvid === 'BVoldA' ? a.promise : b.promise; } } };
+  const load = loader(mocks);
+  const Row = load('src/components/TrackRow.js').default;
+  const { canOpenTrackUp } = load('src/player/openTrackUp.js');
+  const legacy = { bvid: 'BVoldA', isSegment: true, title: '识别歌A', up: '识别歌手', from: 0, to: 30 };
+  assert.equal(canOpenTrackUp(legacy), true, 'missing parentUp cannot disable the eventual source link');
+  const rows = (tracks) => React.createElement(React.Fragment, null, ...tracks.map((track, i) =>
+    React.createElement(Row, { key: i, track, onPressUp: () => {} })));
+  const visible = (tree) => tree.root.findAllByType('Text').map((node) => node.props.children).flat().join('');
+  let tree;
+  await act(async () => { tree = create(rows([legacy, { ...legacy, title: '识别歌B', from: 30, to: 60 }])); });
+  assert.deepEqual(requests, ['BVoldA'], 'same-video segments coalesce their lookup');
+  await act(async () => a.resolve({ title: '原视频A', owner: { name: '原UP A', mid: 42 } }));
+  assert.match(visible(tree), /原视频A/); assert.match(visible(tree), /原UP A/);
+  assert.match(visible(tree), /识别歌A/); assert.match(visible(tree), /识别歌手/);
+  assert.equal(legacy.parentTitle, undefined, 'rendering must not mutate a stored recognized track');
+  assert.equal(tree.root.findAllByType('TouchableOpacity').filter((n) => n.props.accessibilityRole === 'link').length, 2);
+  await act(async () => tree.update(rows([{ ...legacy, bvid: 'BVoldB', title: '另一首' }])));
+  assert.doesNotMatch(visible(tree), /原视频A|原UP A/, 'recycling immediately drops the previous source');
+  await act(async () => tree.update(rows([{ bvid: 'BVordinary', title: '普通视频', up: '普通UP' }])));
+  await act(async () => b.resolve({ title: '原视频B', owner: { name: '原UP B', mid: 99 } }));
+  assert.doesNotMatch(visible(tree), /原视频B|原UP B/);
+  await act(async () => tree.unmount());
+  const restarted = loader({ ...mocks, 'src/api/bili': { view: () => { throw Error('offline'); } } });
+  assert.deepEqual(await restarted('src/player/trackSource.js').fetchTrackSource('BVoldA'),
+    { title: '原视频A', up: '原UP A', mid: 42 }, 'relaunch/offline uses the persisted public metadata');
+});
+
 function withOverlays(load, Component) {
   const { OverlayProvider } = load('src/components/Overlay.js');
   return (props) => React.createElement(OverlayProvider, null, React.createElement(Component, props));
@@ -353,8 +675,11 @@ test('app gives pushed screens their own background and waits for startup layout
     'react-native-svg': { __esModule: true, default: 'Svg', Defs: 'Defs', RadialGradient: 'RadialGradient', Rect: 'Rect', Stop: 'Stop' },
     'src/player/PlayerContext': { PlayerProvider: 'PlayerProvider' },
     'src/store/LanSyncProvider': { LanSyncProvider: 'LanSyncProvider' },
+    'src/store/CloudSyncProvider': { CloudSyncProvider: 'CloudSyncProvider' },
     'src/player/useMediaTransition': { mediaScreenOptions: {} },
-    'src/components/MiniBar': { default: () => null },
+    'src/components/MiniBar': { default: 'MiniBar', __esModule: true },
+    'src/components/LyricsActivitySync': { default: () => null, __esModule: true },
+    'src/components/AppUpdateCard': { AppUpdateNotice: () => null },
     'src/components/icons': iconMock,
     'assets/splash-icon.png': 1,
   };
@@ -369,7 +694,7 @@ test('app gives pushed screens their own background and waits for startup layout
   let tree;
   const before = animationCalls.length;
   await act(async () => { tree = create(React.createElement(App)); });
-  const stack = tree.root.findByType('Navigator').props;
+  let stack = tree.root.findByType('Navigator').props;
   assert.equal(stack.screenOptions.animation, 'none', 'the page performs one complete transition before popping');
   assert.equal(stack.screenOptions.presentation, 'transparentModal');
   const child = React.createElement('Page');
@@ -379,18 +704,33 @@ test('app gives pushed screens their own background and waits for startup layout
   assert.ok(page.props.children.includes(child), 'background and content share the moving scene');
   assert.equal(stack.screenLayout({ route: { name: 'Player' }, options: { presentation: 'transparentModal' }, children: child }), child,
     'media gestures must still reveal the page underneath');
+  const scene = (name) => stack.layout({ children: React.createElement('Pages'),
+    state: { index: 0, routes: [{ name }] }, navigation: {} });
+  let chrome;
+  await act(async () => { chrome = create(scene('Tabs')); });
   assert.equal(hidden, 0);
-  await act(async () => tree.root.findByType('AnimatedImage').props.onLoadEnd());
+  await act(async () => chrome.root.findByType('AnimatedImage').props.onLoadEnd());
   assert.equal(hidden, 0, 'image loading alone must not uncover an unlaid-out view');
-  await act(async () => tree.root.findByType('AnimatedView').props.onLayout());
+  await act(async () => chrome.root.findByType('AnimatedView').props.onLayout());
   assert.equal(hidden, 1);
   assert.equal(animationCalls.length, before + 1);
   const fade = animationCalls.at(-1);
   assert.ok(fade.config.delay >= 350, 'allow the native splash fade to finish');
   assert.equal(fade.config.useNativeDriver, true);
-  assert.equal(tree.root.findAllByType('AnimatedImage').length, 1);
+  assert.equal(chrome.root.findAllByType('AnimatedImage').length, 1);
   await act(async () => fade.finish());
-  assert.equal(tree.root.findAllByType('AnimatedImage').length, 0);
+  assert.equal(chrome.root.findAllByType('AnimatedImage').length, 0);
+  await act(async () => chrome.update(scene('Player')));
+  assert.equal(chrome.root.findByType('MiniBar').props.visible, false);
+  await act(async () => chrome.update(scene('Tabs')));
+  assert.equal(chrome.root.findByType('MiniBar').props.visible, false,
+    'the mini player stays hidden while the player route is sliding down');
+  await act(async () => stack.screenListeners.transitionEnd({ data: { closing: true } }));
+  stack = tree.root.findByType('Navigator').props;
+  await act(async () => chrome.update(scene('Tabs')));
+  assert.equal(chrome.root.findByType('MiniBar').props.visible, true,
+    'the mini player enters only after the closing transition ends');
+  await act(async () => chrome.unmount());
   await act(async () => tree.unmount());
 });
 
@@ -964,6 +1304,9 @@ test('scrubber follows stable touch coordinates, commits once and animates cance
     onSeek: (value) => { seeks.push(value); position = value; seekRevision++; } });
   await act(async () => { tree = create(render()); });
   const zone = tree.root.findByProps({ accessibilityRole: 'adjustable' });
+  assert.equal(zone.props.onStartShouldSetResponderCapture(), true);
+  assert.equal(zone.props.onMoveShouldSetResponderCapture(), true,
+    'scrubber captures movement before a surrounding ScrollView can cancel it');
   const event = (pageX, locationX) => ({ nativeEvent: { pageX, locationX } });
   const thumb = () => zone.findAllByType('AnimatedView').find((n) => n.props.style?.[0]?.width === 10);
   const ratio = () => thumb().props.style[1].transform[0].translateX.source.value;
@@ -986,6 +1329,9 @@ test('scrubber follows stable touch coordinates, commits once and animates cance
   assert.ok(rollback?.config.useNativeDriver);
   await act(async () => rollback.finish());
   assert.equal(ratio(), 0.8);
+  await act(async () => zone.props.onResponderGrant(event(130, 100)));
+  await act(async () => zone.props.onResponderRelease(event(130, 100)));
+  assert.deepEqual(seeks, [80, 50], 'a tap without a move uses the touch position, never PanResponder moveX=0');
   await act(async () => tree.unmount());
 });
 
@@ -1019,7 +1365,8 @@ test('player tabs retain the same video surface and expose local likes in cover 
   const video = tree.root.findByType('VideoView');
   assert.equal(video.props.contentFit, 'contain', 'the original video must remain uncropped');
   assert.equal(video.props.useExoShutter, true, 'Android must not leave the texture transparent after a missed first-frame event');
-  assert.equal(video.props.style.flex, 1, 'the native texture gets a measured flex layout instead of an absolute zero-size race');
+  assert.deepEqual(video.props.style, { ...rn.StyleSheet.absoluteFill, borderRadius: 14 },
+    'the native texture fills the inset surface and matches its corner radius');
   const videoFrame = tree.root.findAllByType('View').find((n) => n.props.style?.[0]?.aspectRatio === 16 / 9);
   assert.equal(videoFrame.props.style[0].overflow, undefined, 'the outer glow must not be clipped');
   const coverGlow = videoFrame.findAllByType('ExpoImage').find((n) => n.props.blurRadius === 28);
@@ -1213,6 +1560,7 @@ test('player publishes system media metadata, seeks within segments and advances
   let replacements = 0;
   const player = { playing: false, status: 'readyToPlay', currentTime: 0, duration: 400,
     play() { this.playing = true; }, pause() { this.playing = false; },
+    async updateMetadata(metadata) { this.publishedMetadata = metadata; },
     async replaceAsync(source) { replacements += 1; this.source = source; this.currentTime = 0; } };
   const urls = [];
   const load = loader({
@@ -1236,16 +1584,29 @@ test('player publishes system media metadata, seeks within segments and advances
   await act(async () => { tree = create(React.createElement(PlayerProvider, null, React.createElement(Probe))); });
   assert.equal(player.staysActiveInBackground, true);
   assert.equal(player.showNowPlayingNotification, true, 'background playback must also opt into system media controls');
-  const list = trackModel.segmentTracks({ bvid: 'A', cid: 10, title: 'Mix', up: 'Artist', pic: 'https://cdn/cover.jpg' }, [
-    { from: 20, to: 40, name: 'One' }, { from: 40, to: 70, name: 'Two' },
+  assert.equal(player.audioMixingMode, 'doNotMix', 'expo-video alone owns the iOS playback session');
+  const list = trackModel.segmentTracks({ bvid: 'A', cid: 10, title: 'Mix', up: 'Artist', pic: '//cdn/cover.jpg' }, [
+    { from: 20, to: 40, name: 'One' }, { from: 40, to: 70, match: { title: 'Two', artist: 'Second singer', pic: '//cdn/second.jpg' } },
   ]);
   await act(async () => { await context.playQueue(list); });
-  assert.deepEqual(player.source.metadata, { title: 'Mix', artist: 'Artist', artwork: 'https://cdn/cover.jpg' });
+  assert.deepEqual(player.source.metadata, { title: 'One', artist: 'Artist', artwork: 'https://cdn/cover.jpg', biuMediaKey: 'A:10', biuSegmentStart: 20, biuSegmentEnd: 40 });
   assert.equal(player.currentTime, 20); assert.equal(context.position, 0); assert.equal(context.duration, 20);
+  const seekRevisionBefore = context.seekRevision;
+  player.currentTime = 25; // Native system command has already issued the seek.
+  await act(async () => listeners.systemSeek({ sourceTime: 25, mediaKey: 'A:10', segmentStart: 20, segmentDuration: 20 }));
+  assert.equal(context.position, 5, 'system scrubber immediately updates segment-relative UI');
+  assert.equal(player.playing, true, 'system scrubbing retains playing state');
+  assert.equal(context.seekRevision, seekRevisionBefore + 1);
+  await act(async () => { listeners.timeUpdate({ currentTime: 40 }); listeners.playToEnd(); });
+  assert.equal(context.index, 0, 'stale end events cannot finish a song during system scrubbing');
+  await act(async () => listeners.timeUpdate({ currentTime: 25.1 }));
+  assert.ok(Math.abs(context.position - 5.1) < 0.001);
+  await act(async () => listeners.systemSeek({ sourceTime: 45, mediaKey: 'A:10', segmentStart: 40, segmentDuration: 30 }));
+  assert.ok(Math.abs(context.position - 5.1) < 0.001, 'delayed seek events from another segment are ignored');
   player.pause();
   await act(async () => context.seekTo(5));
   assert.equal(player.currentTime, 25); assert.equal(context.position, 5);
-  assert.equal(context.seekRevision, 1, 'explicit seeks are visible to lyric interpolation');
+  assert.equal(context.seekRevision, seekRevisionBefore + 2, 'explicit seeks are visible to lyric interpolation');
   await act(async () => listeners.timeUpdate({ currentTime: 20.25 }));
   assert.equal(context.position, 5, 'a pre-seek native tick cannot flash the lyrics back to the old position');
   await act(async () => context.seekTo(12));
@@ -1262,11 +1623,93 @@ test('player publishes system media metadata, seeks within segments and advances
   assert.equal(replacements, 1, 'same-video segments seek without clearing the native texture');
   assert.equal(context.index, 1); assert.equal(player.currentTime, 40); assert.equal(context.duration, 30);
   assert.equal(context.history.length, 2, 'both segments remain in history');
-  assert.equal(player.source.metadata.title, 'Mix', 'system controls keep the parent video title while its segments reuse one source');
+  assert.deepEqual(player.publishedMetadata, { title: 'Two', artist: 'Second singer', artwork: 'https://cdn/second.jpg', biuMediaKey: 'A:10', biuSegmentStart: 40, biuSegmentEnd: 70 },
+    'same-video segments update title, artist and cover without replacing the stream');
+  await act(async () => { await context.playQueue(list, 0); });
+  assert.equal(player.publishedMetadata.title, 'One', 'manual switches back also refresh the media card');
+  assert.equal(player.publishedMetadata.artwork, 'https://cdn/cover.jpg');
+  assert.equal(replacements, 1);
+  await act(async () => { await context.playQueue([{ bvid: 'A', cid: 10, title: 'Whole video', duration: 400 }]); });
+  assert.equal(player.publishedMetadata.biuSegmentStart, null, 'reusing a source for the full video clears the old segment');
+  assert.equal(player.publishedMetadata.biuSegmentEnd, null);
+  assert.equal(context.duration, 400);
   await act(async () => { await context.playQueue([{ isLive: true, roomid: 100, title: 'Live radio', up: 'Host' }]); });
   assert.equal(player.source.contentType, 'hls');
-  assert.deepEqual(player.source.metadata, { title: 'Live radio', artist: 'Host', artwork: undefined }, 'live sources replace all metadata without retaining the previous cover');
+  assert.deepEqual(player.source.metadata, { title: 'Live radio', artist: 'Host', artwork: undefined, biuMediaKey: ':0', biuSegmentStart: null, biuSegmentEnd: null }, 'live sources replace all metadata without retaining the previous cover');
   await act(async () => tree.unmount());
+});
+
+test('iOS transport has one application owner and keeps targets across item changes', () => {
+  const native = fs.readFileSync(path.join(root, 'node_modules/expo-video/ios/NowPlayingManager.swift'), 'utf8');
+  const view = fs.readFileSync(path.join(root, 'node_modules/expo-video/ios/VideoView.swift'), 'utf8');
+  assert.match(view, /updatesNowPlayingInfoCenter = false/);
+  assert.match(native, /commandCenter = MPRemoteCommandCenter.shared\(\)/);
+  assert.match(native, /infoCenter = MPNowPlayingInfoCenter.default\(\)/);
+  assert.doesNotMatch(native, /MPNowPlayingSession\(players:|MediaSession\(model\)/,
+    'AVPlayerViewController already owns the player session; do not attach another');
+  assert.match(native, /add\(commandCenter.nextTrackCommand\)/);
+  assert.match(native, /add\(commandCenter.previousTrackCommand\)/);
+  assert.doesNotMatch(native, /add\(commandCenter.skip(?:Forward|Backward)Command\)/);
+  assert.match(native, /for \(command, target\) in targets \{ command.removeTarget\(target\) \}/,
+    'only non-optional tokens owned by this manager may be removed');
+  assert.doesNotMatch(native, /reinstall|setCategory\(/,
+    'track changes must not recreate handlers or fight VideoManager over the audio session');
+  assert.ok(native.indexOf('infoCenter.nowPlayingInfo = info') < native.indexOf('await item.asset.loadMetadata'),
+    'network metadata must not block publication of the system card');
+  assert.match(native, /infoCenter\.nowPlayingInfo = info\s+infoCenter\.playbackState = player\.rate > 0 \? \.playing : \.paused/,
+    'publish explicit transport state after metadata: the simulator does not infer it from audio');
+  const dynamicUpdate = native.slice(native.indexOf('private func updateNowPlayingDynamicValues()'), native.indexOf('func updateNowPlayingLyric'));
+  assert.match(dynamicUpdate, /infoCenter\.playbackState = player\.rate > 0 \? \.playing : \.paused/,
+    'play and pause transitions must update system state, not only initial publication');
+  assert.match(native, /infoCenter\.playbackState = \.stopped/, 'teardown must not leave a playing system session');
+  assert.match(native, /!Task.isCancelled/);
+  assert.match(native, /player.currentItem === item/, 'late metadata must belong to the current track');
+  assert.match(native, /MPMediaItemPropertyArtwork: cachedArtwork \?\? loadingArtwork \?\? fallbackArtwork/,
+    'initial metadata publication must include artwork while the next cover loads');
+  assert.match(native, /cachedArtwork == nil/, 'ready-to-play refreshes must reuse downloaded artwork');
+  assert.match(native, /self.metadataRevision == revision/,
+    'a cancelled callback must not overwrite artwork even if the player item is unchanged');
+  assert.match(native, /info\[MPMediaItemPropertyArtwork\] = artwork \?\? self.fallbackArtwork/,
+    'failed artwork loads must use a branded fallback, not clear artwork or retain the previous song');
+});
+
+test('system previous and next follow the latest queue, including single-repeat and paused playback', async () => {
+  const listeners = {};
+  const player = { playing: false, status: 'readyToPlay', currentTime: 0, duration: 180,
+    play() { this.playing = true; }, pause() { this.playing = false; },
+    async replaceAsync(source) { this.source = source; this.currentTime = 0; } };
+  const load = loader({
+    'expo-video': { useVideoPlayer: () => player },
+    expo: {
+      useEvent: (_, name) => name === 'playingChange' ? { isPlaying: player.playing } : { status: player.status },
+      useEventListener: (_, name, fn) => { listeners[name] = fn; },
+    },
+    '@react-native-async-storage/async-storage': { getItem: async () => null, setItem: async () => {} },
+    'src/api/bili': { videoUrl: async (bvid) => 'https://cdn/' + bvid },
+    'src/api/client': { streamHeaders: () => ({}) },
+  });
+  const { PlayerProvider, usePlayer } = load('src/player/PlayerContext.js');
+  let context, tree;
+  function Probe() { context = usePlayer(); return null; }
+  await act(async () => { tree = create(React.createElement(PlayerProvider, null, React.createElement(Probe))); });
+  try {
+    const tracks = ['A', 'B', 'C'].map((bvid) => ({ bvid, cid: 1, title: bvid }));
+    await act(async () => context.playQueue(tracks));
+    await act(async () => context.setPlayMode('single'));
+    await act(async () => listeners.nextTrack());
+    assert.equal(context.current.bvid, 'B', 'remote next bypasses automatic single-repeat');
+    await act(async () => listeners.previousTrack());
+    assert.equal(context.current.bvid, 'A');
+    player.pause();
+    await act(async () => listeners.previousTrack());
+    assert.equal(context.current.bvid, 'C', 'previous wraps to the last track');
+    assert.equal(player.playing, true, 'manual transport resumes the selected track');
+    await act(async () => context.playQueue([tracks[2], tracks[0], tracks[1]]));
+    await act(async () => listeners.nextTrack());
+    assert.equal(context.current.bvid, 'A', 'remote callbacks read the reordered queue');
+    await act(async () => listeners.playToEnd());
+    assert.equal(context.current.bvid, 'A', 'automatic completion still honors single-repeat');
+  } finally { await act(async () => tree.unmount()); }
 });
 
 test('reordered segments ignore old native progress and end events until their seek lands', async (t) => {
@@ -1354,7 +1797,7 @@ test('background automatic transitions keep the media service active through loa
   const pausesBeforeEnd = pauses;
   background = true;
   player.playing = false; // STATE_ENDED retains playWhenReady and the foreground service.
-  await act(async () => { listeners.playToEnd(); });
+  await act(async () => { listeners.timeUpdate({ currentTime: 399.8 }); });
   assert.equal(context.index, 1);
   assert.equal(context.buffering, true);
   assert.equal(foregroundService, true, 'URL resolution must not demote the service');
@@ -1365,6 +1808,11 @@ test('background automatic transitions keep the media service active through loa
   assert.equal(context.playError, null);
   assert.equal(player.playing, true);
   assert.equal(player.source.metadata.title, 'Second');
+  // expo-video iOS resolves replaceAsync before the main-thread AVPlayerItem swap.
+  // A sourceChange retry must start the newly installed item after the earlier play was lost.
+  player.playing = false;
+  await act(async () => listeners.sourceChange({ source: player.source }));
+  assert.equal(player.playing, true);
   await act(async () => context.setPlayMode('single'));
   player.playing = false;
   await act(async () => { listeners.playToEnd(); });
@@ -1725,6 +2173,7 @@ test('settings default to simple lyrics, apply immediately, persist across resta
   const player = { playing: false, duration: 120, pause() {}, play() {}, replaceAsync: async () => {} };
   const load = loader({
     'src/store/LanSyncProvider': { useLanSync: () => ({ enabled: true, ready: true, setEnabled() {} }) },
+    'src/store/CloudSyncProvider': { useCloudSync: () => ({}) },
     'react-native': rn, 'react-native-safe-area-context': safeArea, 'src/components/icons': iconMock,
     '@react-navigation/native': { useIsFocused: () => true },
     'expo-audio': { setAudioModeAsync: async () => {} },

@@ -38,3 +38,22 @@ test('APK versions come from assets, skip desktop-only releases and reject forei
   assert.equal(androidRelease([{ ...releases[1], assets: [{ ...asset('1.0.2'), browser_download_url: 'https://example.com/a.apk' }] }], '1.0.1'), null);
   assert.equal(androidRelease([{ ...releases[1], assets: [{ ...asset('1.0.2'), digest: null }] }], '1.0.1'), null);
 });
+
+test('automatic update work waits for recommendation requests', async () => {
+  const app = Object.assign(new EventEmitter(), { isPackaged: true, getVersion: () => '0.6.2' });
+  let checks = 0, downloads = 0;
+  const updater = Object.assign(new EventEmitter(), {
+    async checkForUpdates() { checks++; updater.emit('update-available', { version: '0.6.3' }); },
+    async downloadUpdate() { downloads++; },
+  });
+  const manager = createAppUpdates({ app, updater, platform: 'win32', read: () => ({}), write() {}, notify() {}, beforeInstall() {} });
+  try {
+    manager.activity(1);
+    await manager.check();
+    assert.equal(checks, 0);
+    manager.activity(-1);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(checks, 1);
+    assert.equal(downloads, 1);
+  } finally { app.emit('will-quit'); }
+});

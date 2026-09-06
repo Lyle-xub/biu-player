@@ -3,6 +3,7 @@ import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors } from '../theme';
 import { usePlayer } from '../player/PlayerContext';
+import { canOpenTrackUp, openTrackUp } from '../player/openTrackUp';
 import { deletePlaylist, movePlaylistTrack, removePlaylistTracks, trackKeyOf, updatePlaylist, usePlaylists } from '../store/playlists';
 import TrackRow from '../components/TrackRow';
 import ConfirmDialog from '../components/Dialog';
@@ -15,7 +16,8 @@ import { IconBack, IconCheck, IconEdit, IconPlay, IconReorder, IconTrash } from 
 export default function LocalPlaylistScreen({ navigation, route }) {
   const { id } = route.params || {};
   const playlists = usePlaylists();
-  const { playQueue, current } = usePlayer();
+  const { playQueue, current, resolveTrackUp } = usePlayer();
+  const openUp = (track) => openTrackUp(navigation, track, resolveTrackUp);
   const insets = useSafeAreaInsets();
   const pl = playlists.find((p) => p.id === id);
   const tracks = pl?.tracks || [];
@@ -98,7 +100,7 @@ export default function LocalPlaylistScreen({ navigation, route }) {
                 <TrackRow track={t} active={trackKeyOf(current) === trackKeyOf(t)}
                   onPress={() => editing ? toggle(trackKeyOf(t)) : playQueue(tracks, index)}
                   onLongPress={() => remove([trackKeyOf(t)])}
-                  onPressUp={!editing && t.mid ? () => navigation.navigate('Up', { mid: t.mid }) : undefined} />
+                  onPressUp={!editing && canOpenTrackUp(t) ? () => openUp(t) : undefined} />
               </View>
             </View>
           </View>

@@ -1,0 +1,1065 @@
+diff --git a/node_modules/expo-widgets/ios/LiveActivity.swift b/node_modules/expo-widgets/ios/LiveActivity.swift
+index 5f34eb2..8ef7e58 100644
+--- a/node_modules/expo-widgets/ios/LiveActivity.swift
++++ b/node_modules/expo-widgets/ios/LiveActivity.swift
+@@ -19,12 +19,20 @@ final class LiveActivity: SharedObject {
+       throw LiveActivityNotFoundException(id)
+     }
+ 
++    if name == "LyricsLiveActivity" {
++      await MainActor.run { BiuLyricsActivityClock.shared.configure(id: id, props: props) }
++      return
++    }
++
+     let newState = LiveActivityAttributes.ContentState(name: name, props: props)
+     await activity.update(ActivityContent(state: newState, staleDate: staleDate))
+   }
+ 
+   func end(dismissalPolicy: LiveActivityDismissalPolicy?, afterDate: Date?, props: String?, contentDate: Date?) async throws {
+     guard #available(iOS 16.2, *) else { throw LiveActivitiesNotSupportedException() }
++    if name == "LyricsLiveActivity" {
++      await MainActor.run { BiuLyricsActivityClock.shared.stop(id: id) }
++    }
+ 
+     guard let activity = Activity<LiveActivityAttributes>.activities.first(where: { $0.id == id }) else {
+       throw LiveActivityNotFoundException(id)
+@@ -82,3 +90,155 @@ final class LiveActivity: SharedObject {
+     pushTokenObserverTask = nil
+   }
+ }
++
++// The full lyric timeline lives in the app, never in ActivityKit's 4 KB state.
++// AVPlayer's native periodic observer continues when React's JS thread is busy.
++@available(iOS 16.2, *)
++@MainActor
++final class BiuLyricsActivityClock {
++  static let shared = BiuLyricsActivityClock()
++  private var observer: NSObjectProtocol?
++  private var activityID: String?
++  private var base: [String: Any] = [:]
++  private var lines: [[String: Any]] = []
++  private var mediaKey = ""
++  private var audioOffset = 0.0
++  private var previousSample: (position: Double, date: Double, playing: Bool)?
++  private var clockAnchor: Double?
++  private var lastBoundary = ""
++  private var lastPublished = 0.0
++  private var seekRevision = 0
++  private var pending: String?
++  private var submission: Task<Void, Never>?
++
++  nonisolated static func snapshot(_ props: String) -> String {
++    guard let data = props.data(using: .utf8),
++          var value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return props }
++    for key in ["_timeline", "_mediaKey", "_audioOffset"] { value.removeValue(forKey: key) }
++    return encode(value) ?? "{}"
++  }
++
++  nonisolated private static func encode(_ value: [String: Any]) -> String? {
++    var value = value
++    if let slots = value["slots"] as? [Any] {
++      value["slots"] = slots.map { entry -> Any in
++        guard var line = entry as? [String: Any] else { return entry }
++        // The system timer needs line timing only; detailed glyph timing stays
++        // in the app/PiP instead of consuming ActivityKit's limited state size.
++        line["words"] = [] as [Int]
++        return line
++      }
++    }
++    guard JSONSerialization.isValidJSONObject(value),
++          let data = try? JSONSerialization.data(withJSONObject: value) else { return nil }
++    return String(data: data, encoding: .utf8)
++  }
++
++  private init() {
++    observer = NotificationCenter.default.addObserver(
++      forName: Notification.Name("BiuPlayerPlaybackClock"), object: nil, queue: .main
++    ) { [weak self] notification in
++      // The notification is emitted on main by VideoPlayerObserver.
++      MainActor.assumeIsolated { self?.receive(notification.userInfo ?? [:]) }
++    }
++  }
++
++  func configure(id: String, props: String) {
++    guard let data = props.data(using: .utf8),
++          var value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
++    if activityID != id { stop(); activityID = id }
++    lines = value.removeValue(forKey: "_timeline") as? [[String: Any]] ?? []
++    mediaKey = value.removeValue(forKey: "_mediaKey") as? String ?? ""
++    audioOffset = value.removeValue(forKey: "_audioOffset") as? Double ?? 0
++    base = value
++    previousSample = nil
++    clockAnchor = nil
++    if let date = value["updatedAt"] as? Double, let position = value["position"] as? Double {
++      value["clockAnchor"] = date - position
++    }
++    lastBoundary = ""
++    lastPublished = 0
++    seekRevision = 0
++    enqueue(Self.encode(value))
++  }
++
++  func stop(id: String? = nil) {
++    guard id == nil || id == activityID else { return }
++    activityID = nil
++    pending = nil
++    submission?.cancel()
++    submission = nil
++    lines = []
++    base = [:]
++    previousSample = nil
++  }
++
++  private func receive(_ sample: [AnyHashable: Any]) {
++    guard activityID != nil, sample["mediaKey"] as? String == mediaKey,
++          let position = sample["position"] as? Double, position.isFinite,
++          let date = sample["updatedAt"] as? Double, date.isFinite else { return }
++    let playing = sample["playing"] as? Bool ?? false
++    if let previousSample {
++      let expected = previousSample.position + (previousSample.playing ? date - previousSample.date : 0)
++      if abs(position - expected) > 0.75 {
++        seekRevision += 1
++        clockAnchor = nil
++      }
++      if playing != previousSample.playing { clockAnchor = nil }
++    }
++    previousSample = (position, date, playing)
++    let time = position + audioOffset
++    if clockAnchor == nil { clockAnchor = date - time }
++    var index = 0
++    while index + 1 < lines.count, time >= (lines[index + 1]["from"] as? Double ?? 0) { index += 1 }
++    // Long lines need position snapshots to select a whole visible page.
++    // The view hard-cuts only when the page changes; it never animates offsets.
++    var started = false
++    var completed = false
++    var paginating = false
++    if !lines.isEmpty {
++      let from = lines[index]["from"] as? Double ?? 0
++      let to = lines[index]["to"] as? Double ?? from
++      started = time >= from
++      completed = time >= to
++      paginating = (lines[index]["text"] as? String ?? "").count > 4 && started && !completed
++    }
++    let boundary = "\(index):\(started):\(completed):\(playing):\(seekRevision)"
++    guard boundary != lastBoundary || (playing && paginating && date - lastPublished >= 0.45) else { return }
++    lastBoundary = boundary
++    lastPublished = date
++    var slots: [Any] = [NSNull(), NSNull()]
++    if !lines.isEmpty {
++      slots[index % 2] = lines[index]
++      if index + 1 < lines.count { slots[1 - index % 2] = lines[index + 1] }
++    }
++    var value = base
++    value["slots"] = slots
++    value["activeSlot"] = index % 2
++    value["previousLyric"] = index > 0 ? lines[index - 1]["text"] : nil
++    value["position"] = time
++    value["updatedAt"] = date
++    value["playing"] = playing
++    value["clockAnchor"] = clockAnchor
++    value["clockRevision"] = "\(base["clockRevision"] as? String ?? ""):\(seekRevision)"
++    enqueue(Self.encode(value))
++  }
++
++  private func enqueue(_ props: String?) {
++    pending = props
++    guard submission == nil, let id = activityID else { return }
++    submission = Task { [weak self] in
++      guard let self else { return }
++      // Keep only the newest snapshot while ActivityKit processes an update.
++      while !Task.isCancelled, self.activityID == id, let props = self.pending {
++        self.pending = nil
++        guard let activity = Activity<LiveActivityAttributes>.activities.first(where: {
++          $0.id == id && ($0.activityState == .active || $0.activityState == .stale)
++        }) else { self.stop(id: id); return }
++        let state = LiveActivityAttributes.ContentState(name: "LyricsLiveActivity", props: props)
++        await activity.update(ActivityContent(state: state, staleDate: nil))
++      }
++      if !Task.isCancelled { self.submission = nil }
++    }
++  }
++}
+diff --git a/node_modules/expo-widgets/ios/LiveActivityFactory.swift b/node_modules/expo-widgets/ios/LiveActivityFactory.swift
+index 4b8a632..33c1a66 100644
+--- a/node_modules/expo-widgets/ios/LiveActivityFactory.swift
++++ b/node_modules/expo-widgets/ios/LiveActivityFactory.swift
+@@ -20,8 +20,25 @@ final class LiveActivityFactory: SharedObject {
+       throw LiveActivitiesNotSupportedException()
+     }
+ 
++    // React can remount the synchronization component while a source changes.
++    // ActivityKit may still own the existing activity even when this factory's
++    // in-memory dictionary has been recreated. Reuse it instead of requesting a
++    // second activity, which iOS renders as a detached second Dynamic Island.
++    if let activity = Activity<LiveActivityAttributes>.activities.first(where: {
++      $0.content.state.name == name && ($0.activityState == .active || $0.activityState == .stale)
++    }) {
++      let instance = instances[activity.id] ?? LiveActivity(id: activity.id, name: name)
++      instance.observePushTokenUpdates(for: activity, pushNotificationsEnabled: Self.pushNotificationsEnabled)
++      instances[activity.id] = instance
++      Task {
++        try? await instance.update(props: props, staleDate: staleDate)
++      }
++      return instance
++    }
++
+     do {
+-      let initialState = LiveActivityAttributes.ContentState(name: name, props: props)
++      let snapshot = name == "LyricsLiveActivity" ? BiuLyricsActivityClock.snapshot(props) : props
++      let initialState = LiveActivityAttributes.ContentState(name: name, props: snapshot)
+       let activity = try Activity.request(
+         attributes: LiveActivityAttributes(url: url?.absoluteString),
+         content: .init(state: initialState, staleDate: staleDate),
+@@ -31,6 +48,9 @@ final class LiveActivityFactory: SharedObject {
+       let instance = LiveActivity(id: activity.id, name: name)
+       instance.observePushTokenUpdates(for: activity, pushNotificationsEnabled: LiveActivityFactory.pushNotificationsEnabled)
+       instances[activity.id] = instance
++      if name == "LyricsLiveActivity" {
++        DispatchQueue.main.async { BiuLyricsActivityClock.shared.configure(id: activity.id, props: props) }
++      }
+       return instance
+     } catch {
+       throw StartLiveActivityException(error.localizedDescription)
+diff --git a/node_modules/expo-widgets/ios/Widgets/BiuMonetLyrics.swift b/node_modules/expo-widgets/ios/Widgets/BiuMonetLyrics.swift
+new file mode 100644
+index 0000000..8d2b79c
+--- /dev/null
++++ b/node_modules/expo-widgets/ios/Widgets/BiuMonetLyrics.swift
+@@ -0,0 +1,415 @@
++import SwiftUI
++import UIKit
++
++// Folia Midnight Default: src/services/baseThemes.ts at reference commit
++// 08fc072f803fa9059792069556ce763aa7e6f437.
++public enum BiuMonetPalette {
++  public static let background = UIColor(red: 9 / 255, green: 9 / 255, blue: 11 / 255, alpha: 1)
++  public static let primary = UIColor(red: 244 / 255, green: 244 / 255, blue: 245 / 255, alpha: 1)
++  public static let primaryColor = Color(red: 244 / 255, green: 244 / 255, blue: 245 / 255)
++}
++
++struct BiuLyricPage {
++  let text: String
++  let from: Double
++  let to: Double
++  let advance: Double
++}
++
++// Foundation's word segmentation handles Chinese and mixed-language lyrics.
++// Keep punctuation/spacing with its preceding word, and carry the unplayed
++// right-hand context into the next page instead of dropping it at the cut.
++func biuLyricPages(_ text: String, viewport: Double, measure: (String) -> Double) -> [BiuLyricPage] {
++  guard !text.isEmpty, viewport > 0 else { return [.init(text: text, from: 0, to: 1, advance: 1)] }
++  var starts: [String.Index] = []
++  text.enumerateSubstrings(in: text.startIndex..<text.endIndex, options: .byWords) { _, range, _, _ in
++    starts.append(range.lowerBound)
++  }
++  let boundaries = [text.startIndex] + Array(starts.dropFirst()) + [text.endIndex]
++  let offsets = boundaries.map { measure(String(text[..<$0])) }
++  let total = max(1, offsets.last ?? 0)
++  var pages: [BiuLyricPage] = []
++  var first = 0
++  while first < boundaries.count - 1 {
++    var end = first + 1
++    while end + 1 < boundaries.count && measure(String(text[boundaries[first]..<boundaries[end + 1]])) <= viewport { end += 1 }
++    var next = first + 1
++    while next + 1 <= end && measure(String(text[boundaries[first]..<boundaries[next + 1]])) <= viewport * 0.75 { next += 1 }
++    if end == boundaries.count - 1 { next = end }
++    pages.append(.init(text: String(text[boundaries[first]..<boundaries[end]]),
++      from: offsets[first] / total, to: offsets[end] / total, advance: offsets[next] / total))
++    if end == boundaries.count - 1 { break }
++    first = next
++  }
++  return pages
++}
++
++func biuLyricPageIndex(_ pages: [BiuLyricPage], progress: Double) -> Int {
++  pages.firstIndex(where: { progress < $0.advance }) ?? max(0, pages.count - 1)
++}
++
++public struct BiuMonetLine: Decodable, Equatable {
++  public var id: String
++  public var text: String
++  public var from: Double
++  public var to: Double
++  public var words: [[Double]]
++}
++
++public struct BiuLyricsFrame: Decodable {
++  public var slots: [BiuMonetLine?]?
++  public var activeSlot: Int?
++  public var previousLyric: String?
++  public var position: Double?
++  public var updatedAt: Double?
++  public var playing: Bool?
++  public var clockRevision: String?
++  public var clockAnchor: Double?
++  public var lockScreenLyrics: Bool?
++  public var dynamicIslandLyrics: Bool?
++  public var coverColor: [Double]?
++
++  public var backgroundColor: UIColor {
++    guard let rgb = coverColor, rgb.count >= 3, rgb.prefix(3).allSatisfy(\.isFinite) else {
++      return BiuMonetPalette.background
++    }
++    let scale = min(0.52, 0.24 / max(0.001, rgb.prefix(3).max() ?? 0))
++    let channels = rgb.prefix(3).map { CGFloat(min(0.26, 0.012 + max(0, $0) * scale)) }
++    return UIColor(red: channels[0], green: channels[1], blue: channels[2], alpha: 1)
++  }
++
++  public static func decode(_ json: String) -> Self {
++    (try? JSONDecoder().decode(Self.self, from: Data(json.utf8))) ?? Self()
++  }
++
++  public func line(_ slot: Int) -> BiuMonetLine? {
++    guard let slots, slots.indices.contains(slot) else { return nil }
++    return slots[slot]
++  }
++
++  public func time(at date: Date) -> Double {
++    // ActivityKit may delay an update well beyond the requested cadence. A
++    // short cap leaves the sweep permanently behind and eventually frozen.
++    let elapsed = playing == true ? max(0, date.timeIntervalSince1970 - (updatedAt ?? date.timeIntervalSince1970)) : 0
++    return (position ?? 0) + elapsed
++  }
++
++  public var animationID: String { "\(clockRevision ?? ""):\(playing == true)" }
++}
++
++// A display-link clock, corrected only for seeks, state changes or real drift.
++// Replacing the anchor on every JS sample rewound the glow between samples.
++public struct BiuLyricsClock {
++  private var anchor = 0.0
++  private var anchoredAt = Date.distantPast
++  private var sampledAt = Date.distantPast
++  private var revision = ""
++  private var playing = false
++
++  public init() {}
++
++  public mutating func update(_ frame: BiuLyricsFrame, at date: Date) {
++    let sample = frame.time(at: date)
++    if frame.animationID != revision || !playing || abs(sample - time(at: date)) > 0.35 {
++      anchor = sample
++      anchoredAt = date
++    }
++    sampledAt = date
++    revision = frame.animationID
++    playing = frame.playing == true
++  }
++
++  public func time(at date: Date) -> Double {
++    guard playing else { return anchor }
++    // PiP owns a 30 FPS display link while it is visible. Its clock must keep
++    // moving between JS samples and while the app is backgrounded.
++    return anchor + max(0, date.timeIntervalSince(anchoredAt))
++  }
++}
++
++// The desktop renderer's measured-grapheme sweep and word-local lingering glow.
++// Shared by SwiftUI Live Activities and the UIKit PiP renderer.
++public struct BiuMonetWord {
++  public let text: String
++  public let x: CGFloat
++  public let width: CGFloat
++  public let offsets: [CGFloat]
++  public let graphemeTimings: [(from: Double, to: Double)]
++  public let from: Double
++  public let to: Double
++  public var timed: Bool { from >= 0 && to > from }
++
++  public func filledWidth(at time: Double) -> CGFloat {
++    guard timed, time > from else { return 0 }
++    if time >= to { return width }
++
++    let timingCount = min(graphemeTimings.count, offsets.count - 1)
++    if timingCount > 0 {
++      for index in 0..<timingCount {
++        let timingFrom = max(from, graphemeTimings[index].from)
++        let timingTo = max(timingFrom, graphemeTimings[index].to)
++        let startWidth = offsets[index]
++        let endWidth = offsets[index + 1]
++        if time < timingFrom { return startWidth }
++        if time <= timingTo {
++          let progress = (time - timingFrom) / max(0.001, timingTo - timingFrom)
++          return startWidth + (endWidth - startWidth) * CGFloat(progress)
++        }
++      }
++      return offsets[timingCount]
++    }
++
++    let cursor = (time - from) / (to - from) * Double(offsets.count - 1)
++    let index = min(Int(cursor), offsets.count - 2)
++    return offsets[index] + (offsets[index + 1] - offsets[index]) * CGFloat(cursor - Double(index))
++  }
++
++  public func glow(at time: Double, lineEnd: Double) -> CGFloat {
++    guard timed, time > from else { return 0 }
++    let rise = max(0.001, to - from) * 1.18
++    let peak = from + rise
++    let tail = max(peak + 0.18, lineEnd, to + 1.05)
++    let value = time <= peak ? (time - from) / rise : 1 - (time - peak) / (tail - peak)
++    let p = min(1, max(0, value))
++    return CGFloat(p * p * (3 - 2 * p)) * 0.88
++  }
++}
++
++public struct BiuMonetMetrics {
++  public let line: BiuMonetLine
++  public let font: UIFont
++  public let words: [BiuMonetWord]
++  public let width: CGFloat
++
++  public init(line: BiuMonetLine, fontSize: CGFloat) {
++    self.line = line
++    font = UIFont.systemFont(ofSize: fontSize, weight: .semibold)
++    let graphemes = Array(line.text)
++    let ranges = line.words.isEmpty ? [[Double(graphemes.count), line.from, line.to]] : line.words
++    var start = 0
++    var x: CGFloat = 0
++    var result: [BiuMonetWord] = []
++    for range in ranges where range.count >= 3 {
++      let end = min(graphemes.count, max(start, Int(range[0])))
++      guard end > start else { continue }
++      let text = String(graphemes[start..<end])
++      var prefix = ""
++      var offsets: [CGFloat] = [0]
++      for character in text {
++        prefix.append(character)
++        offsets.append((prefix as NSString).size(withAttributes: [.font: font]).width)
++      }
++      let width = offsets.last ?? 0
++      let timingValues = Array(range.dropFirst(3))
++      var timings: [(from: Double, to: Double)] = []
++      if timingValues.count == (end - start) * 2 {
++        for index in stride(from: 0, to: timingValues.count, by: 2) {
++          timings.append((from: timingValues[index], to: timingValues[index + 1]))
++        }
++      }
++      result.append(BiuMonetWord(text: text, x: x, width: width, offsets: offsets,
++        graphemeTimings: timings, from: range[1], to: range[2]))
++      x += width
++      start = end
++    }
++    words = result
++    width = x
++  }
++
++  public var edge: CGFloat { min(16, max(6, font.pointSize * 0.45)) }
++
++  public func scroll(at time: Double, viewport: CGFloat) -> CGFloat {
++    // Untimed punctuation does not consume singing time or leave the ending hidden.
++    let front = time >= line.to ? width : words.reduce(CGFloat(0)) { front, word in
++      word.timed && time >= word.from ? max(front, word.x + word.filledWidth(at: time)) : front
++    }
++    return min(max(0, width - viewport), max(0, front - viewport * 0.60))
++  }
++
++  public func draw(in context: CGContext, origin: CGPoint, time: Double, focused: Bool) {
++    for word in words {
++      let point = CGPoint(x: origin.x + word.x, y: origin.y)
++      let rect = CGRect(x: point.x, y: point.y, width: word.width, height: font.lineHeight)
++      if !context.boundingBoxOfClipPath.intersects(rect.insetBy(dx: -font.pointSize, dy: -font.pointSize)) { continue }
++      let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: BiuMonetPalette.primary]
++      let glow = focused ? word.glow(at: time, lineEnd: line.to) : 0
++      if glow > 0.001 {
++        context.saveGState()
++        context.beginTransparencyLayer(auxiliaryInfo: nil)
++        for radius in [round(font.pointSize * 0.65), round(font.pointSize * 0.28)] {
++          context.setShadow(offset: .zero, blur: radius,
++                            color: BiuMonetPalette.primary.withAlphaComponent(glow).cgColor)
++          (word.text as NSString).draw(at: point, withAttributes: attributes)
++        }
++        context.setShadow(offset: .zero, blur: 0, color: nil)
++        context.saveGState()
++        context.setBlendMode(.clear)
++        (word.text as NSString).draw(at: point, withAttributes: attributes)
++        context.restoreGState()
++        context.endTransparencyLayer()
++        context.restoreGState()
++      }
++      (word.text as NSString).draw(at: point, withAttributes: [
++        .font: font, .foregroundColor: BiuMonetPalette.primary.withAlphaComponent(
++          focused ? (word.timed && time > word.to ? 0.98 : 0.34) : 0.46)
++      ])
++      guard focused, word.timed else { continue }
++      let filled = word.filledWidth(at: time)
++      guard filled > 0 else { continue }
++      let sweep = filled + edge * min(1, filled / max(1, word.width))
++      guard let glyph = BiuMonetGlyphs.image(word.text, font: font) else { continue }
++      context.saveGState()
++      context.translateBy(x: point.x, y: point.y + font.lineHeight)
++      context.scaleBy(x: 1, y: -1)
++      context.clip(to: CGRect(x: 0, y: 0, width: word.width, height: font.lineHeight), mask: glyph)
++      context.beginTransparencyLayer(auxiliaryInfo: nil)
++      if let fill = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: [
++        BiuMonetPalette.primary.cgColor,
++        BiuMonetPalette.primary.withAlphaComponent(0.92).cgColor,
++        BiuMonetPalette.primary.withAlphaComponent(0.72).cgColor
++      ] as CFArray, locations: [0, 0.68, 1]) {
++        context.drawLinearGradient(fill, start: .zero, end: CGPoint(x: word.width, y: 0), options: [])
++      }
++      context.setBlendMode(.destinationIn)
++      if let mask = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: [
++        UIColor.white.cgColor, UIColor.white.cgColor,
++        UIColor.white.withAlphaComponent(0.92).cgColor, UIColor.clear.cgColor
++      ] as CFArray, locations: [0, max(0, sweep - edge) / sweep,
++        max(0, sweep - edge * 0.55) / sweep, 1]) {
++        context.drawLinearGradient(mask, start: .zero, end: CGPoint(x: sweep, y: 0),
++          options: [.drawsAfterEndLocation])
++      }
++      context.endTransparencyLayer()
++      context.restoreGState()
++    }
++  }
++}
++
++enum BiuMonetGlyphs {
++  static let cache: NSCache<NSString, UIImage> = {
++    let value = NSCache<NSString, UIImage>()
++    value.totalCostLimit = 2 * 1024 * 1024
++    return value
++  }()
++  static func image(_ text: String, font: UIFont, halo: Bool = false) -> CGImage? {
++    let key = "\(font.fontName):\(font.pointSize):\(halo):\(text)" as NSString
++    if let image = cache.object(forKey: key) { return image.cgImage }
++    let width = (text as NSString).size(withAttributes: [.font: font]).width
++    guard width > 0 else { return nil }
++    let format = UIGraphicsImageRendererFormat()
++    format.scale = 2
++    format.opaque = false
++    let image = UIGraphicsImageRenderer(size: CGSize(width: width, height: font.lineHeight), format: format).image { renderer in
++      let context = renderer.cgContext
++      if halo {
++        context.setShadow(offset: .zero, blur: font.pointSize * 0.16, color: UIColor.white.cgColor)
++      }
++      (text as NSString).draw(at: .zero, withAttributes: [.font: font, .foregroundColor: UIColor.white])
++      if halo {
++        // Cache only the soft halo. Its interior is supplied by the crisp glyph
++        // layer, so scrolling never needs a live blur or a shadow of the timer.
++        context.setShadow(offset: .zero, blur: 0, color: nil)
++        context.setBlendMode(.clear)
++        (text as NSString).draw(at: .zero, withAttributes: [.font: font, .foregroundColor: UIColor.white])
++      }
++    }
++    let cost = image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0
++    cache.setObject(image, forKey: key, cost: cost)
++    return image.cgImage
++  }
++}
++
++private struct BiuMonetWordView: View {
++  let word: BiuMonetWord
++  let metrics: BiuMonetMetrics
++  let time: Double
++  let focused: Bool
++  let showsGlow: Bool
++
++  var body: some View {
++    let filled = word.filledWidth(at: time)
++    let sweep = filled + metrics.edge * min(1, filled / max(1, word.width))
++    let glow = focused && showsGlow ? word.glow(at: time, lineEnd: metrics.line.to) : 0
++    let size = metrics.font.pointSize
++    if let bitmap = BiuMonetGlyphs.image(word.text, font: metrics.font) {
++      let glyph = Image(decorative: bitmap, scale: 2).resizable()
++        .frame(width: word.width, height: metrics.font.lineHeight)
++      let maskWidth = word.width + metrics.edge
++      ZStack(alignment: .topLeading) {
++        ZStack(alignment: .topLeading) {
++          // CSS text-shadow paints two independent shadows of the same glyph.
++          // Chaining SwiftUI shadows also shadows the first halo a second time.
++          glyph.shadow(color: BiuMonetPalette.primaryColor.opacity(glow), radius: round(size * 0.28))
++          glyph.shadow(color: BiuMonetPalette.primaryColor.opacity(glow), radius: round(size * 0.65))
++          glyph.blendMode(.destinationOut)
++        }.compositingGroup()
++        glyph.colorMultiply(BiuMonetPalette.primaryColor)
++          .opacity(focused ? (time > word.to && word.timed ? 0.98 : 0.34) : 0.46)
++        // Keep the glyph and mask boxes fixed. Only translate the soft edge;
++        // a growing mask must never resize or re-centre the underlying text.
++        LinearGradient(stops: [
++          .init(color: BiuMonetPalette.primaryColor, location: 0),
++          .init(color: BiuMonetPalette.primaryColor.opacity(0.92), location: 0.68),
++          .init(color: BiuMonetPalette.primaryColor.opacity(0.72), location: 1)
++        ], startPoint: .leading, endPoint: .trailing)
++          .frame(width: word.width, height: metrics.font.lineHeight)
++          .mask(glyph)
++          .opacity(focused ? 1 : 0)
++          .mask(alignment: .leading) {
++            LinearGradient(stops: [
++              .init(color: .white, location: 0),
++              .init(color: .white, location: word.width / maskWidth),
++              .init(color: .white.opacity(0.92), location: (maskWidth - metrics.edge * 0.55) / maskWidth),
++              .init(color: .clear, location: 1)
++            ], startPoint: .leading, endPoint: .trailing)
++              .frame(width: maskWidth, height: metrics.font.lineHeight)
++              .offset(x: sweep - maskWidth)
++          }
++      }
++      .frame(width: word.width, height: metrics.font.lineHeight, alignment: .topLeading)
++    }
++  }
++}
++
++struct BiuMonetStrip: View {
++  let metrics: BiuMonetMetrics
++  var time: Double
++  let focused: Bool
++  var showsGlow = true
++  var centered = false
++
++  var body: some View {
++    GeometryReader { geometry in
++      let renderTime = focused ? time : min(time, metrics.line.from)
++      let inset = min(12, metrics.font.pointSize * 0.55, geometry.size.width * 0.08)
++      let viewport = max(1, geometry.size.width - inset * 2)
++      let scroll = metrics.scroll(at: renderTime, viewport: viewport)
++      let origin = centered ? max(0, (viewport - metrics.width) / 2) : 0
++      // Use the same measured positions as the PiP renderer. Layout, glyph
++      // masks and shadows must all share one local line coordinate system.
++      ZStack(alignment: .topLeading) {
++        ForEach(metrics.words.indices, id: \.self) { index in
++          BiuMonetWordView(word: metrics.words[index], metrics: metrics, time: renderTime,
++            focused: focused, showsGlow: showsGlow)
++            .offset(x: metrics.words[index].x)
++        }
++      }
++      .frame(width: metrics.width, height: metrics.font.lineHeight, alignment: .topLeading)
++      .compositingGroup()
++      .offset(x: inset + origin - scroll)
++      .frame(width: geometry.size.width, height: geometry.size.height, alignment: .leading)
++      .mask {
++        HStack(spacing: 0) {
++          LinearGradient(colors: [.clear, .white], startPoint: .leading, endPoint: .trailing).frame(width: inset + (scroll > 0 ? 5 : 0))
++          Color.white
++          LinearGradient(colors: [.white, .clear], startPoint: .leading, endPoint: .trailing).frame(width: inset + (metrics.width - scroll > viewport + 1 ? 5 : 0))
++        }.frame(height: metrics.font.lineHeight + metrics.font.pointSize * 1.4)
++      }
++      // WidgetKit interpolates these standard offset/mask/shadow primitives in
++      // the remote render tree. All layers inherit the same linear transaction.
++    }
++    .frame(height: metrics.font.lineHeight + 3)
++    .accessibilityElement(children: .ignore)
++    .accessibilityLabel(metrics.line.text)
++  }
++}
+diff --git a/node_modules/expo-widgets/ios/Widgets/WidgetLiveActivity.swift b/node_modules/expo-widgets/ios/Widgets/WidgetLiveActivity.swift
+index 24d4571..413d402 100644
+--- a/node_modules/expo-widgets/ios/Widgets/WidgetLiveActivity.swift
++++ b/node_modules/expo-widgets/ios/Widgets/WidgetLiveActivity.swift
+@@ -1,110 +1,289 @@
+ import SwiftUI
+ import WidgetKit
+-import ExpoModulesCore
+ import ActivityKit
++import UIKit
+ 
+-struct LiveActivityAttributes: ActivityAttributes {
+-  // The deep link URL passed to start(). Stored in the static attributes so it is
+-  // scoped to this activity and survives content updates, unlike ContentState.
+-  var url: String?
++public struct LiveActivityAttributes: ActivityAttributes {
++  public var url: String?
+ 
+   public struct ContentState: Codable, Hashable {
+-    var name: String
+-    var props: String
++    public var name: String
++    public var props: String
++
++    public init(name: String, props: String) {
++      self.name = name
++      self.props = props
++    }
+   }
+ 
+-  init(url: String? = nil) {
++  public init(url: String? = nil) {
+     self.url = url
+   }
+ }
+ 
+-@available(iOS 16.1, *)
+-public struct WidgetLiveActivity: Widget {
+-  @Environment(\.self) var env
+-  
+-  let widgetContext: AppContext = AppContext()
++private let biuLyricText = Color(red: 244 / 255, green: 244 / 255, blue: 245 / 255)
+ 
+-  public init() {}
++// Keep the date-driven view inside the render tree. Reading a timer value into
++// Swift state would put the scan back on the throttled ActivityKit update path.
++private struct BiuSystemLyricSweep: View {
++  let text: String
++  let fontSize: CGFloat
++  let interval: ClosedRange<Date>?
++  let progress: Double
++  let focused: Bool
+ 
+-  public var body: some WidgetConfiguration {
+-    ActivityConfiguration(for: LiveActivityAttributes.self) { context in
+-      let nodes = getLiveActivityNodes(
+-        forName: context.state.name,
+-        props: context.state.props,
+-        environment: getLiveActivityEnvironment(for: env, in: context)
+-      )
+-      // Only apply widgetURL when the activity has one: a hierarchy with more than one
+-      // widgetURL modifier is undefined behavior, and layouts can set their own through
+-      // the widgetURL modifier from @expo/ui.
+-      let banner = LiveActivityBannerView(context: context, nodes: nodes)
+-      if let url = context.attributes.url.flatMap(URL.init(string:)) {
+-        banner.widgetURL(url)
+-      } else {
+-        banner
+-      }
+-    } dynamicIsland: { context in
+-      let nodes = getLiveActivityNodes(
+-        forName: context.state.name,
+-        props: context.state.props,
+-        environment: getLiveActivityEnvironment(for: env, in: context)
+-      )
+-      let island = DynamicIsland {
+-        DynamicIslandExpandedRegion(.center) {
+-          LiveActivitySectionView(context: context, nodes: nodes, sectionName: "expandedCenter")
+-        }
+-        DynamicIslandExpandedRegion(.leading) {
+-          LiveActivitySectionView(context: context, nodes: nodes, sectionName: "expandedLeading")
+-        }
+-        DynamicIslandExpandedRegion(.trailing) {
+-          LiveActivitySectionView(context: context, nodes: nodes, sectionName: "expandedTrailing")
+-        }
+-        DynamicIslandExpandedRegion(.bottom) {
+-          LiveActivitySectionView(context: context, nodes: nodes, sectionName: "expandedBottom")
++  private var font: UIFont { .systemFont(ofSize: fontSize, weight: .semibold) }
++  private var textWidth: CGFloat { max(1, ceil((text as NSString).size(withAttributes: [.font: font]).width)) }
++
++  @ViewBuilder private func glyphImage(halo: Bool = false) -> some View {
++    if let bitmap = BiuMonetGlyphs.image(text, font: font, halo: halo) {
++      Image(decorative: bitmap, scale: 2)
++        .renderingMode(.template)
++        .resizable()
++        .frame(width: textWidth, height: font.lineHeight)
++        .contentTransition(.identity)
++        .transition(.identity)
++    }
++  }
++
++  private var highlight: some View {
++    glyphImage().foregroundStyle(biuLyricText).mask(alignment: .leading) {
++      Group {
++        if let interval {
++          ProgressView(timerInterval: interval, countsDown: false)
++            .progressViewStyle(.linear)
++            .labelsHidden()
++            .tint(.white)
++            .frame(width: textWidth, height: 4)
++            .scaleEffect(x: 1, y: (font.lineHeight + 12) / 4)
++            .frame(width: textWidth, height: font.lineHeight)
++            // A progress track has nonzero alpha. Composite on black and
++            // threshold its luminance so the unfilled track cannot light text.
++            .background(.black)
++            .compositingGroup()
++            .contrast(4)
++            .luminanceToAlpha()
++        } else {
++          Color.white.frame(width: textWidth * CGFloat(progress), height: font.lineHeight)
++            .frame(width: textWidth, height: font.lineHeight, alignment: .leading)
+         }
+-      } compactLeading: {
+-        LiveActivitySectionView(context: context, nodes: nodes, sectionName: "compactLeading")
+-      } compactTrailing: {
+-        LiveActivitySectionView(context: context, nodes: nodes, sectionName: "compactTrailing")
+-      } minimal: {
+-        LiveActivitySectionView(context: context, nodes: nodes, sectionName: "minimal")
+       }
+-      if let url = context.attributes.url.flatMap(URL.init(string:)) {
+-        return island.widgetURL(url)
++      .contentTransition(.identity)
++      .transition(.identity)
++      .blur(radius: min(3, fontSize * 0.12))
++    }
++  }
++
++  var body: some View {
++    ZStack(alignment: .leading) {
++      glyphImage().foregroundStyle(biuLyricText.opacity(focused ? 0.34 : 0.48))
++      glyphImage(halo: true).foregroundStyle(biuLyricText)
++        .opacity(focused ? 0.13 : 0)
++        .transition(.identity)
++      // The highlight already starts with transparent glyph alpha; masking it
++      // once by the timer preserves those contours. No live shadow or second
++      // glyph mask is needed, and the timer cannot become a glowing rectangle.
++      highlight
++        .opacity(focused ? 1 : 0)
++        .transition(.identity)
++    }
++    // Composite the row in its own coordinates, then translate it as one unit.
++    // Do not use drawingGroup: the system timer must remain live in this tree.
++    .compositingGroup()
++    .transition(.identity)
++  }
++}
++
++// Date-based ProgressView is rendered by the system clock. It does not need
++// one-second ActivityKit updates to restart a custom animation.
++private struct BiuLyricSlot: View {
++  let payload: BiuLyricsFrame
++  let slot: Int
++  let fontSize: CGFloat
++  var island = false
++  @Environment(\.isLuminanceReduced) private var dimmed
++
++  var body: some View {
++    let focused = (payload.activeSlot ?? 0) == slot
++    GeometryReader { geometry in
++      if let line = payload.line(slot) {
++        let time = payload.time(at: Date())
++        let started = focused && time >= line.from
++        let progress = min(1, max(0, (time - line.from) / max(0.001, line.to - line.from)))
++        let font = UIFont.systemFont(ofSize: fontSize, weight: .semibold)
++        let inset: CGFloat = 3
++        let viewport = max(1, geometry.size.width - inset * 2)
++        let measure: (String) -> Double = { Double(ceil(($0 as NSString).size(withAttributes: [.font: font]).width)) }
++        let pages = biuLyricPages(line.text, viewport: Double(viewport), measure: measure)
++        let pageIndex = biuLyricPageIndex(pages, progress: started ? progress : 0)
++        let page = pages[pageIndex]
++        let text = page.text
++        let textWidth = max(1, CGFloat(measure(text)))
++        let origin = island ? max(0, (viewport - textWidth) / 2) : 0
++        let duration = max(0.001, line.to - line.from)
++        let start = (payload.clockAnchor ?? 0) + line.from + duration * page.from
++        let interval = started && payload.playing == true && !dimmed && payload.clockAnchor != nil
++          ? Date(timeIntervalSince1970: start)...Date(timeIntervalSince1970: start + duration * max(0.000001, page.to - page.from)) : nil
++        BiuSystemLyricSweep(text: text, fontSize: fontSize, interval: interval,
++          progress: started ? min(1, max(0, (progress - page.from) / max(0.000001, page.to - page.from))) : 0, focused: started)
++        .frame(width: textWidth, height: font.lineHeight)
++        // Fixed lyric viewport. Line changes use identity, never translation.
++        .offset(x: inset + origin)
++        .frame(width: geometry.size.width, height: geometry.size.height, alignment: .leading)
++        .clipped()
++        .id("\(payload.animationID):\(line.id):\(pageIndex)")
++        .transition(.identity)
++        .accessibilityElement(children: .ignore)
++        .accessibilityLabel(line.text)
++        .animation(nil, value: started)
++        .animation(nil, value: pageIndex)
++      } else {
++        Text(slot == 0 && payload.line(1) == nil ? "暂无歌词" : " ")
++          .font(.system(size: fontSize, weight: .semibold))
++          .foregroundStyle(.white.opacity(0.46))
+       }
+-      return island
+     }
+-    .supplementalActivityFamiliesIfAvailable()
++    .frame(height: ceil(UIFont.systemFont(ofSize: fontSize).lineHeight) + 6)
++    .contentTransition(.identity)
++    .animation(nil, value: focused)
++    .animation(nil, value: payload.animationID)
++    .animation(nil, value: payload.line(slot)?.id)
+   }
+ }
+ 
+ @available(iOS 16.1, *)
+-private struct LiveActivitySectionView: View {
+-  let context: ActivityViewContext<LiveActivityAttributes>
+-  let nodes: [String: Any]
+-  let sectionName: String
++private struct BiuLyricsActivityBanner: View {
++  let payload: BiuLyricsFrame
++  private var light: Color {
++    var hue: CGFloat = 0, saturation: CGFloat = 0
++    payload.backgroundColor.getHue(&hue, saturation: &saturation, brightness: nil, alpha: nil)
++    return Color(hue: Double(hue), saturation: Double(min(0.36, saturation * 0.6)), brightness: 0.8)
++  }
++  var body: some View {
++    let panel = Color(payload.backgroundColor)
++    VStack(alignment: .leading, spacing: 1) {
++      if payload.lockScreenLyrics == false {
++        Text("正在播放").foregroundStyle(.white)
++      } else {
++        BiuLyricSlot(payload: payload, slot: 0, fontSize: 23)
++        BiuLyricSlot(payload: payload, slot: 1, fontSize: 23)
++      }
++    }
++    .padding(.horizontal, 18)
++    .padding(.vertical, 11)
++    .background {
++      GeometryReader { geometry in
++        ZStack {
++          panel
++          RadialGradient(colors: [light.opacity(0.18), .clear], center: .topLeading,
++            startRadius: 0, endRadius: max(1, geometry.size.width * 0.85))
++          RadialGradient(colors: [.white.opacity(0.055), .clear], center: .bottomTrailing,
++            startRadius: 0, endRadius: max(1, geometry.size.width * 0.55))
++        }
++        .clipped()
++      }
++    }
++    .overlay {
++      ContainerRelativeShape()
++        .strokeBorder(LinearGradient(colors: [.white.opacity(0.28), .white.opacity(0.07)],
++          startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
++        .allowsHitTesting(false)
++    }
++    .activityBackgroundTint(panel)
++    .activitySystemActionForegroundColor(.white)
++  }
++}
+ 
++private struct BiuIslandLyric: View {
++  let payload: BiuLyricsFrame
++  let slot: Int
++  var fontSize: CGFloat = 13
+   var body: some View {
+-    if let node = nodes[sectionName] as? [String: Any] {
+-      WidgetsDynamicView(name: context.activityID, kind: .liveActivity, node: node)
++    if payload.dynamicIslandLyrics == false {
++      Text(slot == 0 ? "Biu" : "播放中").font(.system(size: fontSize))
+     } else {
+-      EmptyView()
++      BiuLyricSlot(payload: payload, slot: slot, fontSize: fontSize, island: true)
+     }
+   }
+ }
+ 
+-@available(iOS 16.1, *)
+-private struct LiveActivityBannerView: View {
+-  var context: ActivityViewContext<LiveActivityAttributes>
+-  let nodes: [String: Any]
++// Expanded lyrics read chronologically; compact presentation keeps two slots.
++private struct BiuExpandedIslandLyrics: View {
++  let payload: BiuLyricsFrame
+ 
+   var body: some View {
+-    if #available(iOS 18.0, *) {
+-      LiveActivityBanner(context: context, nodes: nodes)
+-    } else if let node = nodes["banner"] as? [String: Any] {
+-      WidgetsDynamicView(name: context.activityID, kind: .liveActivity, node: node)
++    if payload.dynamicIslandLyrics == false {
++      Text("Biu · 播放中").font(.system(size: 16))
+     } else {
+-      EmptyView()
++      let active = payload.activeSlot ?? 0
++      VStack(spacing: 5) {
++        Text(payload.previousLyric ?? " ")
++          .font(.system(size: 16, weight: .semibold))
++          .foregroundStyle(biuLyricText.opacity(0.38))
++          .lineLimit(1)
++          .frame(maxWidth: .infinity)
++          .frame(height: ceil(UIFont.systemFont(ofSize: 16).lineHeight) + 6)
++          .contentTransition(.identity)
++          .animation(nil, value: payload.previousLyric)
++          .accessibilityHidden(payload.previousLyric == nil)
++        BiuIslandLyric(payload: payload, slot: active, fontSize: 16)
++        BiuIslandLyric(payload: payload, slot: 1 - active, fontSize: 16)
++      }
++      .frame(maxWidth: .infinity)
++      .animation(nil, value: payload.line(active)?.id)
++    }
++  }
++}
++
++// The system chooses minimal presentation when two activities share the island.
++// This is a playback indicator, not FFT data from the audio decoder.
++private struct BiuIslandSpectrum: View {
++  let payload: BiuLyricsFrame
++  @Environment(\.isLuminanceReduced) private var dimmed
++
++  var body: some View {
++    let playing = payload.playing == true
++    HStack(alignment: .center, spacing: 2) {
++      ForEach(0..<5, id: \.self) { index in
++        let level = [0.3, 0.7, 1.0, 0.55, 0.25][index]
++        Capsule()
++          .fill(biuLyricText.opacity(playing ? 0.92 : 0.45))
++          .frame(width: 2.5, height: playing ? 4 + 13 * level : 4)
++      }
+     }
++    .frame(width: 24, height: 22)
++    .animation(nil, value: playing)
++    .accessibilityElement(children: .ignore)
++    .accessibilityLabel(playing ? "正在播放" : "播放已暂停")
++  }
++}
++
++@available(iOS 16.1, *)
++public struct WidgetLiveActivity: Widget {
++  public init() {}
++  public var body: some WidgetConfiguration {
++    ActivityConfiguration(for: LiveActivityAttributes.self) { context in
++      BiuLyricsActivityBanner(payload: .decode(context.state.props))
++        .widgetURL(context.attributes.url.flatMap(URL.init(string:)))
++    } dynamicIsland: { context in
++      let payload = BiuLyricsFrame.decode(context.state.props)
++      return DynamicIsland {
++        DynamicIslandExpandedRegion(.bottom) {
++          BiuExpandedIslandLyrics(payload: payload)
++          .padding(.horizontal, 12)
++          .padding(.vertical, 8)
++        }
++      } compactLeading: {
++        BiuIslandLyric(payload: payload, slot: 0).frame(width: 72)
++      } compactTrailing: {
++        BiuIslandLyric(payload: payload, slot: 1).frame(width: 72)
++      } minimal: {
++        BiuIslandSpectrum(payload: payload)
++      }
++      .keylineTint(Color.white.opacity(0.25))
++      .widgetURL(context.attributes.url.flatMap(URL.init(string:)))
++    }
++    .supplementalActivityFamiliesIfAvailable()
+   }
+ }
+ 
+diff --git a/node_modules/expo-widgets/ios/WidgetsModule.swift b/node_modules/expo-widgets/ios/WidgetsModule.swift
+index b1b4295..62997a8 100644
+--- a/node_modules/expo-widgets/ios/WidgetsModule.swift
++++ b/node_modules/expo-widgets/ios/WidgetsModule.swift
+@@ -1,6 +1,7 @@
+ import ExpoModulesCore
+ import ActivityKit
+ import WidgetKit
++import UIKit
+ 
+ let pushNotificationsEnabledKey: String = "ExpoWidgets_EnablePushNotifications"
+ 
+@@ -15,6 +16,19 @@ public final class WidgetsModule: Module {
+   public func definition() -> ModuleDefinition {
+     Name("ExpoWidgets")
+ 
++    OnCreate {
++      NotificationCenter.default.addObserver(self, selector: #selector(self.endBiuLyrics),
++        name: UIApplication.willTerminateNotification, object: nil)
++    }
++
++    OnAppContextDestroys {
++      self.endBiuLyrics()
++    }
++
++    OnDestroy {
++      NotificationCenter.default.removeObserver(self)
++    }
++
+     Events(onPushToStartTokenReceived, onTokenReceived, onUserInteraction)
+ 
+     OnStartObserving(onUserInteraction) {
+@@ -114,6 +128,21 @@ public final class WidgetsModule: Module {
+     }
+   }
+ 
++  // Best effort only: iOS can force-kill a suspended app without delivering
++  // willTerminate. JS also removes the previous session on the next launch.
++  @objc private func endBiuLyrics() {
++    guard #available(iOS 16.2, *) else { return }
++    let activities = Activity<LiveActivityAttributes>.activities.filter {
++      $0.content.state.name == "LyricsLiveActivity"
++    }
++    Task {
++      await MainActor.run { BiuLyricsActivityClock.shared.stop() }
++      for activity in activities {
++        await activity.end(nil, dismissalPolicy: .immediate)
++      }
++    }
++  }
++
+   @objc func handleUserInteractionNotification(_ notification: Notification) {
+     guard let userInfo = notification.userInfo as? [String: Any],
+           let eventData = userInfo["eventData"] as? [String: Any]

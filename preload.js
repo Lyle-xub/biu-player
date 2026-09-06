@@ -8,6 +8,9 @@ contextBridge.exposeInMainWorld('bili', {
   post: (url, body) => ipcRenderer.invoke('bili:post', url, body),
   // 图片 → dataURL（封面取色用）
   image: (url) => ipcRenderer.invoke('bili:image', url),
+  shareCardCopy: (dataUrl) => ipcRenderer.invoke('share-card:copy', dataUrl),
+  shareCardSave: (payload) => ipcRenderer.invoke('share-card:save', payload),
+  shareLinkCopy: (value) => ipcRenderer.invoke('share-link:copy', value),
   // Shazam 识曲：{ pcm: ArrayBuffer(Float32 mono @16000Hz) } → { title, artist, album, year, genre, pic } | null
   shazamRecognize: (payload) => ipcRenderer.invoke('shazam:recognize', payload),
   // 网易云识曲：{ pcm: ArrayBuffer(Float32 mono @48000Hz), from, len } → 匹配数组
@@ -34,6 +37,7 @@ contextBridge.exposeInMainWorld('bili', {
   updateDownload: () => ipcRenderer.invoke('app-update:download'),
   updateInstall: () => ipcRenderer.invoke('app-update:install'),
   updateConfigure: patch => ipcRenderer.invoke('app-update:configure', patch),
+  updateActivity: delta => ipcRenderer.invoke('app-update:activity', delta),
   onUpdateStatus: cb => {
     const listener = (_event, status) => cb(status);
     ipcRenderer.on('app-update:status', listener);

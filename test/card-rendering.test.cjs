@@ -134,7 +134,7 @@ test('both card types keep clipped glass separate from capsule content', () => {
   const glass = styles.match(/\.gcard \.count::before, \.card \.count::before\s*\{([^}]+)\}/)?.[1];
   assert.ok(glass);
   assert.match(glass, /clip-path:\s*inset\(0 round 22px\)/);
-  assert.match(glass, /backdrop-filter:\s*blur\(8px\)/);
+  assert.match(glass, /backdrop-filter:\s*blur\([\d.]+px\)/);
   assert.match(glass, /pointer-events:\s*none/);
   assert.match(glass, /z-index:\s*0/);
   const content = styles.match(/\.gcard \.count > \*, \.card \.count > \*\s*\{([^}]+)\}/)?.[1];

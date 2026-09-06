@@ -6,7 +6,7 @@ on:
       release_tag:
         description: Existing release to receive the Windows packages
         required: true
-        default: v0.6.2
+        default: v0.6.3
 
 permissions:
   contents: write

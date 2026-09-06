@@ -8,35 +8,36 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors } from '../theme';
 import * as bili from '../api/bili';
 import { initClient } from '../api/client';
+import { beginRecommendation } from '../updates/networkGate';
 import { usePlayer } from '../player/PlayerContext';
+import { canOpenTrackUp, openTrackUp } from '../player/openTrackUp';
 import TrackCard from '../components/TrackCard';
 import HomeBanner from '../components/HomeBanner';
 import { DailyCard } from './DailyScreen';
 import { IconHeart, IconNote, IconSearch } from '../components/icons';
 
-const WATERFALL_BATCH = 8;
 const RECOMMEND_BATCH = 20;
 const MAX_RECOMMEND_PAGES = 8;
 const cardWeight = (track) => 1 + (String(track.title || '').length > 18 ? 0.24 : 0)
   + (track.recommendationReason ? 0.2 : 0);
 
 function waterfallBlocks(items) {
-  const blocks = [];
-  for (let start = 0; start < items.length; start += WATERFALL_BATCH) {
-    const columns = [[], []];
-    const weights = [0, 0];
-    items.slice(start, start + WATERFALL_BATCH).forEach((track) => {
-      const column = weights[0] <= weights[1] ? 0 : 1;
-      columns[column].push(track);
-      weights[column] += cardWeight(track);
-    });
-    blocks.push({ key: `waterfall-${start}`, columns });
-  }
-  return blocks;
+  const columns = [[], []];
+  const weights = [0, 0];
+  // Balance the complete feed continuously. Restarting the weights for every
+  // fetched page forced both columns onto a shared row and created large holes.
+  items.forEach((track) => {
+    const column = weights[0] <= weights[1] ? 0 : 1;
+    columns[column].push(track);
+    weights[column] += cardWeight(track);
+  });
+  return items.length ? [{ key: 'waterfall', columns }] : [];
 }
 
 export default function HomeScreen({ navigation }) {
-  const { playQueue, likes, recommendMode = 'music', account, recommendationManager, recommendationProfile } = usePlayer();
+  const { playQueue, likes, recommendMode = 'music', account, recommendationManager,
+    recommendationProfile, resolveTrackUp } = usePlayer();
+  const openUp = (track) => openTrackUp(navigation, track, resolveTrackUp);
   const strictProfile = isStrict(recommendationProfile);
   const [mode, setMode] = useState('recommend'); // recommend | rank | likes
   const [tracks, setTracks] = useState([]);
@@ -67,6 +68,7 @@ export default function HomeScreen({ navigation }) {
       setTracks(likes); setLoading(false); setLoadingMore(false); setError(null);
       return;
     }
+    const finishUpdatePause = m === 'recommend' ? beginRecommendation() : null;
     loadingMoreRef.current = true;
     if (more) setLoadingMore(true); else setLoading(true);
     setError(null);
@@ -179,6 +181,7 @@ export default function HomeScreen({ navigation }) {
         setError(String(e.message || e));
       }
     } finally {
+      finishUpdatePause?.();
       if (token === requestRef.current) {
         loadingMoreRef.current = false;
         setLoading(false);
@@ -270,7 +273,7 @@ export default function HomeScreen({ navigation }) {
                   <TrackCard key={track.bvid || track.aid || `${track.title}:${track.up}`}
                     track={track}
                     onPress={() => playQueue(tracks, tracks.indexOf(track))}
-                    onPressUp={track.mid ? () => navigation.navigate('Up', { mid: track.mid }) : undefined}
+                    onPressUp={canOpenTrackUp(track) ? () => openUp(track) : undefined}
                   />
                 ))}
               </View>

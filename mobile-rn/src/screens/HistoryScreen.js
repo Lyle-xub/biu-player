@@ -6,12 +6,14 @@ import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-nati
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors } from '../theme';
 import { usePlayer } from '../player/PlayerContext';
+import { canOpenTrackUp, openTrackUp } from '../player/openTrackUp';
 import { trackKeyOf } from '../player/track';
 import TrackRow from '../components/TrackRow';
 import { IconBack, IconClock } from '../components/icons';
 
 export default function HistoryScreen({ navigation }) {
-  const { history, playQueue, current } = usePlayer();
+  const { history, playQueue, current, resolveTrackUp } = usePlayer();
+  const openUp = (track) => openTrackUp(navigation, track, resolveTrackUp);
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -30,7 +32,7 @@ export default function HistoryScreen({ navigation }) {
               track={t}
               active={trackKeyOf(current) === trackKeyOf(t)}
               onPress={() => playQueue(history, i)}
-              onPressUp={t.mid ? () => navigation.navigate('Up', { mid: t.mid }) : undefined}
+              onPressUp={canOpenTrackUp(t) ? () => openUp(t) : undefined}
             />
           ))
         ) : (

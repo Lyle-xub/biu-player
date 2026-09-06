@@ -4,6 +4,8 @@
   else root.BiuRecommendation = factory(root.BiuDaily);
 })(typeof window === 'object' ? window : this, function (D) {
   const MUSIC = new Set([3, 28, 29, 30, 31, 59, 130, 193, 194, 243, 244, 265, 267]);
+  const DAILY_MIN_TRACKS = 15;
+  const DAILY_MAX_ROUNDS = 5;
   const clean = (value) => String(value || '').normalize('NFKC').replace(/<[^>]*>/g, '').trim().slice(0, 40);
   const keyOf = (value) => clean(value).toLowerCase();
   function tags(value) {
@@ -266,11 +268,14 @@
     return selected;
   }
   async function recommend(profile, { get, page = 0, mode = 'music', exclude = [], strict = false, onBatch, daily = false }) {
-    // Daily candidates come from one shared search pool; taste only ranks its results.
-    const searches = daily ? Array.from({ length: 3 }, (_, i) => ({
-      name: '日推', page: Math.max(0, Math.floor(page)) * 3 + i + 1,
-    })) : queries(profile, page, strict ? 3 : undefined);
-    const seen = new Set(exclude), result = [], candidates = [];
+    // 每轮两页最新发布 + 一页综合排序。最新候选先流式进入日推，综合候选随后补足。
+    const dailyPage = Math.max(0, Math.floor(page));
+    const searches = daily ? [
+      { name: '日推', page: dailyPage * 2 + 1, order: 'pubdate' },
+      { name: '日推', page: dailyPage * 2 + 2, order: 'pubdate' },
+      { name: '日推', page: dailyPage + 1, order: '' },
+    ] : queries(profile, page, strict ? 3 : undefined);
+    const excluded = new Set(exclude), seen = new Set(exclude), result = [], candidates = [], dailyFallback = [];
     let failure;
     const resolveTrack = async (v) => {
       try {
@@ -297,12 +302,22 @@
       let videos;
       try {
         const data = await request(get, 'https://api.bilibili.com/x/web-interface/search/type?search_type=video&keyword='
-          + encodeURIComponent(query.name) + '&page=' + query.page + (mode === 'music' ? '&tids=3' : ''));
+          + encodeURIComponent(query.name) + '&page=' + query.page
+          + (query.order ? '&order=' + encodeURIComponent(query.order) : '')
+          + (mode === 'music' ? '&tids=3' : ''));
         videos = (data.result || []).filter((v) => v.type === 'video' && v.bvid).slice(0, strict || daily ? 20 : 8)
-          .filter((v) => { if (seen.has(v.bvid)) return false; seen.add(v.bvid); return true; });
+          .filter((v) => {
+            if (daily && !query.order) return !excluded.has(v.bvid);
+            if (seen.has(v.bvid)) return false;
+            seen.add(v.bvid); return true;
+          });
       } catch (error) { failure = error; return; }
       const details = (await mapLimit(videos, resolveTrack)).filter(Boolean);
-      if (daily) { candidates.push(...details); onBatch?.(details); return; }
+      if (daily) {
+        if (query.order === 'pubdate') { candidates.push(...details); onBatch?.(details, { order: 'pubdate' }); }
+        else dailyFallback.push(...details);
+        return;
+      }
       if (!strict) { candidates.push(...details); return; }
       // Publish each completed page once; later pages only append, never reorder
       // cards that are already on screen or wait for the slowest search request.
@@ -312,7 +327,18 @@
         onBatch?.(batch);
       }
     });
-    if (daily) result.push(...candidates);
+    if (daily) {
+      const latest = [...candidates];
+      const fallback = dailyFallback.filter((track) => {
+        if (seen.has(track.bvid)) return false;
+        seen.add(track.bvid); return true;
+      });
+      if (fallback.length) onBatch?.(fallback, { order: 'default' });
+      // 综合结果不足时，再用剩余的新视频补齐 24 首。
+      if (latest.length) onBatch?.(latest, { order: 'pubdate', overflow: true });
+      candidates.push(...fallback);
+      result.push(...candidates);
+    }
     else if (!strict) result.push(...rank(candidates, profile, exclude));
     if (!result.length && failure) throw failure;
     return result;
@@ -439,6 +465,7 @@
         const interest = D.taste(snapshot.auto.evidence || [], snapshot.daily);
         const searchProfile = strict || { tags: interest.tags };
         const checkedDurations = new Map();
+        const fetchedCandidates = [];
         let entry = !force && old && old.profileId === profileId ? { ...old } : {
           date: D.dayKey(), profileId, source: D.SOURCE, profileName: strict?.name || '自动画像', generatedAt: Date.now(), updatedAt: Date.now(),
           tracks: [], complete: false, rounds: 0, error: '', themes: searchProfile.tags.slice(0, 3).map((v) => v.name),
@@ -450,9 +477,9 @@
           await commit((s) => ({ ...s, daily: { ...s.daily, profileId,
             days: [...s.daily.days.filter((v) => v.date !== saved.date || v.profileId !== profileId), saved] } }), false);
         };
-        const append = async (items) => {
+        const append = async (items, limit = 24) => {
           if (disposed) return;
-          entry.tracks = D.select(items, snapshot.daily, interest, entry.tracks, 24, strict);
+          entry.tracks = D.select(items, snapshot.daily, interest, entry.tracks, limit, strict);
           await save();
           if (entry.tracks.length >= 24) return;
           items = await mapLimit(items, async (t) => {
@@ -467,22 +494,24 @@
           });
           const resolved = items.filter((t) => checkedDurations.has(t.bvid) && D.durationOf(t) > 0);
           if (resolved.length) await commit((s) => ({ ...s, daily: D.observe(s.daily, resolved) }), false);
-          entry.tracks = D.select(items, snapshot.daily, interest, entry.tracks, 24, strict);
+          entry.tracks = D.select(items, snapshot.daily, interest, entry.tracks, limit, strict);
           await save();
         };
         try {
           entry.error = '';
           let fetchError;
           await save();
-          for (; entry.rounds < 3 && entry.tracks.length < 24 && !disposed;) {
+          for (; entry.rounds < DAILY_MAX_ROUNDS && entry.tracks.length < DAILY_MIN_TRACKS && !disposed;) {
             let appended = Promise.resolve();
             let searchError;
             try {
               await recommend(searchProfile, { get, page: entry.rounds, mode: 'music', daily: true,
-                exclude: entry.tracks.map((t) => t.bvid), onBatch: (items) => { appended = appended.then(async () => {
+                exclude: entry.tracks.map((t) => t.bvid), onBatch: (items, batch) => { appended = appended.then(async () => {
                   if (disposed) return;
+                  fetchedCandidates.push(...items);
                   await commit((s) => ({ ...s, daily: D.observe(s.daily, items) }), false);
-                  await append(items);
+                  // 正常情况下保留约 1/4 给综合排序；综合不足时由最新候选补齐。
+                  await append(items, batch?.order === 'pubdate' && !batch.overflow ? 18 : 24);
                 }); } });
             } catch (error) { searchError = error; }
             await appended;
@@ -490,8 +519,15 @@
             entry.rounds++;
             await save();
           }
-          entry.complete = !fetchError || entry.tracks.length >= 24;
-          if (!entry.complete) entry.error = fetchError.message || '暂时无法获取推荐，请稍后重试';
+          // 自动画像若匹配结果仍不足，用本轮“日推”音乐单曲补足最低数量；
+          // 自定义画像继续严格匹配，绝不为了凑数混入画像之外的视频。
+          if (!strict && entry.tracks.length < DAILY_MIN_TRACKS) {
+            entry.tracks = D.select(fetchedCandidates, snapshot.daily,
+              { tags: [], long: [], recent: [] }, entry.tracks, DAILY_MIN_TRACKS, null);
+          }
+          entry.complete = entry.tracks.length >= DAILY_MIN_TRACKS;
+          entry.error = entry.complete ? '' : (fetchError?.message
+            || `只找到 ${entry.tracks.length} 首匹配歌曲，请稍后重试`);
         } catch (error) { entry.error = error.message || '暂时无法获取推荐，请稍后重试'; }
         await save();
         return entry;

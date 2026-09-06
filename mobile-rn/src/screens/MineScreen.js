@@ -1,7 +1,7 @@
 /* Biu Player RN · 我的：资料卡 + 圆形图标菜单 + 最近播放横滑卡 + 歌单/收藏夹卡片网格
  * 布局参考 QQ 音乐我的页（深色主题化）：
  * - 顶部资料卡（头像 + 昵称；登录流程不变：手机号 + 短信验证码 + 极验滑块）
- * - 圆形图标菜单行：我喜欢 / 歌单 / 收藏夹 / 历史 / 设置（图标 + 名称 + 数量，5 项均分）
+ * - 圆形图标菜单行：我喜欢 / 音乐库 / 历史 / 设置
  * - 最近播放：横向滑动卡片行，首张「已播歌曲」汇总卡 → HistoryScreen，后面是具体曲目卡
  * - 歌单卡片区：「自建歌单 N / 收藏夹 N」双标题分段 + 右侧「+」新建本地歌单（弹输入框），
  *   双列卡片网格：自建歌单 = 本地数据层（src/store/playlists.js，封面按歌单固定），
@@ -26,11 +26,11 @@ import ConfirmDialog, { Dialog } from '../components/Dialog';
 import DefaultCover, { defaultCoverSeed } from '../components/DefaultCover';
 import RemoteImage from '../components/RemoteImage';
 import {
-  IconClock, IconHeart, IconNote, IconPlaylist, IconPlus, IconSettings, IconStar, IconUser,
+  IconClock, IconHeart, IconNote, IconPlaylist, IconPlus, IconSettings, IconUser,
 } from '../components/icons';
 
 export default function MineScreen({ navigation }) {
-  const { likes, playQueue, history, account: auth, switchAccount } = usePlayer();
+  const { likes, libraryTracks = [], playQueue, history, account: auth, switchAccount } = usePlayer();
   const playlists = usePlaylists();
   const [gridTab, setGridTab] = useState('local'); // local 自建歌单 | fav 收藏夹
   const [confirm, setConfirm] = useState(null);
@@ -175,12 +175,8 @@ export default function MineScreen({ navigation }) {
       onPress: () => navigation.navigate('Likes'),
     },
     {
-      key: 'local', label: '歌单', count: playlists.length, Icon: IconPlaylist,
-      onPress: () => setGridTab('local'),
-    },
-    {
-      key: 'fav', label: '收藏夹', count: favs.length || '', Icon: IconStar,
-      onPress: () => (auth && auth.isLogin ? setGridTab('fav') : needLoginAlert()),
+      key: 'library', label: '音乐库', count: libraryTracks.length, Icon: IconPlaylist,
+      onPress: () => navigation.navigate('MusicLibrary'),
     },
     {
       key: 'history', label: '历史', count: history.length, Icon: IconClock,

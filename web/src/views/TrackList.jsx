@@ -96,6 +96,8 @@ export function TrackList({ tracks, current, editable, listHint, containerId, on
         : tracks.map((t, i) => {
           const on = current === t;
           const liked = !!(window.biuActions && window.biuActions.isLiked(t));
+          const sourceTitle = t.isSegment && t.parentTitle && t.parentTitle !== t.title ? t.parentTitle : '';
+          const sourceUp = t.isSegment && t.parentUp && t.parentUp !== t.up ? t.parentUp : '';
           return (
             <div key={`${t.bvid || t.title || 'track'}-${i}`}
               className={`trow${on ? ' on' : ''}${editable ? ' editable' : ''}${removing.has(i) ? ' t-removing' : ''}${gone.has(i) ? ' t-gone' : ''}`}
@@ -109,8 +111,9 @@ export function TrackList({ tracks, current, editable, listHint, containerId, on
               <span className="tt"><span className="tcov">{t.pic
                   ? <img src={t.pic} loading="lazy" decoding="async" alt="" />
                   : <span style={{ display: 'contents' }} dangerouslySetInnerHTML={{ __html: window.coverSVG((t && t.seed) || 1, 100) }} />}</span>
-                <span style={{ minWidth: 0 }}><b>{t.title}{t.isLive ? <span className="tag-live">直播</span> : null}</b><small>{t.up}</small></span></span>
-              <span className="up">{t.up}</span>
+                <span style={{ minWidth: 0 }}><b>{t.title}{sourceTitle ? <span className="track-source"> · {sourceTitle}</span> : null}{t.isLive ? <span className="tag-live">直播</span> : null}</b>
+                  <small>{t.up}{sourceUp ? <span className="track-source"> · {sourceUp}</span> : null}</small></span></span>
+              <span className="up">{t.up}{sourceUp ? <span className="track-source"> · {sourceUp}</span> : null}</span>
               <span className="dur num">{t.isLive ? 'LIVE' : fmt(t.duration)}</span>
               <span className="t-acts"><span className={`like${liked ? ' liked' : ''}`} data-like={i}
                 onClick={(e) => { e.stopPropagation(); window.biuActions.toggleLike(t); }}>{likeIcon}</span>{editable && (

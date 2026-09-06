@@ -26,7 +26,9 @@ test('invalid snapshots and queue entries are safe; duplicate queue index is pre
 });
 
 test('segment timing is absolute, bounded and retains lyric matching', () => {
-  const segment = { ...song, isSegment: true, from: 100, to: 180, lyricRef: { source: 'qq', id: 123, songmid: 'abc' } };
+  const segment = { ...song, isSegment: true, from: 100, to: 180,
+    parentBvid: song.bvid, parentTitle: '原视频', parentUp: '原UP', parentMid: 42,
+    lyricRef: { source: 'qq', id: 123, songmid: 'abc' } };
   const saved = session.normalize(snapshot({ current: segment, queue: [segment] }));
   assert.deepEqual(saved.current, segment);
   assert.equal(session.resumePosition(segment, 120, 240), 120);
@@ -77,8 +79,8 @@ test('startup restores seek and view without starting playback', async () => {
     const { context, calls } = harness();
     await context.restorePlaybackSession(snapshot({ playing, view: 'fav' }));
     const play = calls.find(([name]) => name === 'play');
-    assert.deepEqual(JSON.parse(JSON.stringify(play[2])), { autoplay: false, startTime: 83.5, videoMode: true });
-    assert.equal(context.document.body.dataset.view, 'fav');
+    assert.deepEqual(JSON.parse(JSON.stringify(play[2])), { autoplay: false, startTime: 83.5, videoMode: true, keepView: true });
+    assert.equal(context.document.body.dataset.view, 'playing', 'restore preserves the current view');
     assert.equal(context.state.qi, 0);
     assert.equal(context.audio.muted, true);
     assert.equal(vm.runInContext('playMode', context), 'one');

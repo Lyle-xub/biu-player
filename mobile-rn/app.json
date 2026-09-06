@@ -2,7 +2,7 @@
   "expo": {
     "name": "Biu Player",
     "slug": "biu-player-mobile",
-    "version": "1.0.2",
+    "version": "1.0.6",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -10,7 +10,8 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.biuplayer.mobile",
-      "buildNumber": "11"
+      "buildNumber": "20",
+      "appleTeamId": "GXVN75MDQN"
     },
     "android": {
       "package": "com.biuplayer.mobile",
@@ -19,7 +20,7 @@
         "foregroundImage": "./assets/android-icon-foreground.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "versionCode": 3
+      "versionCode": 7
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -39,17 +40,10 @@
         }
       ],
       [
-        "expo-audio",
-        {
-          "enableBackgroundPlayback": true,
-          "enableBackgroundRecording": false
-        }
-      ],
-      [
         "expo-video",
         {
           "supportsBackgroundPlayback": true,
-          "supportsPictureInPicture": false
+          "supportsPictureInPicture": true
         }
       ],
       "expo-image",
@@ -63,7 +57,28 @@
           "launchMode": "launcher"
         }
       ],
-      "expo-secure-store"
+      "expo-secure-store",
+      "./plugins/withBiuLyricsWidgets",
+      [
+        "expo-widgets",
+        {
+          "bundleIdentifier": "com.biuplayer.mobile.widgets",
+          "groupIdentifier": "group.com.biuplayer.mobile",
+          "frequentUpdates": true,
+          "widgets": [
+            {
+              "name": "LyricsWidget",
+              "displayName": "Biu 桌面歌词",
+              "description": "显示当前播放歌曲与歌词",
+              "contentMarginsDisabled": true,
+              "supportedFamilies": [
+                "systemMedium",
+                "accessoryRectangular"
+              ]
+            }
+          ]
+        }
+      ]
     ],
     "scheme": "biu-player"
   }

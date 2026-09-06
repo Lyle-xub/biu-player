@@ -9,13 +9,15 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors } from '../theme';
 import * as bili from '../api/bili';
 import { usePlayer } from '../player/PlayerContext';
+import { canOpenTrackUp, openTrackUp } from '../player/openTrackUp';
 import TrackRow from '../components/TrackRow';
 import PlaylistEditor from '../components/PlaylistEditor';
 import { IconBack, IconEdit, IconPlaylist } from '../components/icons';
 
 export default function PlaylistDetailScreen({ navigation, route }) {
   const { mediaId, title, intro } = route.params || {};
-  const { playQueue, current, account } = usePlayer();
+  const { playQueue, current, account, resolveTrackUp } = usePlayer();
+  const openUp = (track) => openTrackUp(navigation, track, resolveTrackUp);
   const [folder, setFolder] = useState({ id: mediaId, title, desc: intro || '' });
   const [editor, setEditor] = useState(false);
   const [editLoading, setEditLoading] = useState(false);
@@ -117,7 +119,7 @@ export default function PlaylistDetailScreen({ navigation, route }) {
               track={t}
               active={!!current && current.bvid === t.bvid}
               onPress={() => playQueue(tracks, i)}
-              onPressUp={t.mid ? () => navigation.navigate('Up', { mid: t.mid }) : undefined}
+              onPressUp={canOpenTrackUp(t) ? () => openUp(t) : undefined}
             />
           ))
         )}

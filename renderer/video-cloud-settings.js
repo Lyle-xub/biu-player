@@ -4,7 +4,7 @@
       if (!host) return () => {};
       const bridge=root.bili;
       host.className='video-cloud-card';
-      host.innerHTML=`<div class="mrow lan-sync-row"><div class="ml"><b>视频云同步</b><small>加密同步喜欢、歌单和推荐画像，同账号设备共享一份云端视频。</small>
+      host.innerHTML=`<div class="mrow lan-sync-row"><div class="ml"><b>视频云同步</b><small>加密同步喜欢、音乐库、歌单和推荐画像，同账号设备共享一份云端视频。</small>
         <small class="cloud-status" role="status" data-cloud="status">正在读取同步状态…</small></div>
         <div class="mr"><button class="switch off" type="button" role="switch" aria-label="视频云同步" aria-checked="false" data-cloud="toggle"></button></div></div>
         <div class="mrow cloud-interval-row"><div class="ml"><b>同步间隔</b></div><div class="mr"><span class="mseg" role="radiogroup" aria-label="云同步更新间隔" data-cloud="interval">

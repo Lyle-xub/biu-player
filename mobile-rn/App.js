@@ -6,7 +6,7 @@
  * - tab 切换：fade 轻淡 crossfade；tab 图标选中态轻微 scale 弹性
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Animated, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Animated, AppState, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -35,11 +35,14 @@ import PlayerScreen from './src/screens/PlayerScreen';
 import UpScreen from './src/screens/UpScreen';
 import VideoScreen from './src/screens/VideoScreen';
 import LikesScreen from './src/screens/LikesScreen';
+import MusicLibraryScreen from './src/screens/MusicLibraryScreen';
 import HistoryScreen from './src/screens/HistoryScreen';
 import LocalPlaylistScreen from './src/screens/LocalPlaylistScreen';
 import PlaylistDetailScreen from './src/screens/PlaylistDetailScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
+import ShareCardScreen from './src/screens/ShareCardScreen';
 import { AppUpdateNotice } from './src/components/AppUpdateCard';
+import LyricsActivitySync from './src/components/LyricsActivitySync';
 
 // 等启动遮罩完成布局且 Logo 加载后再交接，避免露出空白帧。
 SplashScreen.preventAutoHideAsync().catch(() => {});
@@ -249,7 +252,6 @@ function Tabs() {
           <Tab.Screen name="Mine" component={MineScreen} options={{ title: '我的' }} />
         </Tab.Navigator>
       </BlurTargetView>
-      <MiniBar blurTarget={blurTargetRef} />
       <GlassTabBar
         active={activeTab}
         blurTarget={blurTargetRef}
@@ -259,49 +261,108 @@ function Tabs() {
   );
 }
 
+const MINI_BAR_HIDDEN_ROUTES = new Set(['Settings', 'Player', 'ShareCard']);
+
+function StackChrome({ children, state, closedTransition }) {
+  const blurTargetRef = useRef(null);
+  const routeName = state.routes[state.index]?.name || 'Tabs';
+  const wantsMiniBar = !MINI_BAR_HIDDEN_ROUTES.has(routeName);
+  const hiddenAtTransitionRef = useRef(null);
+  const wantedLastRenderRef = useRef(true);
+  const [miniBarReady, setMiniBarReady] = useState(wantsMiniBar);
+  useEffect(() => {
+    let revealFrame;
+    let fallbackTimer;
+    if (!wantsMiniBar) {
+      // Capture only on entry. If iOS emits transitionEnd before publishing the
+      // destination route, do not overwrite the completed counter while hidden.
+      if (wantedLastRenderRef.current) hiddenAtTransitionRef.current = closedTransition;
+      setMiniBarReady(false);
+    } else if (hiddenAtTransitionRef.current === null) {
+      setMiniBarReady(true);
+    } else if (closedTransition !== hiddenAtTransitionRef.current) {
+      // Reveal on the first frame after native-stack has actually finished. This
+      // keeps the bar off the departing lyrics page without leaving a visible gap.
+      revealFrame = requestAnimationFrame(() => {
+        hiddenAtTransitionRef.current = null;
+        setMiniBarReady(true);
+      });
+    } else {
+      // Some Android builds omit transitionEnd for animation:'none'. The custom
+      // sheet has already finished before it dispatches goBack, so this is only
+      // a safety net and never lets the bar precede an iOS slide transition.
+      fallbackTimer = setTimeout(() => {
+        hiddenAtTransitionRef.current = null;
+        setMiniBarReady(true);
+      }, Platform.OS === 'android' ? 0 : 380);
+    }
+    wantedLastRenderRef.current = wantsMiniBar;
+    return () => {
+      if (revealFrame != null) cancelAnimationFrame(revealFrame);
+      if (fallbackTimer != null) clearTimeout(fallbackTimer);
+    };
+  }, [closedTransition, wantsMiniBar]);
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (state) => {
+      // A lock-screen / Control Center pause can happen while a closing route
+      // transition is suspended. Restore chrome as soon as the app is active.
+      if (state === 'active' && wantsMiniBar) {
+        hiddenAtTransitionRef.current = null;
+        setMiniBarReady(true);
+      }
+    });
+    return () => subscription.remove();
+  }, [wantsMiniBar]);
+  return (
+    <View style={styles.app}>
+      <OverlayProvider>
+      <BlurTargetView ref={blurTargetRef} style={styles.app}>{children}</BlurTargetView>
+      <MiniBar visible={miniBarReady}
+        blurTarget={blurTargetRef} hasBottomTabs={routeName === 'Tabs'} />
+      <AppUpdateNotice />
+      <StartupGlow />
+      </OverlayProvider>
+    </View>
+  );
+}
+
 export default function App() {
+  const [closedTransition, setClosedTransition] = useState(0);
   return (
     <SafeAreaProvider>
       <PlayerProvider>
+        <LyricsActivitySync />
         <CloudSyncProvider>
         <LanSyncProvider>
         <NavigationContainer theme={navTheme}>
           <StatusBar style="light" />
-          <View style={styles.app}>
-            <OverlayProvider>
-            <Stack.Navigator
-              screenLayout={screenLayout}
-              screenOptions={{
-                headerShown: false,
-                ...pageScreenOptions,
-              }}
-            >
-              <Stack.Screen name="Tabs" component={Tabs} options={{
-                presentation: 'card', animation: 'none', contentStyle: { backgroundColor: colors.bg },
-              }} />
-              {/* 媒体页共用升降转场，Android 在动画完成前保留路由。 */}
-              <Stack.Screen
-                name="Player"
-                component={PlayerScreen}
-                options={mediaScreenOptions}
-              />
-              <Stack.Screen name="Up" component={UpScreen} />
-              <Stack.Screen
-                name="Video"
-                component={VideoScreen}
-                options={mediaScreenOptions}
-              />
-              <Stack.Screen name="Daily" component={DailyScreen} />
-              <Stack.Screen name="Likes" component={LikesScreen} />
-              <Stack.Screen name="History" component={HistoryScreen} />
-              <Stack.Screen name="LocalPlaylist" component={LocalPlaylistScreen} />
-              <Stack.Screen name="PlaylistDetail" component={PlaylistDetailScreen} />
-              <Stack.Screen name="Settings" component={SettingsScreen} />
-            </Stack.Navigator>
-            <AppUpdateNotice />
-            <StartupGlow />
-            </OverlayProvider>
-          </View>
+          <Stack.Navigator
+            layout={(props) => <StackChrome {...props} closedTransition={closedTransition} />}
+            screenLayout={screenLayout}
+            screenListeners={{ transitionEnd: ({ data }) => {
+              if (data?.closing) setClosedTransition((value) => value + 1);
+            } }}
+            screenOptions={{
+              headerShown: false,
+              ...pageScreenOptions,
+            }}
+          >
+            <Stack.Screen name="Tabs" component={Tabs} options={{
+              presentation: 'card', animation: 'none', contentStyle: { backgroundColor: colors.bg },
+            }} />
+            {/* 媒体页共用升降转场，Android 在动画完成前保留路由。 */}
+            <Stack.Screen name="Player" component={PlayerScreen} options={mediaScreenOptions} />
+            <Stack.Screen name="Up" component={UpScreen} />
+            <Stack.Screen name="Video" component={VideoScreen} options={mediaScreenOptions} />
+            <Stack.Screen name="Daily" component={DailyScreen} />
+            <Stack.Screen name="Likes" component={LikesScreen} />
+            <Stack.Screen name="MusicLibrary" component={MusicLibraryScreen} />
+            <Stack.Screen name="History" component={HistoryScreen} />
+            <Stack.Screen name="LocalPlaylist" component={LocalPlaylistScreen} />
+            <Stack.Screen name="PlaylistDetail" component={PlaylistDetailScreen} />
+            <Stack.Screen name="Settings" component={SettingsScreen} />
+            <Stack.Screen name="ShareCard" component={ShareCardScreen} />
+          </Stack.Navigator>
         </NavigationContainer>
         </LanSyncProvider>
         </CloudSyncProvider>

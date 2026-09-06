@@ -66,18 +66,20 @@ export default function HomeBanner({ tracks, onPress }) {
             style={styles.page}
             onPress={() => onPress && onPress(t, i)}
           >
-            <RemoteImage uri={t.pic} width={1280} height={720} style={styles.image}
-              fallback={<View style={[StyleSheet.absoluteFill, styles.imageFallback]}>
-                <IconNote size={34} color={colors.accent} />
-              </View>} />
-            <LinearGradient
-              colors={['transparent', 'rgba(9,11,7,0.82)']}
-              style={styles.shade}
-              pointerEvents="none"
-            />
-            <View style={styles.meta} pointerEvents="none">
-              <Text style={styles.title} numberOfLines={1}>{t.title}</Text>
-              {t.up ? <Text style={styles.up} numberOfLines={1}>{t.up}</Text> : null}
+            <View style={styles.mediaClip}>
+              <RemoteImage uri={t.pic} width={1280} height={720} style={styles.image}
+                fallback={<View style={[StyleSheet.absoluteFill, styles.imageFallback]}>
+                  <IconNote size={34} color={colors.accent} />
+                </View>} />
+              <LinearGradient
+                colors={['transparent', 'rgba(9,11,7,0.82)']}
+                style={styles.shade}
+                pointerEvents="none"
+              />
+              <View style={styles.meta} pointerEvents="none">
+                <Text style={styles.title} numberOfLines={1}>{t.title}</Text>
+                {t.up ? <Text style={styles.up} numberOfLines={1}>{t.up}</Text> : null}
+              </View>
             </View>
           </TouchableOpacity>
         ))}
@@ -100,6 +102,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#1a1e14',
     borderWidth: 1, borderColor: colors.cardBorder,
   },
+  mediaClip: { ...StyleSheet.absoluteFill, borderRadius: 15, overflow: 'hidden' },
   image: { width: '100%', height: '100%' },
   imageFallback: { alignItems: 'center', justifyContent: 'center' },
   shade: { position: 'absolute', left: 0, right: 0, bottom: 0, height: '52%' },

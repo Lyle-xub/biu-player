@@ -1,5 +1,5 @@
 /* Biu Player · 主进程 */
-const { app, BrowserWindow, ipcMain, net, session, protocol, dialog, nativeImage, safeStorage, Tray, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, net, session, protocol, dialog, nativeImage, clipboard, safeStorage, Tray, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -501,7 +501,7 @@ app.whenReady().then(() => {
     notify: value => { if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('app-update:status', value); },
     beforeInstall: () => { quitting = true; flushBiuStore(); },
   });
-  for (const action of ['status', 'check', 'download', 'configure', 'install']) {
+  for (const action of ['status', 'check', 'download', 'configure', 'install', 'activity']) {
     ipcMain.handle(`app-update:${action}`, (event, value) => {
       if (event.sender !== mainWin?.webContents) throw new Error('更新请求来源无效');
       return action === 'check' ? updates.check(true) : updates[action](value);
@@ -516,13 +516,14 @@ app.whenReady().then(() => {
   const readSyncLibrary = (scope) => {
       const suffix = scope ? `@${scope}` : '';
       const saved = readBiuStore();
-      return { version: 1, likes: saved[`biu-likes${suffix}`] || [], playlists: saved[`biu-playlists${suffix}`] || [],
+      return { version: 1, likes: saved[`biu-likes${suffix}`] || [], library: saved[`biu-library${suffix}`] || [], playlists: saved[`biu-playlists${suffix}`] || [],
         recommendation: require('./renderer/recommendation-profile').normalize(saved[`biu-recommendation-profiles${suffix}`]) };
     };
   const writeSyncLibrary = (scope, library, base) => {
       const suffix = scope ? `@${scope}` : '';
       const before = readBiuStore();
-      biuStoreCache = { ...before, [`biu-likes${suffix}`]: library.likes, [`biu-playlists${suffix}`]: library.playlists };
+      biuStoreCache = { ...before, [`biu-likes${suffix}`]: library.likes,
+        [`biu-library${suffix}`]: library.library || [], [`biu-playlists${suffix}`]: library.playlists };
       if (library.recommendation) biuStoreCache[`biu-recommendation-profiles${suffix}`] = library.recommendation;
       if (!flushBiuStore()) { biuStoreCache = before; throw new Error('电脑保存失败，请检查磁盘空间后重试'); }
       if(mainWin && !mainWin.isDestroyed())mainWin.webContents.send('lan-sync:library', { scope, library, base });
@@ -761,6 +762,35 @@ app.whenReady().then(() => {
     } catch (e) {
       return null;
     }
+  });
+
+  const shareImage = (dataUrl) => {
+    if (typeof dataUrl !== 'string' || !/^data:image\/png;base64,/.test(dataUrl) || dataUrl.length > 20_000_000) {
+      throw new Error('分享卡片数据无效');
+    }
+    const image = nativeImage.createFromDataURL(dataUrl);
+    if (image.isEmpty()) throw new Error('分享卡片生成失败');
+    return image;
+  };
+  ipcMain.handle('share-card:copy', (_event, dataUrl) => {
+    clipboard.writeImage(shareImage(dataUrl));
+    return { ok: true };
+  });
+  ipcMain.handle('share-link:copy', (_event, value) => {
+    const link = String(value || '');
+    if (!/^https:\/\/www\.bilibili\.com\/video\/[A-Za-z0-9]+/.test(link)) throw new Error('分享链接无效');
+    clipboard.writeText(link);
+    return { ok: true };
+  });
+  ipcMain.handle('share-card:save', async (_event, { dataUrl, filename }) => {
+    const image = shareImage(dataUrl);
+    const result = await dialog.showSaveDialog(mainWin, {
+      defaultPath: String(filename || 'Biu-Player-分享卡片.png').replace(/[\\/:*?"<>|]/g, '-'),
+      filters: [{ name: 'PNG 图片', extensions: ['png'] }],
+    });
+    if (result.canceled || !result.filePath) return { ok: false, canceled: true };
+    fs.writeFileSync(result.filePath, image.toPNG());
+    return { ok: true, path: result.filePath };
   });
 
   // 下载整文件视频：保存对话框 → 流式写盘，进度经 download:progress 事件回报

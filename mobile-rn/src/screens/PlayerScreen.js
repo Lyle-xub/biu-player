@@ -19,13 +19,15 @@ import {
 } from 'react-native';
 import { useIsFocused } from '@react-navigation/native';
 import useMediaTransition from '../player/useMediaTransition';
-import { trackKeyOf, segmentRange } from '../player/track';
+import { trackKeyOf } from '../player/track';
 import VideoActionBar from '../components/VideoActionBar';
 import { colors } from '../theme';
 import ProgressScrubber from '../components/ProgressScrubber';
-import * as bili from '../api/bili';
 import { usePlayer } from '../player/PlayerContext';
-import LyricsRail, { attachLyricInterludes } from '../components/LyricsRail';
+import { loadTrackLyrics } from '../player/loadLyrics';
+import { canOpenTrackUp, openTrackUp } from '../player/openTrackUp';
+import { useTrackSource } from '../player/trackSource';
+import LyricsRail from '../components/LyricsRail';
 import VideoPane from '../components/VideoPane';
 import LivePlayerBody from '../components/LivePlayerBody';
 import PlaylistPicker from '../components/PlaylistPicker';
@@ -37,17 +39,14 @@ import {
   IconPlaylist, IconPrev, IconQueue, IconRadio, IconShare, IconHeart, IconVideo,
 } from '../components/icons';
 
-// 桌面 cleanLyricText：B 站字幕常用 ♪ 包裹歌词，只保留正文
-const cleanLyricText = (text) => String(text || '')
-  .replace(/^[\s♪♫♬♩♭♮♯]+|[\s♪♫♬♩♭♮♯]+$/gu, '')
-  .trim();
-
 export default function PlayerScreen({ navigation, route }) {
   const {
     current, isLive, playing, buffering, position, duration, playError,
     togglePlay, next, prev, seekTo, isLiked, toggleLike,
-    player: mediaPlayer, lyricSettings, lyricEffect, seekRevision,
+    isInLibrary = () => false, toggleLibrary = () => {},
+    player: mediaPlayer, lyricSettings, lyricEffect, seekRevision, resolveTrackUp,
   } = usePlayer();
+  const openUp = (track) => openTrackUp(navigation, track, resolveTrackUp);
   const { width: winW, height: winH } = useWindowDimensions();
   const transition = useMediaTransition(navigation);
   const focused = useIsFocused();
@@ -70,7 +69,12 @@ export default function PlayerScreen({ navigation, route }) {
   const [railSize, setRailSize] = useState({ width: 0, height: 0 });
 
   const liked = isLiked(current);
+  const inLibrary = isInLibrary(current);
   const hasVideo = !!(current && current.bvid && !isLive);
+  const canOpenCurrentUp = canOpenTrackUp(current);
+  const attributedCurrent = useTrackSource(current);
+  const sourceTitle = attributedCurrent?.isSegment ? attributedCurrent.parentTitle || '' : '';
+  const sourceUp = attributedCurrent?.isSegment ? attributedCurrent.parentUp || '' : '';
 
   const coverSize = Math.min(winW * 0.86, winH * 0.44);
   const curKey = trackKeyOf(current);
@@ -114,20 +118,9 @@ export default function PlayerScreen({ navigation, route }) {
     if (!current || current.isLive) { setLyrics([]); return; }
     let cancelled = false;
     (async () => {
-      let lines = lyricSetting?.lines;
-      if (!lines && current.lyricRef && lyricSetting?.match !== null) lines = await bili.lyricForMatch(current.lyricRef);
-      if (!lines) lines = await bili.searchLyric(current.title, current.up, current.duration || 0);
-      if (!lines && current.bvid && current.cid) {
-        lines = await bili.subtitles(current.bvid, current.cid).catch(() => null);
-        const range = segmentRange(current);
-        if (range && lines) lines = lines.filter((l) => l.to > range.from && l.from < range.to)
-          .map((l) => ({ ...l, from: Math.max(0, l.from - range.from), to: Math.min(range.to, l.to) - range.from }));
-      }
+      const lines = await loadTrackLyrics(current, lyricSetting);
       if (cancelled) return;
-      const cleaned = (lines || [])
-        .map((l) => ({ ...l, text: cleanLyricText(l.text) }))
-        .filter((l) => l.interlude || l.text);
-      setLyrics(cleaned.length ? attachLyricInterludes(cleaned) : []);
+      setLyrics(lines);
     })();
     return () => { cancelled = true; };
   }, [curKey, current?.cid, lyricSetting?.lines]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -276,8 +269,13 @@ export default function PlayerScreen({ navigation, route }) {
                       {/* 标题行：左标题/UP，右我喜欢 + … */}
                       <View style={styles.titleRow}>
                         <View style={styles.titleBox}>
-                          <Text style={styles.title} numberOfLines={1}>{current.title}</Text>
-                          <Text style={styles.up} numberOfLines={1}>{current.up}</Text>
+                          <Text style={styles.title} numberOfLines={1}>{current.title}{sourceTitle ? <Text style={styles.sourceTitle}>  · {sourceTitle}</Text> : null}</Text>
+                          <View style={styles.identityUpRow}>
+                            <Text style={styles.up} numberOfLines={1}>{current.up}</Text>
+                            {sourceUp ? <TouchableOpacity disabled={!canOpenCurrentUp} onPress={() => openUp(current)} hitSlop={6} style={styles.upHit}>
+                              <Text style={[styles.sourceUp, canOpenCurrentUp && styles.sourceUpLink]} numberOfLines={1}>· {sourceUp}</Text>
+                            </TouchableOpacity> : null}
+                          </View>
                         </View>
                         <TouchableOpacity style={styles.smallRoundBtn} onPress={() => toggleLike(current)} hitSlop={6}
                           accessibilityRole="button" accessibilityLabel={liked ? '取消我喜欢' : '加入我喜欢'}
@@ -306,8 +304,13 @@ export default function PlayerScreen({ navigation, route }) {
                             <IconNote size={16} color={colors.accent} />
                           </View>} />
                         <View style={{ flex: 1, minWidth: 0 }}>
-                          <Text style={styles.miniTitle} numberOfLines={1}>{current.title}</Text>
-                          <Text style={styles.miniUp} numberOfLines={1}>{current.up}</Text>
+                          <Text style={styles.miniTitle} numberOfLines={1}>{current.title}{sourceTitle ? <Text style={styles.sourceTitle}>  · {sourceTitle}</Text> : null}</Text>
+                          <View style={styles.identityUpRow}>
+                            <Text style={styles.miniUp} numberOfLines={1}>{current.up}</Text>
+                            {sourceUp ? <TouchableOpacity disabled={!canOpenCurrentUp} onPress={() => openUp(current)} hitSlop={6} style={styles.upHit}>
+                              <Text style={[styles.sourceUp, canOpenCurrentUp && styles.sourceUpLink]} numberOfLines={1}>· {sourceUp}</Text>
+                            </TouchableOpacity> : null}
+                          </View>
                         </View>
                         <TouchableOpacity style={styles.smallRoundBtn} onPress={() => toggleLike(current)} hitSlop={6}
                           accessibilityRole="button" accessibilityLabel={liked ? '取消我喜欢' : '加入我喜欢'}
@@ -374,8 +377,12 @@ export default function PlayerScreen({ navigation, route }) {
                   <VideoPane player={mediaPlayer} buffering={buffering} error={playError}
                     cover={current.pic} visible={focused} />
                   <View style={styles.videoMeta}>
-                    <Text style={styles.videoTitle} numberOfLines={2}>{current.title}</Text>
-                    <Text style={styles.videoUp} numberOfLines={1}>{current.up}</Text>
+                    <Text style={styles.videoTitle} numberOfLines={2}>{current.isSegment ? sourceTitle || '正在读取原视频信息…' : current.title}</Text>
+                    <View style={styles.identityUpRow}>
+                      <TouchableOpacity disabled={!canOpenCurrentUp} onPress={() => openUp(current)} hitSlop={6} style={styles.upHit}>
+                        <Text style={styles.videoUp} numberOfLines={1}>{current.isSegment ? sourceUp || '原 UP' : current.up}</Text>
+                      </TouchableOpacity>
+                    </View>
                   </View>
                   <VideoActionBar track={current} active={mediaMode === 'video'} onShowLyrics={showLyrics} />
                   <View style={{ flex: 1, minHeight: 12 }} />
@@ -399,6 +406,12 @@ export default function PlayerScreen({ navigation, route }) {
                 <Text style={styles.sheetText}>{liked ? '取消我喜欢' : '加入我喜欢'}</Text>
               </TouchableOpacity>
               {!isLive ? (
+                <TouchableOpacity style={styles.sheetItem} onPress={() => { toggleLibrary(current); setSheet(null); }}>
+                  <IconPlaylist size={18} color={inLibrary ? colors.accent : colors.text} />
+                  <Text style={styles.sheetText}>{inLibrary ? '从音乐库移除' : '加入音乐库'}</Text>
+                </TouchableOpacity>
+              ) : null}
+              {!isLive ? (
                 <TouchableOpacity
                   style={styles.sheetItem}
                   onPress={() => setSheet('playlist')}
@@ -413,9 +426,13 @@ export default function PlayerScreen({ navigation, route }) {
                   <Text style={styles.sheetText}>播放视频</Text>
                 </TouchableOpacity>
               ) : null}
-              <TouchableOpacity style={styles.sheetItem} onPress={() => setSheet(null)}>
-                <IconShare size={18} color={colors.text2} />
-                <Text style={[styles.sheetText, { color: colors.text2 }]}>分享（后续版本）</Text>
+              <TouchableOpacity style={styles.sheetItem} onPress={() => {
+                const track = current;
+                setSheet(null);
+                navigation.navigate('ShareCard', { track });
+              }}>
+                <IconShare size={18} color={colors.accent} />
+                <Text style={[styles.sheetText, { color: colors.accent }]}>分享音乐</Text>
               </TouchableOpacity>
             </>
           ) : null}
@@ -471,7 +488,13 @@ const styles = StyleSheet.create({
   titleRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 4 },
   titleBox: { flex: 1, minWidth: 0 },
   title: { color: '#fff', fontSize: 20, fontWeight: '700' },
+  sourceTitle: { color: 'rgba(255,255,255,0.34)', fontSize: 10, fontWeight: '400' },
+  identityUpRow: { flexDirection: 'row', alignItems: 'center', minWidth: 0, gap: 5 },
   up: { color: 'rgba(255,255,255,0.6)', fontSize: 14, marginTop: 3 },
+  upHit: { alignSelf: 'flex-start', maxWidth: '100%' },
+  upLink: { color: colors.accent },
+  sourceUp: { color: 'rgba(255,255,255,0.32)', fontSize: 10, marginTop: 3 },
+  sourceUpLink: { color: 'rgba(251,114,153,0.62)' },
   smallRoundBtn: {
     width: 34, height: 34, borderRadius: 17,
     backgroundColor: 'rgba(255,255,255,0.14)',

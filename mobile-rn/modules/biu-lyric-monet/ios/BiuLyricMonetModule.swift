@@ -44,6 +44,7 @@ public final class BiuLyricMonetModule: Module {
       Prop("wideRadius") { (view, value: Double) in view.wideRadius = CGFloat(value) }
     }
   }
+
 }
 
 public final class BiuLyricMonetView: ExpoView {

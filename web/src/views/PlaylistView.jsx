@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useSlice } from '../store.js';
 import { TrackList } from './TrackList.jsx';
 
@@ -13,6 +13,15 @@ const defaultCover = (
   </svg>
 );
 
+const collectionSorts = [
+  { key: 'added-desc', label: '加入时间', direction: '新到旧' },
+  { key: 'added-asc', label: '加入时间', direction: '旧到新' },
+  { key: 'title-asc', label: '歌曲标题', direction: '正序' },
+  { key: 'title-desc', label: '歌曲标题', direction: '逆序' },
+  { key: 'artist-asc', label: 'UP 主', direction: '正序' },
+  { key: 'artist-desc', label: 'UP 主', direction: '逆序' },
+];
+
 /* 歌单详情视图：DOM 与事件由组件拥有，controller 只 publish('playlist', ...) 数据。
  * plTitleEdit/plDescEdit 的 value 回填 / focus / keydown 仍由 controller 经 $() 管理，
  * 显隐（hidden）与 editing class 由组件按 slice.editing 渲染。 */
@@ -20,6 +29,43 @@ export default function PlaylistView() {
   const pl = useSlice('playlist');
   const editing = !!(pl && pl.editing);
   const A = window.biuActions;
+  const collection = !!(pl && (pl.isLikes || pl.isMusicLibrary));
+  const collectionKey = pl && (pl.isLikes ? 'likes' : pl.isMusicLibrary ? 'library' : 'other');
+  const [query, setQuery] = useState('');
+  const [sort, setSort] = useState('added-desc');
+  const [sortOpen, setSortOpen] = useState(false);
+  const sortMenu = useRef(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  useEffect(() => { setQuery(''); setSort('added-desc'); setSortOpen(false); setSearchOpen(false); }, [collectionKey]);
+  useEffect(() => {
+    if (!sortOpen) return undefined;
+    const close = (event) => { if (!sortMenu.current?.contains(event.target)) setSortOpen(false); };
+    document.addEventListener('pointerdown', close);
+    return () => document.removeEventListener('pointerdown', close);
+  }, [sortOpen]);
+  const selectedSort = collectionSorts.find((item) => item.key === sort) || collectionSorts[0];
+  const visibleTracks = useMemo(() => {
+    const source = pl?.tracks || [];
+    if (!collection) return source;
+    const keyword = query.trim().toLocaleLowerCase();
+    let next = source.map((track, index) => ({ track, index })).filter(({ track }) => !keyword
+      || `${track.title || ''} ${track.up || ''}`.toLocaleLowerCase().includes(keyword));
+    const [field, direction] = sort.split('-');
+    const sign = direction === 'desc' ? -1 : 1;
+    if (field === 'added') next.sort((a, b) => {
+      const at = Number(a.track.addedAt) || 0, bt = Number(b.track.addedAt) || 0;
+      if (at && bt) return sign * (at - bt);
+      if (at || bt) return sign * (at ? 1 : -1);
+      return sign * (b.index - a.index);
+    });
+    next = next.map(({ track }) => track);
+    if (field === 'title') next = [...next].sort((a, b) => sign * String(a.title || '').localeCompare(String(b.title || ''), 'zh-CN'));
+    else if (field === 'artist') next = [...next].sort((a, b) => sign * String(a.up || '').localeCompare(String(b.up || ''), 'zh-CN'));
+    return next;
+  }, [collection, pl?.tracks, query, sort]);
+  useEffect(() => {
+    if (collection) window.biuActions?.setPlaylistViewTracks(visibleTracks);
+  }, [collection, visibleTracks]);
   return (
     <section className="view view-playlist">
       <div className={`pl-head${editing ? ' editing' : ''}`}>
@@ -53,20 +99,47 @@ export default function PlaylistView() {
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>
               随机播放
             </button>
+            {collection ? <div className={`pl-search-inline${searchOpen ? ' open' : ''}`}>
+              <button type="button" className="pl-search-toggle" title="搜索歌曲" aria-label="搜索歌曲"
+                aria-expanded={String(searchOpen)} onClick={() => {
+                  if (searchOpen) { setQuery(''); setSearchOpen(false); } else setSearchOpen(true);
+                }}>
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/></svg>
+              </button>
+              {searchOpen ? <input autoFocus value={query} onChange={(event) => setQuery(event.target.value)}
+                placeholder="搜索歌曲或歌手" aria-label="搜索歌曲或歌手" /> : null}
+            </div> : null}
             {pl && (pl.customId || pl.favId) ? (
               <button className="btn-ghost" data-custom-act="edit" onClick={() => A.togglePlEditing()}>{editing ? '完成' : '编辑'}</button>
             ) : null}
           </div>
         </div>
       </div>
-      <div className={`tlist${editing && pl && pl.customId ? ' editing' : ''}`}>
-        <div className="thead"><span>#</span><span>标题</span><span>UP 主</span><span>时长</span><span></span></div>
+      <div className={`tlist${collection ? ' collection' : ''}${editing && pl && pl.customId ? ' editing' : ''}`}>
+        <div className="thead"><span>#</span><span>标题</span><span>UP 主</span><span>时长</span><span>
+          {collection ? <div className="pl-sort-menu" ref={sortMenu}>
+            <button type="button" className={`pl-list-sort${sortOpen ? ' open' : ''}`}
+              onClick={() => setSortOpen((open) => !open)} aria-expanded={sortOpen}
+              title={`排序：${selectedSort.label} · ${selectedSort.direction}`}
+              aria-label={`排序方式：${selectedSort.label}${selectedSort.direction}`}>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round"><path d="M4 6h9M4 12h7M4 18h5m8-11v11m-3-3 3 3 3-3"/></svg>
+              <b>{selectedSort.label} · {selectedSort.direction}</b>
+              <svg className="pl-sort-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m6 9 6 6 6-6"/></svg>
+            </button>
+            {sortOpen ? <div className="pl-sort-dropdown" role="menu">
+              {collectionSorts.map((item) => <button type="button" role="menuitem" key={item.key}
+                className={item.key === sort ? 'on' : ''} onClick={() => { setSort(item.key); setSortOpen(false); }}>
+                <span>{item.label}</span><small>{item.direction}</small>
+              </button>)}
+            </div> : null}
+          </div> : null}
+        </span></div>
         <TrackList containerId="list-playlist"
-          tracks={pl ? pl.tracks : []}
+          tracks={visibleTracks}
           current={pl ? pl.current : null}
           editable={!!(pl && pl.editable)}
-          listHint={pl ? pl.listHint : null}
-          onPlay={(i) => A.setQueue(pl.tracks, pl.title || '', i)}
+          listHint={query && !visibleTracks.length ? '没有找到匹配的歌曲' : (pl ? pl.listHint : null)}
+          onPlay={(i) => A.setQueue(visibleTracks, pl.title || '', i)}
           onDelete={(i) => A.plDeleteTrack(i)} />
       </div>
     </section>

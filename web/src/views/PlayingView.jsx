@@ -41,9 +41,9 @@ export function NpInfo() {
   const favored = !!(acts && acts.favored);
   return (
     <>
-      <div className="np-artist" id="npArtist">{np ? np.artist : '—'}</div>
+      <div className="np-artist" id="npArtist">{np ? np.artist : '—'}{np?.sourceArtist ? <span className="np-source-inline"> · {np.sourceArtist}</span> : null}</div>
       <div className="np-rule"></div>
-      <h1 className={`np-title${titleLen > 28 ? ' title-long' : ''}${titleLen > 52 ? ' title-xlong' : ''}`} id="npTitle">{title}</h1>
+      <h1 className={`np-title${titleLen > 28 ? ' title-long' : ''}${titleLen > 52 ? ' title-xlong' : ''}`} id="npTitle">{title}{np?.sourceTitle ? <span className="np-source-inline"> · {np.sourceTitle}</span> : null}</h1>
       <div className="np-album" id="npAlbum">{np ? np.album : ''}</div>
       <div className="np-src">
         <div className="np-src-meta">
@@ -63,6 +63,10 @@ export function NpInfo() {
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><path d="M9 18V6l10-2v11"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="15" r="2.5"/></svg>
           <span>歌词</span>
         </button>
+        <button type="button" className="np-src-split" id="btnShare" title="分享音乐">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="m8.2 10.8 7.6-4.5M8.2 13.2l7.6 4.5"/></svg>
+          <span>分享</span>
+        </button>
         </div>
       </div>
       <div className="np-actions" id="npActions">
@@ -77,6 +81,10 @@ export function NpInfo() {
         <button type="button" className="np-fav-btn" id="btnAddPl" title="加入本地歌单" aria-haspopup="true" aria-expanded="false">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><path d="M4 6h10M4 12h10M4 18h6M18 9v8M14 13h8"/></svg>
           <span>歌单</span>
+        </button>
+        <button type="button" className={`np-fav-btn${acts && acts.inLibrary ? ' on' : ''}`} id="btnLibrary" aria-pressed={String(!!(acts && acts.inLibrary))} title={acts && acts.inLibrary ? '已在音乐库' : '加入音乐库'}>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><path d="M4 5h12M4 10h12M4 15h8"/><circle cx="17" cy="17" r="4"/><path d="M17 15v4M15 17h4"/></svg>
+          <span>音乐库</span>
         </button>
       </div>
     </>

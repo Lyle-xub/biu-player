@@ -1,8 +1,9 @@
 {
   "name": "mobile-rn",
-  "version": "1.0.2",
+  "version": "1.0.6",
   "main": "index.js",
   "dependencies": {
+    "@expo/ui": "~57.0.16",
     "@noble/ciphers": "^2.4.0",
     "@noble/curves": "^2.4.0",
     "@noble/hashes": "^2.4.0",
@@ -11,12 +12,11 @@
     "@react-navigation/bottom-tabs": "^7.18.18",
     "@react-navigation/native": "^7.3.18",
     "@react-navigation/native-stack": "^7.18.10",
-    "buffer": "^6.0.3",
     "biu-lyric-monet": "file:modules/biu-lyric-monet",
+    "buffer": "^6.0.3",
     "expo": "~57.0.19",
     "expo-application": "~57.0.2",
     "expo-asset": "~57.0.16",
-    "expo-audio": "~57.0.4",
     "expo-blur": "~57.0.2",
     "expo-crypto": "~57.0.2",
     "expo-dev-client": "~57.0.18",
@@ -29,6 +29,7 @@
     "expo-splash-screen": "~57.0.8",
     "expo-status-bar": "~57.0.1",
     "expo-video": "~57.0.3",
+    "expo-widgets": "~57.0.17",
     "fflate": "^0.8.3",
     "js-md5": "^0.9.2",
     "qrcode": "^1.5.4",
@@ -37,19 +38,31 @@
     "react-native-safe-area-context": "~5.7.0",
     "react-native-screens": "~4.26.0",
     "react-native-svg": "15.15.4",
+    "react-native-view-shot": "5.1.0",
     "react-native-webview": "13.16.1",
-    "react-native-zeroconf": "^0.14.0"
+    "react-native-zeroconf": "^0.14.0",
+    "biu-lyrics-pip": "file:modules/biu-lyrics-pip"
   },
   "scripts": {
     "start": "expo start --dev-client --lan",
     "android": "expo run:android",
     "ios": "expo run:ios",
+    "ios:standalone": "expo run:ios --configuration Release --no-bundler",
     "web": "expo start --web",
     "test": "node --test ../test/mobile-player.test.cjs",
-    "build:android:dev": "cd android && ./gradlew :app:assembleDebug"
+    "build:android:dev": "cd android && ./gradlew :app:assembleDebug",
+    "postinstall": "patch-package"
+  },
+  "expo": {
+    "autolinking": {
+      "buildFromSource": [
+        "expo-video"
+      ]
+    }
   },
   "private": true,
   "devDependencies": {
+    "patch-package": "^8.0.1",
     "react-test-renderer": "19.2.3",
     "shazamio-core": "^1.3.1"
   }

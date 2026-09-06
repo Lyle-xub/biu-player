@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { useCloudSync } from '../store/CloudSyncProvider';
@@ -7,10 +7,23 @@ import { colors } from '../theme';
 
 function Preview({url}) {
   const player=useVideoPlayer(null,p=>{p.loop=true;p.muted=true;p.audioMixingMode='mixWithOthers';p.showNowPlayingNotification=false;});
+  const wanted=useRef('');
   useEffect(()=>{
-    let active=true;
-    player.replaceAsync({uri:url,headers:streamHeaders()}).then(()=>{if(active)player.play();}).catch(()=>{});
-    return()=>{active=false;};
+    const play=()=>{player.loop=true;player.muted=true;player.play();};
+    const sourceSub=player.addListener?.('sourceChange',({source})=>{
+      if(wanted.current&&source?.uri===wanted.current)play();
+    });
+    const statusSub=player.addListener?.('statusChange',({status})=>{
+      if(status==='readyToPlay'&&wanted.current)play();
+    });
+    return()=>{sourceSub?.remove?.();statusSub?.remove?.();};
+  },[player]);
+  useEffect(()=>{
+    wanted.current=url;
+    player.replaceAsync({uri:url,headers:streamHeaders()}).then(()=>{
+      if(wanted.current===url)player.play();
+    }).catch(()=>{});
+    return()=>{if(wanted.current===url)wanted.current='';};
   },[player,url]);
   return <View pointerEvents="none" style={styles.video}><VideoView player={player} style={StyleSheet.absoluteFill} nativeControls={false} allowsPictureInPicture={false} contentFit="contain" /></View>;
 }
@@ -32,7 +45,7 @@ export default function CloudSyncCard() {
       <Switch accessibilityLabel="视频云同步" value={!!sync.enabled} disabled={disabled||!sync.signedIn} onValueChange={enabled=>sync.configure({enabled})}
         thumbColor={sync.enabled?colors.accent:colors.text2} trackColor={{false:colors.cardBorder,true:colors.accentSoft}} ios_backgroundColor={colors.bgSoft} />
     </View>
-    <Text style={styles.desc}>把喜欢、歌单和推荐画像加密保存到 B 站，与桌面端共享同一份云端数据。</Text>
+    <Text style={styles.desc}>把喜欢、音乐库、歌单和推荐画像加密保存到 B 站，与桌面端共享同一份云端数据。</Text>
     <Text accessibilityLiveRegion="polite" style={[styles.desc,sync.error&&styles.error]}>{message}</Text>
     <View style={styles.divider}/>
     <Text style={styles.label}>同步间隔</Text>

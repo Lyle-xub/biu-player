@@ -8,11 +8,14 @@ export default function ProgressScrubber({ position, duration, isLive, playing, 
   const [width, setWidth] = useState(1);
   const [active, setActive] = useState(false);
   const [preview, setPreview] = useState(position);
+  const zone = useRef(null);
   const dragging = useRef(false);
-  const origin = useRef(null);
+  const origin = useRef(0);
   const target = useRef(position);
   const lastLabel = useRef(0);
   const progress = duration > 0 ? clamp(position / duration) : 0;
+  const values = useRef({ position, duration, onSeek, progress, width });
+  values.current = { position, duration, onSeek, progress, width };
   const animated = useRef(new Animated.Value(progress)).current;
   const touch = useRef(new Animated.Value(0)).current;
   const revision = useRef(seekRevision);
@@ -38,12 +41,12 @@ export default function ProgressScrubber({ position, duration, isLive, playing, 
     return () => animation.stop();
   }, [active, touch]);
 
-  const update = (event, forceLabel = false) => {
-    const { pageX, locationX } = event.nativeEvent;
-    const x = origin.current !== null && Number.isFinite(pageX) ? pageX - origin.current : locationX;
+  const updateAt = (pageX, fallbackX, forceLabel = false) => {
+    const current = values.current;
+    const x = Number.isFinite(pageX) ? pageX - origin.current : fallbackX;
     if (!Number.isFinite(x)) return target.current;
-    const ratio = clamp(x / width);
-    target.current = ratio * duration;
+    const ratio = clamp(x / current.width);
+    target.current = ratio * current.duration;
     // Only transforms change on movement: no width/left layout or React render per frame.
     animated.setValue(ratio);
     const now = Date.now();
@@ -53,21 +56,51 @@ export default function ProgressScrubber({ position, duration, isLive, playing, 
     }
     return target.current;
   };
-  const finish = (event, cancelled = false) => {
+  const finish = (pageX, fallbackX, cancelled = false) => {
     if (!dragging.current) return;
-    const value = cancelled ? position : update(event, true);
+    const current = values.current;
+    const value = cancelled ? current.position
+      : (Number.isFinite(pageX) || Number.isFinite(fallbackX)
+        ? updateAt(pageX, fallbackX, true) : target.current);
     dragging.current = false;
-    if (!cancelled) onSeek(value);
-    else Animated.timing(animated, { toValue: progress, duration: 180,
+    if (!cancelled) current.onSeek(value);
+    else Animated.timing(animated, { toValue: current.progress, duration: 180,
       easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
     setActive(false);
+  };
+  const responderHandlers = {
+    onStartShouldSetResponder: () => values.current.duration > 0,
+    onStartShouldSetResponderCapture: () => values.current.duration > 0,
+    onMoveShouldSetResponder: () => values.current.duration > 0,
+    onMoveShouldSetResponderCapture: () => values.current.duration > 0,
+    onResponderTerminationRequest: () => false,
+    onResponderGrant: (event) => {
+      dragging.current = true;
+      animated.stopAnimation();
+      const { pageX, locationX } = event.nativeEvent;
+      if (Number.isFinite(pageX) && Number.isFinite(locationX)) origin.current = pageX - locationX;
+      updateAt(pageX, locationX, true);
+      setActive(true);
+      // Refresh the absolute position for iOS after native navigation or rotation.
+      zone.current?.measureInWindow?.((left) => {
+        if (dragging.current && Number.isFinite(left)) origin.current = left;
+      });
+    },
+    onResponderMove: (event) => {
+      if (!dragging.current) return;
+      updateAt(event.nativeEvent.pageX, event.nativeEvent.locationX);
+    },
+    onResponderRelease: (event) => {
+      finish(event.nativeEvent.pageX, event.nativeEvent.locationX);
+    },
+    onResponderTerminate: () => finish(undefined, undefined, true),
   };
   const shown = active ? preview : position;
   const translateX = animated.interpolate({ inputRange: [0, 1], outputRange: [0, width] });
 
   if (isLive) return <Text style={styles.liveHint}>直播中 · 无法拖动进度</Text>;
   return <View>
-    <View style={styles.zone} accessibilityRole="adjustable" accessibilityLabel="播放进度"
+    <View ref={zone} collapsable={false} style={styles.zone} accessibilityRole="adjustable" accessibilityLabel="播放进度"
       accessibilityValue={{ min: 0, max: Math.round(duration || 0), now: Math.round(shown || 0), text: fmtDur(shown) }}
       accessibilityActions={[{ name: 'increment', label: '快进 10 秒' }, { name: 'decrement', label: '后退 10 秒' }]}
       onAccessibilityAction={({ nativeEvent: { actionName } }) => {
@@ -76,20 +109,7 @@ export default function ProgressScrubber({ position, duration, isLive, playing, 
         }
       }}
       onLayout={(e) => setWidth(Math.max(1, e.nativeEvent.layout.width))}
-      onStartShouldSetResponder={() => duration > 0}
-      onMoveShouldSetResponder={() => duration > 0}
-      onResponderTerminationRequest={() => false}
-      onResponderGrant={(event) => {
-        dragging.current = true;
-        animated.stopAnimation();
-        const { pageX, locationX } = event.nativeEvent;
-        origin.current = Number.isFinite(pageX) && Number.isFinite(locationX) ? pageX - locationX : null;
-        update(event, true);
-        setActive(true);
-      }}
-      onResponderMove={(event) => { if (dragging.current) update(event); }}
-      onResponderRelease={(event) => finish(event)}
-      onResponderTerminate={(event) => finish(event, true)}>
+      {...responderHandlers}>
       <Animated.View pointerEvents="none" style={[styles.bubble, { opacity: touch,
         transform: [{ translateX: animated.interpolate({ inputRange: [0, 1], outputRange: [0, Math.max(0, width - 58)] }) },
           { translateY: touch.interpolate({ inputRange: [0, 1], outputRange: [5, 0] }) }],
