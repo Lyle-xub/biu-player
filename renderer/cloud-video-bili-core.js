@@ -75,7 +75,7 @@ function createBiliVideoApi({ request, uploadFetch, csrf, coverFile }) {
   }
   async function upload(file, signal, emit) {
     const total = fs.statSync(file).size;
-    if (total > 512*1024*1024) throw new Error('本次同步视频超过 512 MB');
+    if (!Number.isSafeInteger(total) || total <= 0) throw new Error('同步视频文件无效');
     const pre = await json(`${MEMBER}/preupload?${new URLSearchParams({ r:'upos', profile:'ugcupos/bup', ssl:'1', version:'2.8.12', build:'2081200', name:path.basename(file), size:String(total) })}`, { signal });
     const endpoint = String(pre.endpoint || '').replace(/^\/\//, 'https://');
     const url = cdnUrl(endpoint + '/' + String(pre.upos_uri || '').replace('upos://',''));

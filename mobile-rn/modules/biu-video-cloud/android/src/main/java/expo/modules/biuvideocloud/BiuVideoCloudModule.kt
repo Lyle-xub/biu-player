@@ -7,14 +7,24 @@ import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.media.Image
 import android.util.Base64
+import android.database.sqlite.SQLiteDatabase
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import java.io.File
 import java.net.URI
 import java.security.SecureRandom
+import java.util.concurrent.Executors
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.cancel
 
 class BiuVideoCloudModule : Module() {
   companion object { init { System.loadLibrary("biu_cloud") } }
+  // Encoding can take minutes. Never occupy Expo's shared AsyncFunctionQueue:
+  // file reads and other modules must remain available while sync is running.
+  private val codecDispatcher = Executors.newSingleThreadExecutor { task -> Thread(task, "biu.video-cloud") }.asCoroutineDispatcher()
+  private val codecScope = CoroutineScope(SupervisorJob() + codecDispatcher)
   @Volatile private var cancelled = false
   private external fun encoder(payload: ByteArray, sid: String): Long
   private external fun frames(pointer: Long): Int
@@ -37,12 +47,34 @@ class BiuVideoCloudModule : Module() {
     }
     Function("writeTextFile") { target: String, content: String -> file(target).writeText(content) }
     Function("writeBase64File") { target: String, content: String -> file(target).writeBytes(Base64.decode(content, Base64.DEFAULT)) }
-    AsyncFunction("encode") { input: String, output: String, sid: String -> encodeVideo(input, output, sid) }
-    AsyncFunction("decode") { input: String, sid: String -> decodeVideo(input, sid) }
+    // Recover legacy oversized AsyncStorage rows with small SQLite result windows.
+    AsyncFunction("readLegacyStorage") { key: String ->
+      val database = appContext.reactContext!!.getDatabasePath("RKStorage")
+      if (!database.exists()) null else SQLiteDatabase.openDatabase(database.path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
+        db.beginTransaction()
+        try {
+          val length = db.rawQuery("SELECT length(value) FROM catalystLocalStorage WHERE key = ?", arrayOf(key)).use { cursor ->
+            if (cursor.moveToFirst()) cursor.getInt(0) else -1
+          }
+          if (length < 0) null else buildString {
+            var offset = 1
+            while (offset <= length) {
+              db.rawQuery("SELECT substr(value, ?, 65536) FROM catalystLocalStorage WHERE key = ?", arrayOf(offset.toString(), key)).use { cursor ->
+                check(cursor.moveToFirst()) { "旧音乐库数据读取失败" }; append(cursor.getString(0))
+              }
+              offset += 65536
+            }
+          }
+        } finally { db.endTransaction() }
+      }
+    }
+    AsyncFunction("encode") { input: String, output: String, sid: String -> encodeVideo(input, output, sid) }.runOnQueue(codecScope)
+    AsyncFunction("decode") { input: String, sid: String -> decodeVideo(input, sid) }.runOnQueue(codecScope)
+    OnDestroy { cancelled = true; codecScope.cancel(); codecDispatcher.close() }
   }
   private fun encodeVideo(input: String, output: String, sid: String): Map<String, Any> {
-    val deadline = System.currentTimeMillis() + 10 * 60 * 1000
-    val source = file(input); check(source.length() in 192..524288) { "音乐库超过视频容量" }
+    var deadline = System.currentTimeMillis() + 60_000
+    val source = file(input); check(source.length() >= 192) { "加密快照无效" }
     val handle = encoder(source.readBytes(), sid)
     val width=1920; val height=1080; val symbols=frames(handle); val total=symbols*15
     val codec=MediaCodec.createEncoderByType("video/avc")
@@ -65,6 +97,7 @@ class BiuVideoCloudModule : Module() {
             if(sent==total) { codec.queueInputBuffer(index,0,0,sent*1_000_000L/30,MediaCodec.BUFFER_FLAG_END_OF_STREAM);inputDone=true }
             else {
               if(sent%15==0) {
+                deadline=System.currentTimeMillis()+60_000
                 val modules=grid(handle,sent/15)
                 for(row in 0 until height)for(col in 0 until width)y[row*width+col]=if(modules[(row/15)*128+col/15].toInt()==0)16 else 235.toByte()
                 sendEvent("progress",mapOf("type" to "encode","frames" to sent/15+1,"total" to symbols))
@@ -107,8 +140,8 @@ class BiuVideoCloudModule : Module() {
     }
   }
   private fun decodeVideo(input: String, sid: String): Map<String, Any> {
-    val deadline=System.currentTimeMillis()+5*60*1000
-    val source=file(input);check(source.length() in 1..536870912) { "视频大小超出限制" }
+    var deadline=System.currentTimeMillis()+60_000
+    val source=file(input);check(source.length()>0) { "云端视频为空" }
     val extractor=MediaExtractor();var codec: MediaCodec?=null;val handle=decoder(sid)
     try {
       extractor.setDataSource(source.absolutePath)
@@ -129,6 +162,7 @@ class BiuVideoCloudModule : Module() {
         if(i>=0) {
           try {
             if(info.size>0 && info.presentationTimeUs-last>=240000) {
+              deadline=System.currentTimeMillis()+60_000
               last=info.presentationTimeUs;val image=codec.getOutputImage(i) ?: error("设备不支持视频帧读取")
               val levels=try {sample(image)}finally{image.close()};scanned++
               val payload=feed(handle,levels)

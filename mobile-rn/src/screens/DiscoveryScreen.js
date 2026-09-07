@@ -17,14 +17,21 @@ import BottomSheet from '../components/BottomSheet';
 import { IconCheck, IconChevronDown, IconPlaylist, IconProfileSwitch } from '../components/icons';
 import { colors, fmtDur } from '../theme';
 import DiscoveryWheel from './DiscoveryWheel';
-import { buildRelatedRun, filterDiscoveryCandidates } from './discoveryFeed';
+import { buildRelatedRun, filterDiscoveryCandidates, yieldDiscoveryWork } from './discoveryFeed';
 import { createDiscoveryExclusions } from './discoveryExclusions';
 import { readDiscoveryFolders, writeDiscoveryFolders, folderCoverEntry, folderCoverFresh } from './discoveryFolders';
 import { DISCOVERY_LOW_WATER, DISCOVERY_TARGET, readDiscoveryQueue, writeDiscoveryQueue } from './discoveryQueue';
 import { cardExitTiming, clamp, coastWheel, resolveDiscoveryGesture, wheelEdgeSpeed, wheelGeometry, wheelHit, wheelPosition, wrap } from './discoveryGesture';
 
 const SPRING = { damping: 23, stiffness: 260 };
-const coverImages = (tracks) => [...new Set((tracks || []).map((track) => track.pic).filter(Boolean))].slice(0, 4);
+const coverImages = (tracks) => {
+  const images = new Set();
+  for (const track of tracks || []) {
+    if (track.pic) images.add(track.pic);
+    if (images.size === 4) break;
+  }
+  return [...images];
+};
 
 function DiscoveryCardFrame({ cardKey, motionKey, x, y, scale, children, ...props }) {
   // Each keyed card owns its mapper and initial native style. A newly mounted
@@ -77,7 +84,7 @@ export const DiscoveryCard = React.memo(function DiscoveryCard({ track, player, 
 
 export default function DiscoveryScreen({ navigation }) {
   const context = usePlayer();
-  const { account, discoveryRecommendationManager: manager,
+  const { account, discoveryRecommendMode = 'all', discoveryRecommendationManager: manager,
     discoveryRecommendationProfile: profileState, current: playingTrack, player,
     playing, buffering, playError, queueSource, playQueue, syncDiscoveryQueue, resume, videoSource, quality, automaticVideoTransition } = context;
   const focused = useIsFocused();
@@ -110,6 +117,7 @@ export default function DiscoveryScreen({ navigation }) {
   const pendingDrop = useRef(null);
   const stage = useRef(null);
   const page = useRef({ generation: 0, loading: false, cursor: null, seen: new Set(), related: new Set(), pending: [], checked: 0 });
+  const requests = useRef(new Set());
   const emptySearches = useRef(0);
   const mounted = useRef(true);
   const toastTimer = useRef(null);
@@ -117,6 +125,12 @@ export default function DiscoveryScreen({ navigation }) {
   const actions = useRef({});
   const latest = useRef({});
   const active = focused && appActive;
+  const [mediaActive, setMediaActive] = useState(false);
+  useEffect(() => {
+    if (!active) { setMediaActive(false); return; }
+    const timer = setTimeout(() => setMediaActive(true), 32);
+    return () => clearTimeout(timer);
+  }, [active]);
   const exclusions = useMemo(() => createDiscoveryExclusions(account?.isLogin ? account.mid : ''), [account?.isLogin, account?.mid]);
   const relatedRequests = useMemo(() => new Map(), [exclusions]);
   const track = tracks[index];
@@ -158,20 +172,41 @@ export default function DiscoveryScreen({ navigation }) {
     setTracks(next); setIndex(0);
     state.context.syncDiscoveryQueue(next);
   }
-  function relatedFor(bvid) {
+  function relatedFor(bvid, signal) {
     if (!relatedRequests.has(bvid)) {
-      const request = bili.relatedVideos(bvid).catch((error) => { relatedRequests.delete(bvid); throw error; });
+      const request = bili.relatedVideos(bvid, { signal, timeout: 6000, retry: false }).catch((error) => { if (relatedRequests.get(bvid) === request) relatedRequests.delete(bvid); throw error; });
       relatedRequests.set(bvid, request);
       if (relatedRequests.size > 200) relatedRequests.delete(relatedRequests.keys().next().value);
     }
     return relatedRequests.get(bvid);
   }
   function excludeRelated(bvid) {
-    relatedFor(bvid).then((items) => {
+    if (!latest.current.active) return;
+    const controller = new AbortController(); requests.current.add(controller);
+    relatedFor(bvid, controller.signal).then((items) => {
+      if (controller.signal.aborted) return;
       const saved = exclusions.addRelated(bvid, items);
       if (saved) { pruneExcluded(); saved.catch(() => notify('不喜欢记录保存失败，本次浏览仍生效')); }
-    }).catch(() => {}); // Persisted pending seeds retry on the next refill.
+    }).catch(() => {}).finally(() => requests.current.delete(controller)); // Persisted pending seeds retry on the next refill.
   }
+
+  const stopSearch = useCallback(() => {
+    latest.current.active = false;
+    const feed = page.current;
+    if (feed.suspended) return;
+    feed.suspended = true;
+    feed.resume = feed.resume || feed.loading;
+    feed.generation++; feed.loading = false;
+    if (feed.working?.length) feed.pending = feed.working;
+    feed.working = null;
+    const abandoned = [...requests.current]; requests.current.clear();
+    // Invalidate results above immediately. Native cancellation and its listener
+    // fan-out run after the navigation dispatch has returned.
+    setTimeout(() => abandoned.forEach(controller => controller.abort()), 0);
+    relatedRequests.clear(); relatedTask.current++;
+    if (mounted.current) { setLoading(false); setRelatedLoading(false); }
+  }, [relatedRequests]);
+  useEffect(() => navigation.addListener?.('blur', stopSearch), [navigation, stopSearch]);
 
   const x = useSharedValue(0), y = useSharedValue(0), scale = useSharedValue(1);
   const motionKey = useSharedValue(cardKey);
@@ -206,20 +241,26 @@ export default function DiscoveryScreen({ navigation }) {
     setMessage(text);
     toastTimer.current = setTimeout(() => setMessage(''), 2600);
   }, []);
-  const resetMotion = useCallback(() => {
+  const resetMotion = useCallback((animated = true) => {
     if (!mounted.current) return;
-    dragging.value = false; busy.value = false; hover.value = -1;
-    velocity.value = 0; cancelAnimation(rotation);
-    visibility.value = withTiming(0, { duration: 160 });
-    x.value = withSpring(0, SPRING); y.value = withSpring(0, SPRING); scale.value = withSpring(1, SPRING);
+    runOnUI((animate) => {
+      'worklet';
+      dragging.value = false; busy.value = false; hover.value = -1;
+      velocity.value = 0;
+      [x, y, scale, rotation, visibility].forEach(cancelAnimation);
+      visibility.value = animate ? withTiming(0, { duration: 160 }) : 0;
+      x.value = animate ? withSpring(0, SPRING) : 0;
+      y.value = animate ? withSpring(0, SPRING) : 0;
+      scale.value = animate ? withSpring(1, SPRING) : 1;
+    })(animated);
     setWheelOpen(false);
     setMotionRevision((revision) => revision + 1);
   }, []);
   useEffect(() => {
     mounted.current = true;
-    const subscription = AppState.addEventListener('change', (state) => setAppActive(state === 'active'));
+    const subscription = AppState.addEventListener('change', (state) => { if (state !== 'active') stopSearch(); setAppActive(state === 'active'); });
     return () => {
-      mounted.current = false; page.current.generation++; subscription.remove();
+      mounted.current = false; stopSearch(); subscription.remove();
       clearTimeout(toastTimer.current); enabled.value = false;
       [x, y, scale, rotation, visibility].forEach(cancelAnimation);
     };
@@ -227,10 +268,11 @@ export default function DiscoveryScreen({ navigation }) {
   useEffect(() => {
     enabled.value = active;
     if (!active) {
+      stopSearch();
       pendingDislike.current = null; pendingDrop.current = null;
-      relatedTask.current++; setRelatedLoading(false); resetMotion();
-    } else pruneExcluded();
-  }, [active, resetMotion, exclusions]);
+      resetMotion(false);
+    } else { page.current.suspended = false; pruneExcluded(); }
+  }, [active, resetMotion, exclusions, stopSearch]);
   useEffect(() => {
     if (!active || !hasTrack) { setWheelReady(false); return; }
     const timer = setTimeout(() => setWheelReady(true), 350);
@@ -301,11 +343,15 @@ export default function DiscoveryScreen({ navigation }) {
     if (!latest.current.active) return;
     reset = reset || feed.needsReset;
     if (feed.loading && !reset) return;
+    feed.controller?.abort();
+    const controller = new AbortController(); requests.current.add(controller); feed.controller = controller;
     feed.needsReset = false;
     const generation = reset ? ++feed.generation : feed.generation;
-    if (reset) { emptySearches.current = 0; feed.seen = new Set(); feed.related = new Set(); feed.pending = []; feed.checked = 0; setChecked(0); feed.cursor = null; setTracks([]); setIndex(0); setCardGeneration((n) => n + 1); resetMotion(); }
+    if (reset) { emptySearches.current = 0; feed.seen = new Set(); feed.related = new Set(); feed.pending = []; feed.working = null; feed.checked = 0; setChecked(0); feed.cursor = null; setTracks([]); setIndex(0); setCardGeneration((n) => n + 1); resetMotion(); }
     feed.loading = true; setLoading(true); setSearching(false); setError('');
+    const observed = [];
     try {
+      await yieldDiscoveryWork(controller.signal);
       await manager?.ready();
       await exclusions.ready;
       if (generation !== feed.generation || !mounted.current) return;
@@ -315,12 +361,12 @@ export default function DiscoveryScreen({ navigation }) {
       if (!snapshot || snapshot.ready === false) throw new Error('画像尚未就绪，请稍后重试');
       const selectedProfile = snapshot.activeId === 'auto' ? snapshot.auto : snapshot.profiles?.find((item) => item.id === snapshot.activeId);
       if (snapshot.enabled !== false && !selectedProfile?.tags?.length) throw new Error('当前画像没有可用标签，请先编辑画像或选择原生推荐');
-      const isValid = () => generation === feed.generation && mounted.current
+      const isValid = () => !controller.signal.aborted && generation === feed.generation && mounted.current
         && manager?.getSnapshot()?.revision === snapshot.revision;
       const isCurrent = () => isValid() && latest.current.active;
       let available = reset ? 0 : Math.max(0, latest.current.tracks.length - latest.current.index);
       if (reset) {
-        const cached = (await readDiscoveryQueue(latest.current.context.account?.isLogin ? latest.current.context.account.mid : '', snapshot))
+        const cached = (await readDiscoveryQueue(latest.current.context.account?.isLogin ? latest.current.context.account.mid : '', snapshot, discoveryRecommendMode))
           .filter((item) => !exclusions.has(item));
         if (!isValid()) return;
         if (!latest.current.active) { feed.needsReset = true; return; }
@@ -331,11 +377,13 @@ export default function DiscoveryScreen({ navigation }) {
       }
       let added = 0;
       for (let attempt = 0; attempt < 4 && (attempt === 0 || available + added < DISCOVERY_TARGET) && isCurrent(); attempt++) {
+        await yieldDiscoveryWork(controller.signal);
+        if (!isCurrent()) return;
         let candidates = feed.pending;
         feed.pending = [];
         if (!candidates.length) {
           const cursor = Number(feed.cursor || 0);
-          const items = await bili.personalizedRecommendations(cursor, 30);
+          const items = await bili.personalizedRecommendations(cursor, 30, { signal: controller.signal, timeout: 8000, retry: false });
           if (!isValid()) return;
           feed.cursor = cursor + 1;
           candidates = items.filter((item) => {
@@ -343,16 +391,20 @@ export default function DiscoveryScreen({ navigation }) {
             feed.seen.add(item.bvid); return true;
           }).map((item) => ({ ...item, discoveryOrigin: 'feed' }));
         }
-        // Finish at most the in-flight batch after blur; retain its candidates
-        // and cursor so coming back resumes instead of starting another crawl.
+        // Retain undelivered candidates while their cancellable checks run.
+        // Returning to the tab resumes them without waiting for the old request.
         if (!isCurrent()) { if (isValid()) feed.pending = candidates; return; }
-        manager?.observeFeed(candidates);
+        feed.working = candidates;
         try {
           const selected = await filterDiscoveryCandidates(candidates, snapshot,
             (matches) => {
               const next = matches.filter((item) => !exclusions.has(item));
-              added += next.length; if (next.length) appendTracks(next);
-            }, isCurrent);
+              added += next.length;
+              const delivered = new Set(matches.map(item => item.bvid));
+              feed.working = (feed.working || []).filter(item => !delivered.has(item.bvid));
+              observed.push(...next);
+              if (next.length) appendTracks(next);
+            }, isCurrent, discoveryRecommendMode, { signal: controller.signal });
           if (!isCurrent() && isValid()) {
             const delivered = new Set(selected.map((item) => item.bvid));
             feed.pending = candidates.filter((item) => !delivered.has(item.bvid));
@@ -362,6 +414,7 @@ export default function DiscoveryScreen({ navigation }) {
           throw reason;
         }
         if (!isCurrent()) return;
+        feed.working = null;
         feed.checked += candidates.length; setChecked(feed.checked);
       }
       if (generation !== feed.generation || !mounted.current) return;
@@ -372,20 +425,29 @@ export default function DiscoveryScreen({ navigation }) {
         throw new Error(`已检查 ${feed.checked} 条推荐，最近几批未命中画像标签。可继续获取或切换画像`);
       }
       setSearching(available + added < DISCOVERY_TARGET);
+      // Record delivered videos once per refill, not every rejected candidate page.
+      if (observed.length) {
+        await yieldDiscoveryWork(controller.signal);
+        if (isCurrent()) manager?.observeFeed(observed);
+      }
     } catch (reason) {
-      if (generation === feed.generation && mounted.current) {
+      if (!controller.signal.aborted && generation === feed.generation && mounted.current) {
         setError(reason.message || '推荐加载失败，点击重试');
       }
     } finally {
+      requests.current.delete(controller);
       if (generation === feed.generation && mounted.current) { feed.loading = false; setLoading(false); }
     }
-  }, [manager, resetMotion, exclusions]);
+  }, [manager, resetMotion, exclusions, discoveryRecommendMode]);
   useEffect(() => {
     load(true);
-    return () => { page.current.generation++; page.current.loading = false; };
+    return () => { page.current.controller?.abort(); page.current.generation++; page.current.loading = false; };
   }, [load, profileState?.revision, account?.mid]);
   useEffect(() => {
-    if (active && page.current.needsReset) load(true);
+    if (active && (page.current.needsReset || page.current.resume)) {
+      page.current.resume = false;
+      load(!!page.current.needsReset);
+    }
   }, [active, load]);
   useEffect(() => {
     if (searching && tracks.length - index >= DISCOVERY_TARGET) { setSearching(false); return; }
@@ -400,10 +462,10 @@ export default function DiscoveryScreen({ navigation }) {
     if (loading || !account?.isLogin || !tracks.length) return;
     const snapshot = manager?.getSnapshot();
     const timer = setTimeout(() => {
-      writeDiscoveryQueue(account.mid, snapshot, tracks.slice(index + 1)).catch(() => {});
+      writeDiscoveryQueue(account.mid, snapshot, tracks.slice(index + 1), discoveryRecommendMode).catch(() => {});
     }, 250);
     return () => clearTimeout(timer);
-  }, [loading, account?.isLogin, account?.mid, manager, profileState?.revision, tracks, index]);
+  }, [loading, account?.isLogin, account?.mid, manager, profileState?.revision, tracks, index, discoveryRecommendMode]);
   useEffect(() => {
     if (index > 80) { setTracks((old) => old.slice(index - 12)); setIndex(12); }
   }, [index]);
@@ -414,15 +476,27 @@ export default function DiscoveryScreen({ navigation }) {
     if (!active || track?.discoveryOrigin !== 'feed' || !feed.seen.has(cardKey) || feed.related.has(cardKey)) return;
     feed.related.add(cardKey);
     while (feed.related.size > 1000) feed.related.delete(feed.related.values().next().value);
+    const controller = new AbortController(); requests.current.add(controller);
     const generation = feed.generation;
     const snapshot = manager?.getSnapshot();
-    const isCurrent = () => mounted.current && latest.current.active && generation === feed.generation
+    const isCurrent = () => !controller.signal.aborted && mounted.current && latest.current.active && generation === feed.generation
       && manager?.getSnapshot()?.revision === snapshot?.revision;
     (async () => {
       let candidates = [];
       const delivered = new Set();
+      const seen = feed.seen, expanded = feed.related;
+      let released = false;
+      const releasePending = () => {
+        if (released) return;
+        released = true;
+        expanded.delete(cardKey);
+        candidates.forEach((item) => { if (!delivered.has(item.bvid)) seen.delete(item.bvid); });
+      };
+      // Release reservations at abort time, before a returning screen starts
+      // another request; an old transport may settle much later.
+      controller.signal.addEventListener('abort', releasePending, { once: true });
       try {
-        const items = await relatedFor(track.bvid);
+        const items = await relatedFor(track.bvid, controller.signal);
         if (!isCurrent()) return;
         if (exclusions.has(track)) { excludeRelated(track.bvid); return; }
         candidates = items.filter((item) => {
@@ -435,26 +509,25 @@ export default function DiscoveryScreen({ navigation }) {
           added += next.length;
           next.forEach((item) => delivered.add(item.bvid));
           if (next.length) appendTracks(next);
-        }, () => isCurrent() && !exclusions.has(track) && added < 6);
+        }, () => isCurrent() && !exclusions.has(track) && added < 6, discoveryRecommendMode, { signal: controller.signal });
       } catch (reason) {
         if (isCurrent()) {
           feed.related.delete(cardKey);
           reason.retryCandidates?.forEach((item) => feed.seen.delete(item.bvid));
         }
       } finally {
-        if (!isCurrent() && generation === feed.generation) {
-          feed.related.delete(cardKey);
-          candidates.forEach((item) => { if (!delivered.has(item.bvid)) feed.seen.delete(item.bvid); });
-        }
+        requests.current.delete(controller);
+        controller.signal.removeEventListener('abort', releasePending);
+        if (!isCurrent()) releasePending();
       } // Native recommendations remain playable if this optional expansion fails.
     })();
-  }, [active, cardKey, manager, profileState?.revision, exclusions]);
+  }, [active, cardKey, manager, profileState?.revision, exclusions, discoveryRecommendMode]);
 
   // A single arbiter handles card selection and external queue changes. A pending
   // selection cannot be overwritten by the previous track while its URL resolves.
   useEffect(() => {
     const session = playback.current;
-    if (!active) { session.requested = ''; session.pending = false; return; }
+    if (!active || !mediaActive) { session.requested = ''; session.pending = false; return; }
     if (!track) return;
     if (session.requested !== cardKey) {
       session.requested = cardKey;
@@ -470,7 +543,7 @@ export default function DiscoveryScreen({ navigation }) {
         session.requested = playingKey; resetMotion(); setIndex(next);
       }
     }
-  }, [active, cardKey, playingKey, playing, playError, queueSource, tracks, index, playQueue, resume, resetMotion, motionRevision, automaticVideoTransition]);
+  }, [active, mediaActive, cardKey, playingKey, playing, playError, queueSource, tracks, index, playQueue, resume, resetMotion, motionRevision, automaticVideoTransition]);
 
   useEffect(() => {
     if (active && cardKey === playingKey && queueSource === 'discovery') syncDiscoveryQueue(tracks);
@@ -478,11 +551,11 @@ export default function DiscoveryScreen({ navigation }) {
 
   const preloadScope = account?.isLogin ? account.mid : '';
   useEffect(() => {
-    return clearDiscoveryPreloads;
+    return () => clearDiscoveryPreloads({ defer: true });
   }, [active, quality, preloadScope]);
   useEffect(() => {
-    if (active) preloadDiscoveryQueue(tracks.slice(index + 1, index + 4), quality, preloadScope);
-  }, [active, tracks, index, quality, preloadScope]);
+    if (active && mediaActive) preloadDiscoveryQueue(tracks.slice(index + 1, index + 4), quality, preloadScope);
+  }, [active, mediaActive, tracks, index, quality, preloadScope]);
 
   const invoke = useCallback((name, ...args) => actions.current[name]?.(...args), []);
   const flyOut = useCallback((nextIndex, key, dx, dy, vy, direction, action = 'complete') => {
@@ -675,15 +748,16 @@ export default function DiscoveryScreen({ navigation }) {
     related: async (key) => {
       const state = latest.current;
       if (!state.active || trackKeyOf(state.track) !== key) return;
+      const controller = new AbortController(); requests.current.add(controller);
       const task = ++relatedTask.current, generation = page.current.generation;
       const snapshot = manager?.getSnapshot();
-      const isCurrent = () => mounted.current && latest.current.active && task === relatedTask.current
+      const isCurrent = () => !controller.signal.aborted && mounted.current && latest.current.active && task === relatedTask.current
         && generation === page.current.generation && manager?.getSnapshot()?.revision === snapshot?.revision && !exclusions.has(state.track);
       const alreadyWatched = new Set(state.tracks.slice(0, state.index + 1).map((item) => item.bvid));
       setRelatedLoading(true); notify('正在准备接下来的 20 个相关视频');
       try {
         const matches = await buildRelatedRun(state.track, snapshot, relatedFor,
-          (item) => exclusions.has(item) || alreadyWatched.has(item.bvid), isCurrent);
+          (item) => exclusions.has(item) || alreadyWatched.has(item.bvid), isCurrent, discoveryRecommendMode, { signal: controller.signal });
         if (!isCurrent()) return;
         const currentState = latest.current;
         const watched = new Set(currentState.tracks.slice(0, currentState.index + 1).map((item) => item.bvid));
@@ -697,7 +771,7 @@ export default function DiscoveryScreen({ navigation }) {
         setTracks(queue); currentState.context.syncDiscoveryQueue(queue);
         notify(next.length === 20 ? '接下来 20 个视频已换为相关推荐' : `找到 ${next.length} 个符合画像的相关视频，已优先安排`);
       } catch (reason) { if (isCurrent()) notify(reason.message || '相关视频获取失败，请再左滑重试'); }
-      finally { if (task === relatedTask.current && mounted.current) setRelatedLoading(false); }
+      finally { requests.current.delete(controller); if (task === relatedTask.current && mounted.current) setRelatedLoading(false); }
     },
     complete: (nextIndex, key) => {
       if (!mounted.current || !latest.current.active || trackKeyOf(latest.current.track) !== key) return;
@@ -777,7 +851,7 @@ export default function DiscoveryScreen({ navigation }) {
           </DiscoveryCardFrame>
         </GestureDetector>
         {active && (wheelReady || wheelOpen) && <DiscoveryWheel targets={targets} height={layout.height} rotation={rotation} hover={hover}
-          visibility={visibility} open={wheelOpen} />}
+          visibility={visibility} open={wheelOpen} backdrop={track.pic} />}
         <GestureDetector gesture={wheelGesture}>
           <Animated.View testID="discovery-wheel-touch" collapsable={false} pointerEvents={wheelOpen ? 'auto' : 'none'} style={s.wheelTouch}
             accessible accessibilityRole="adjustable" accessibilityLabel="收藏轮盘，上下拖动选择，松手惯性滑行"

@@ -7,19 +7,19 @@
  *     seekTo 跳过，prev/next 当作换台。
  * 竞态防护：tokenRef 自增校验 + replaceChain 串行化 replaceAsync——
  *   同一时刻只有最新 track 的加载流程能落地 replace/play。
- * 喜欢 / 历史 / 音质设置持久化到 AsyncStorage（喜欢 = 本地歌单）。
+ * 喜欢 / 历史等大数据持久化到文件，音质等小设置保留在 AsyncStorage。
  * 后台播放：app.json expo-video plugin supportsBackgroundPlayback + staysActiveInBackground；
  *   showNowPlayingNotification 接入系统媒体控件，source.metadata 随切歌更新。
  *   expo-video 独占管理 iOS 音频会话，避免两个原生模块在系统中断后互相覆盖配置。
  */
 import React, {
-  createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
+  createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore,
 } from 'react';
 import { useVideoPlayer } from 'expo-video';
 import { useEvent, useEventListener } from 'expo';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import AsyncStorage from '../store/largeStorage';
 import * as bili from '../api/bili';
-import { authStatus, initClient, streamHeaders } from '../api/client';
+import { authStatus, streamHeaders } from '../api/client';
 import { mediaUrl } from '../api/mediaUrl';
 import { fetchTrackSource } from './trackSource';
 import { takeDiscoveryPreload } from './discoveryPreload';
@@ -27,7 +27,7 @@ import { segmentRange, trackKeyOf } from './track';
 import { PLAYBACK_QUALITIES, normalizePlaybackQuality } from './playbackQuality';
 import { getPlaylists, mergeSyncedPlaylists, setPlaylistScope } from '../store/playlists';
 import { accountKey, adoptGuestLibrary, readAccountValue } from '../store/accountStorage';
-import { reconcile, normalize } from '../../../renderer/library-sync';
+import { backgroundCompute } from '../performance/backgroundCompute';
 
 import useRecommendationProfile from '../store/useRecommendationProfile';
 import { tracker } from '../../../renderer/daily-recommendation';
@@ -115,7 +115,7 @@ export function PlayerProvider({ children }) {
   const [dynamicIslandLyricsEnabled, setDynamicIslandLyricsEnabledState] = useState(true);
   const [recommendMode, setRecommendModeState] = useState('music');
   const [discoveryEnabled, setDiscoveryEnabledState] = useState(false);
-  const [discoveryRecommendMode, setDiscoveryRecommendModeState] = useState('music');
+  const [discoveryRecommendMode, setDiscoveryRecommendModeState] = useState('all');
   const [seekRevision, setSeekRevision] = useState(0);
   const lyricEffectEdited = useRef(false);
   const desktopLyricsEdited = useRef(false);
@@ -136,6 +136,15 @@ export function PlayerProvider({ children }) {
   const replaceChain = useRef(Promise.resolve()); // 串行化 replaceAsync，防串台
   const playbackSessionRef = useRef(null);
   const sessionRestoreStarted = useRef(false);
+  const deferredSession = useRef(null);
+  const sessionWrites = useRef(Promise.resolve());
+  const saveSession = useCallback(() => {
+    if (!playbackSessionRef.current) return;
+    const saved = { ...playbackSessionRef.current };
+    sessionWrites.current = sessionWrites.current.catch(() => {}).then(async () => {
+      await AsyncStorage.setItem(PLAYBACK_SESSION_KEY, await backgroundCompute('stringify', saved));
+    }).catch(() => {});
+  }, []);
 
   const switchAccount = useCallback((nextAccount) => {
     libraryEpoch.current += 1;
@@ -190,8 +199,7 @@ export function PlayerProvider({ children }) {
         }
       } catch (e) { /* 本地数据损坏时从空开始 */ }
     })();
-    Promise.resolve(typeof initClient === 'function' ? initClient() : undefined)
-      .then(() => (typeof authStatus === 'function' ? authStatus() : { isLogin: false }))
+    Promise.resolve().then(() => (typeof authStatus === 'function' ? authStatus() : { isLogin: false }))
       .then(switchAccount)
       .catch(() => switchAccount({ isLogin: false }));
     AsyncStorage.getItem(LYRIC_EFFECT_KEY).then((raw) => {
@@ -233,6 +241,9 @@ export function PlayerProvider({ children }) {
     // A matching loaded item can acquire its video surface now. Waiting for a
     // playing clock here forces audio to start before video can even render.
     // pendingSeek independently guards stale end/progress events below.
+    // sourceLoad can arrive without sourceChange (notably after adopting a
+    // preloaded player). Matching loaded media also completes source startup.
+    setSourcePending(false);
     setVideoSource((old) => old?.revision === request.token ? old
       : { key: request.key, revision: request.token });
   }, []);
@@ -244,6 +255,7 @@ export function PlayerProvider({ children }) {
     let prepared;
     const t = list[i];
     if (!t) return;
+    deferredSession.current = null;
     // A pending replace may still change the native item before this request's
     // turn in the chain (A → B → A). Only an idle chain can safely reuse media.
     const canReuseMedia = !resolvingRef.current;
@@ -261,7 +273,7 @@ export function PlayerProvider({ children }) {
     pendingSeek.current = null;
     resolvingRef.current = true;
     playbackSessionRef.current = { queue: list, index: i, position: startAt, source: queueSourceRef.current };
-    AsyncStorage.setItem(PLAYBACK_SESSION_KEY, JSON.stringify(playbackSessionRef.current)).catch(() => {});
+    saveSession();
     try {
       // 自动续播时保留 playWhenReady：pause 会让 Android 媒体服务退出前台，
       // 随后的后台取流 / 重新播放可能被系统限制。replaceAsync 本身会切换旧媒体。
@@ -407,24 +419,30 @@ export function PlayerProvider({ children }) {
         publishVideoSource();
       }
     }
-  }, [player, quality, persistLibrary, publishVideoSource]);
+  }, [player, quality, persistLibrary, publishVideoSource, saveSession]);
 
-  // A process restart clears AVPlayer and iOS Now Playing even though the user
-  // still has a current song. Restore the media paused so both the in-app bar
-  // and system controls can be reconstructed without surprising autoplay.
+  // A paused session needs only its local queue and position at startup.
+  // Resolve media on an explicit play/resume, not alongside homepage hydration.
   useEffect(() => {
     if (sessionRestoreStarted.current) return;
     sessionRestoreStarted.current = true;
-    AsyncStorage.getItem(PLAYBACK_SESSION_KEY).then((raw) => {
-      if (!raw) return;
-      const saved = JSON.parse(raw);
+    const token = tokenRef.current;
+    AsyncStorage.getItem(PLAYBACK_SESSION_KEY).then(async (raw) => {
+      if (!raw || token !== tokenRef.current) return;
+      const saved = await backgroundCompute('parse', raw);
+      if (token !== tokenRef.current) return;
       if (!Array.isArray(saved?.queue) || !saved.queue.length || saved.queue[saved.index]?.isLive) return;
       const restoredIndex = Math.max(0, Math.min(saved.queue.length - 1, Number(saved.index) || 0));
       const restoredPosition = Math.max(0, Number(saved.position) || 0);
       queueSourceRef.current = typeof saved.source === 'string' ? saved.source
         : saved.queue.some((track) => track.discoveryOrigin) ? 'discovery' : '';
       setQueueSource(queueSourceRef.current);
-      playIndex(saved.queue, restoredIndex, false, false, restoredPosition, false);
+      deferredSession.current = { position: restoredPosition };
+      playbackSessionRef.current = { queue: saved.queue, index: restoredIndex,
+        position: restoredPosition, source: queueSourceRef.current };
+      setQueue(saved.queue);
+      setIndex(restoredIndex);
+      setCurrentTime((segmentRange(saved.queue[restoredIndex])?.from || 0) + restoredPosition);
     }).catch(() => {});
   }, [playIndex]);
 
@@ -432,10 +450,10 @@ export function PlayerProvider({ children }) {
     const timer = setInterval(() => {
       const saved = playbackSessionRef.current;
       if (!saved) return;
-      AsyncStorage.setItem(PLAYBACK_SESSION_KEY, JSON.stringify(saved)).catch(() => {});
+      saveSession();
     }, 8000);
     return () => clearInterval(timer);
-  }, []);
+  }, [saveSession]);
 
   const playQueue = useCallback((tracks, i = 0, startAt = 0, source = '') => {
     searchPlaybackRef.current = source === 'search';
@@ -480,6 +498,7 @@ export function PlayerProvider({ children }) {
 
   const togglePlay = useCallback(() => {
     if (!current) return;
+    if (deferredSession.current) return playIndex(queue, index, false, false, deferredSession.current.position);
     if (playError) { playIndex(queue, index); return; } // 取流失败时播放键 = 重试
     if (player.playing) {
       playIntentRef.current = false;
@@ -497,6 +516,13 @@ export function PlayerProvider({ children }) {
     const end = segment ? segment.to - segment.from : (player.duration || current?.duration || Infinity);
     try {
       const target = (segment?.from || 0) + Math.max(0, Math.min(end, sec));
+      if (deferredSession.current) {
+        deferredSession.current.position = target - (segment?.from || 0);
+        playbackSessionRef.current.position = deferredSession.current.position;
+        setCurrentTime(target);
+        setSeekRevision((n) => n + 1);
+        return;
+      }
       pendingSeek.current = { target, started: Date.now() };
       player.currentTime = target;
       setCurrentTime(target); // Paused seek updates lyrics without waiting for a native tick.
@@ -504,11 +530,12 @@ export function PlayerProvider({ children }) {
     } catch (e) { pendingSeek.current = null; }
   }, [player, current]);
 
-  // 恢复当前曲目播放（单 player 架构下等价于 player.play()，保留给旧调用方）
+  // Discovery and the playback controls share lazy session restoration.
   const resume = useCallback(() => {
     if (!current) return;
+    if (deferredSession.current) return playIndex(queue, index, false, false, deferredSession.current.position);
     try { playIntentRef.current = true; player.play(); } catch (e) { /* 忽略 */ }
-  }, [player, current]);
+  }, [player, current, queue, index, playIndex]);
 
   // 音量（player 内音量，0~1）
   const setVolume = useCallback((v) => {
@@ -592,16 +619,23 @@ export function PlayerProvider({ children }) {
     const scope = accountScope.current, epoch = libraryEpoch.current;
     const operation = collectionWrites.current.catch(() => {}).then(async () => {
       const check = () => { if (epoch !== libraryEpoch.current || !libraryReadyRef.current) throw new Error('账号正在切换，请稍后重试'); };
-      check();
-      const before = { likes: likesRef.current, library: savedLibraryRef.current };
-      const next = update(before);
-      await Promise.all([
-        next.likes !== before.likes && AsyncStorage.setItem(accountKey(LIKES_KEY, scope), JSON.stringify(next.likes)),
-        next.library !== before.library && AsyncStorage.setItem(accountKey(MUSIC_LIBRARY_KEY, scope), JSON.stringify(next.library)),
-      ]);
-      check();
-      likesRef.current = next.likes; savedLibraryRef.current = next.library;
-      setLikes(next.likes); setSavedLibrary(next.library);
+      for (;;) {
+        check();
+        const before = { likes: likesRef.current, library: savedLibraryRef.current };
+        const changed = () => likesRef.current !== before.likes || savedLibraryRef.current !== before.library;
+        const next = update(before);
+        const likesRaw = next.likes !== before.likes ? await backgroundCompute('stringify', next.likes) : null;
+        const libraryRaw = next.library !== before.library ? await backgroundCompute('stringify', next.library) : null;
+        check(); if (changed()) continue;
+        await Promise.all([
+          likesRaw !== null && AsyncStorage.setItem(accountKey(LIKES_KEY, scope), likesRaw),
+          libraryRaw !== null && AsyncStorage.setItem(accountKey(MUSIC_LIBRARY_KEY, scope), libraryRaw),
+        ]);
+        check(); if (changed()) continue;
+        likesRef.current = next.likes; savedLibraryRef.current = next.library;
+        setLikes(next.likes); setSavedLibrary(next.library);
+        return;
+      }
     });
     collectionWrites.current = operation.catch(() => {});
     return operation;
@@ -736,13 +770,16 @@ export function PlayerProvider({ children }) {
   useEffect(() => () => listening.flush(), [listening]);
   useEffect(() => { if (!isPlaying) listening.tick(currentTime, false); }, [isPlaying, listening]);
   const profileScope = account?.isLogin && account.mid ? String(account.mid) : '';
+  const syncSnapshot = useRef(null);
   const getSyncLibrary = useCallback(async (scope = accountScope.current) => {
     const epoch = libraryEpoch.current;
     const [playlists, recommendation, discoveryRecommendation] = await Promise.all([
       getPlaylists(), recommendationManager.exportSync(), discoveryRecommendationManager.exportSync(),
     ]);
     if (!libraryReadyRef.current || epoch !== libraryEpoch.current || scope !== accountScope.current || scope !== profileScope) throw new Error('账号正在切换');
-    return { version: 1, likes: likesRef.current, library: savedLibraryRef.current, playlists, recommendation, discoveryRecommendation };
+    const next = { version: 1, likes: likesRef.current, library: savedLibraryRef.current, playlists, recommendation, discoveryRecommendation };
+    if (!syncSnapshot.current || Object.keys(next).some(key => next[key] !== syncSnapshot.current[key])) syncSnapshot.current = next;
+    return syncSnapshot.current;
   }, [recommendationManager, discoveryRecommendationManager, profileScope]);
   const applySyncLibrary = useCallback((incoming, base, scope = accountScope.current) => {
     const epoch = libraryEpoch.current;
@@ -752,7 +789,8 @@ export function PlayerProvider({ children }) {
     // Account switches wait for this write; a late response cannot enter another bucket.
     const operation = accountSwitch.current.catch(() => {}).then(async () => {
       check();
-      const data = normalize(incoming);
+      const data = await backgroundCompute('libraryNormalize', incoming);
+      check();
       await mergeSyncedPlaylists(data.playlists, base?.playlists);
       check();
       await recommendationManager.applySync(data.recommendation, base?.recommendation);
@@ -762,15 +800,19 @@ export function PlayerProvider({ children }) {
         check();
         const before = likesRef.current;
         const beforeLibrary = savedLibraryRef.current;
-        const merged = reconcile(
+        const merged = await backgroundCompute('libraryReconcile',
           base ? { version: 1, likes: base.likes, library: base.library, playlists: [] } : null,
           { version: 1, likes: data.likes, library: data.library, playlists: [] },
           { version: 1, likes: before, library: beforeLibrary, playlists: [] },
         );
         const next = merged.likes;
         const nextLibrary = merged.library;
-        await AsyncStorage.setItem(accountKey(LIKES_KEY, scope), JSON.stringify(next));
-        await AsyncStorage.setItem(accountKey(MUSIC_LIBRARY_KEY, scope), JSON.stringify(nextLibrary));
+        const likesRaw = await backgroundCompute('stringify', next);
+        const libraryRaw = await backgroundCompute('stringify', nextLibrary);
+        check();
+        if (likesRef.current !== before || savedLibraryRef.current !== beforeLibrary) continue;
+        await AsyncStorage.setItem(accountKey(LIKES_KEY, scope), likesRaw);
+        await AsyncStorage.setItem(accountKey(MUSIC_LIBRARY_KEY, scope), libraryRaw);
         check();
         if (likesRef.current !== before || savedLibraryRef.current !== beforeLibrary) continue;
         likesRef.current = next;
@@ -851,7 +893,7 @@ export function PlayerProvider({ children }) {
     }
   });
   useEventListener(events, 'timeUpdate', ({ currentTime: time }) => {
-    if (resolvingRef.current) return;
+    if (resolvingRef.current || deferredSession.current) return;
     listening.tick(time, player.playing && player.status === 'readyToPlay' && !pendingSeek.current);
     const pending = pendingSeek.current;
     if (pending) {
@@ -907,6 +949,7 @@ export function PlayerProvider({ children }) {
   }, []);
 
   const playing = !!isPlaying;
+  const mediaDeferred = !!deferredSession.current;
 
   const position = isLive || resolving ? 0
     : Math.max(0, Math.min(range ? range.to - range.from : Infinity, (currentTime || 0) - (range?.from || 0)));
@@ -919,6 +962,7 @@ export function PlayerProvider({ children }) {
   const value = useMemo(() => ({
     queue, index, queueSource, current, isLive, playMode, setPlayMode,
     playing,
+    mediaDeferred,
     videoSource,
     automaticVideoTransition,
     buffering: resolving || sourcePending || status === 'loading',
@@ -939,6 +983,9 @@ export function PlayerProvider({ children }) {
     dynamicIslandLyricsEnabled, setDynamicIslandLyricsEnabled,
     seekRevision,
     recommendMode, setRecommendMode, recommendationManager, recommendationProfile,
+    homeProfileRevision: recommendationProfile.revision,
+    homeStrictProfile: !!recommendationProfile.enabled && recommendationProfile.activeId !== 'auto'
+      && recommendationProfile.profiles.some(profile => profile.id === recommendationProfile.activeId),
     discoveryEnabled, setDiscoveryEnabled,
     discoveryRecommendMode, setDiscoveryRecommendMode,
     discoveryRecommendationManager, discoveryRecommendationProfile,
@@ -946,7 +993,7 @@ export function PlayerProvider({ children }) {
     playQueue, syncDiscoveryQueue, playIndex, togglePlay, next, prev, seekTo,
     player, // 原始 VideoPlayer：播放页/视频页的 VideoView 共用
   }), [
-    queue, index, queueSource, current, isLive, playMode, setPlayMode, playing, status, sourcePending, videoSource, automaticVideoTransition,
+    queue, index, queueSource, current, isLive, playMode, setPlayMode, playing, mediaDeferred, status, sourcePending, videoSource, automaticVideoTransition,
     resolving, playError, likes, isLiked, toggleLike, libraryTracks, isInLibrary, toggleLibrary, removeCollectionTrack, resolveTrackUp,
     libraryReady, getSyncLibrary, applySyncLibrary, account, switchAccount, history, quality, setQuality, lyricSettings, updateLyricSettings,
     lyricEffect, setLyricEffect,
@@ -962,10 +1009,32 @@ export function PlayerProvider({ children }) {
     playQueue, syncDiscoveryQueue, playIndex, togglePlay, next, prev, seekTo, player,
   ]);
 
-  return <PlayerContext.Provider value={value}>
+  const store = useRef(null);
+  if (!store.current) {
+    const listeners = new Set();
+    store.current = { value, getSnapshot: () => store.current.value,
+      subscribe: listener => { listeners.add(listener); return () => listeners.delete(listener); },
+      publish: next => { if (store.current.value === next) return; store.current.value = next; listeners.forEach(listener => listener()); } };
+  }
+  useLayoutEffect(() => store.current.publish(value), [value]);
+  return <PlayerContext.Provider value={store.current}>
     <PlaybackProgressContext.Provider value={progressValue}>{children}</PlaybackProgressContext.Provider>
   </PlayerContext.Provider>;
 }
 
-export const usePlayer = () => useContext(PlayerContext);
+// Narrow subscriptions keep navigation and library pages out of unrelated
+// profile, loading and playback updates. Existing consumers can still read all.
+export function usePlayer(fields) {
+  const store = useContext(PlayerContext);
+  const selected = useRef(null);
+  const getSnapshot = () => {
+    const value = store.getSnapshot();
+    if (!fields) return value;
+    const previous = selected.current;
+    if (previous && fields.length === Object.keys(previous).length && fields.every(key => Object.is(previous[key], value[key]))) return previous;
+    selected.current = Object.fromEntries(fields.map(key => [key, value[key]]));
+    return selected.current;
+  };
+  return useSyncExternalStore(store.subscribe, getSnapshot, getSnapshot);
+}
 export const usePlaybackProgress = () => useContext(PlaybackProgressContext);

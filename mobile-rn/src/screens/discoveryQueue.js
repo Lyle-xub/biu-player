@@ -13,12 +13,12 @@ const profileKey = (snapshot) => {
 // Keep the old App feed's pending cards out of the Web recommendation session.
 const key = (scope) => `biu.discovery-queue.web@${scope}`;
 
-export async function readDiscoveryQueue(scope, snapshot) {
+export async function readDiscoveryQueue(scope, snapshot, mode = 'all') {
   const selection = profileKey(snapshot);
   if (!scope || !selection) return [];
   try {
     const cached = JSON.parse(await AsyncStorage.getItem(key(scope)));
-    if (cached?.version !== 1 || cached.selection !== selection || !Number.isFinite(cached.at)
+    if (cached?.version !== 1 || (cached.mode || 'all') !== mode || cached.selection !== selection || !Number.isFinite(cached.at)
         || Date.now() - cached.at < 0 || Date.now() - cached.at > MAX_AGE || !Array.isArray(cached.tracks)) return [];
     const seen = new Set();
     const tracks = cached.tracks.slice(0, 32).filter((track) => {
@@ -35,12 +35,12 @@ export async function readDiscoveryQueue(scope, snapshot) {
 }
 
 // Only the already-filtered, unplayed queue is saved; no media URLs or tokens.
-export async function writeDiscoveryQueue(scope, snapshot, tracks) {
+export async function writeDiscoveryQueue(scope, snapshot, tracks, mode = 'all') {
   const selection = profileKey(snapshot);
   if (!scope || !selection) return;
   const pending = tracks.slice(0, 32).map((track) => Object.fromEntries([
     'bvid', 'aid', 'cid', 'title', 'pic', 'up', 'mid', 'duration', 'tid', 'tname', 'tags', 'desc',
     'recommendationReason', 'discoveryOrigin', 'relatedTo', 'relatedFocus', 'discoveryVerifiedAt',
   ].filter((field) => track[field] !== undefined).map((field) => [field, track[field]])));
-  await AsyncStorage.setItem(key(scope), JSON.stringify({ version: 1, selection, at: Date.now(), tracks: pending }));
+  await AsyncStorage.setItem(key(scope), JSON.stringify({ version: 1, mode, selection, at: Date.now(), tracks: pending }));
 }

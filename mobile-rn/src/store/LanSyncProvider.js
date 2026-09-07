@@ -1,6 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState, NativeModules, Platform } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import AsyncStorage from './largeStorage';
 import Zeroconf from 'react-native-zeroconf';
 import md5 from 'js-md5';
 import { usePlayer } from '../player/PlayerContext';

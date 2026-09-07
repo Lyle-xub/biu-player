@@ -2,7 +2,7 @@ const http = require('node:http');
 const os = require('node:os');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
-const { normalize, reconcile, profileCount, privateIPv4 } = require('./renderer/library-sync');
+const { normalize, reconcile, libraryCount, profileCount, privateIPv4 } = require('./renderer/library-sync');
 
 const digest = (value) => crypto.createHash('md5').update(value).digest('hex');
 const revision = (library) => digest(JSON.stringify(normalize(library)));
@@ -103,7 +103,7 @@ function createLanSync({ readLibrary, writeLibrary, cloudKeyStatus, exchangeClou
         for await (const chunk of req.iterator({ destroyOnReturn: false })) {
           length += chunk.length;
           if (req.url === '/v2/cloud-key' && length > 16384) { req.resume(); return send(res, 413, {error:'密钥同步请求过大'}); }
-          if (length > 8 * 1024 * 1024) { req.resume(); send(res, 413, { error: '同步数据超过 8 MB，请减少自定义封面大小' }); return; }
+          if (req.url !== '/v2/sync' && length > 16384) { req.resume(); return send(res, 413, { error: '同步控制请求过大' }); }
           chunks.push(chunk);
         }
         const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
@@ -140,7 +140,7 @@ function createLanSync({ readLibrary, writeLibrary, cloudKeyStatus, exchangeClou
         const result = reconcile(body.base ? supportedLibrary(body.base) : null, before, supportedLibrary(body.library));
         if (JSON.stringify(before) !== JSON.stringify(result)) writeLibrary(current.scope, result, before);
         const receipt = { id: crypto.randomUUID(), revision: revision(result),
-          counts: { likes: result.likes.length, library: result.library.length,
+          counts: { likes: result.likes.length, library: libraryCount(result),
             playlists: result.playlists.length, profiles: profileCount(result) } };
         if (current.receipts.size >= 64) current.receipts.delete(current.receipts.keys().next().value);
         current.receipts.set(body.clientId, receipt);

@@ -1,11 +1,15 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, Easing, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { SvgXml } from 'react-native-svg';
+import { Image } from 'expo-image';
+import { Buffer } from 'buffer';
 import { artwork, quoteFor } from '../../../renderer/profile-presentation';
 import { colors } from '../theme';
 
 export default function ProfilePortrait({ profile, ready, flipped, onFlip }) {
   const art = useMemo(() => artwork(profile), [profile]);
+  // Decode/cache the static artwork in the native image pipeline instead of
+  // parsing and mounting dozens of SVG nodes on the navigation JS thread.
+  const artworkSource = useMemo(() => ({ uri: `data:image/svg+xml;base64,${Buffer.from(art.svg, 'utf8').toString('base64')}` }), [art.svg]);
   const turn = useRef(new Animated.Value(0)).current;
   const [quote, setQuote] = useState(null);
   const [error, setError] = useState('');
@@ -31,7 +35,8 @@ export default function ProfilePortrait({ profile, ready, flipped, onFlip }) {
         style={[styles.face, { transform: [{ perspective: 900 }, { rotateY: turn.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '-180deg'] }) }, { rotateZ: '-3deg' }] }]}>
         <TouchableOpacity style={styles.front} onPress={onFlip} activeOpacity={0.9}
           accessibilityRole="button" accessibilityLabel="翻转卡片，查看用户画像">
-          <View style={styles.art}><SvgXml xml={art.svg} width="100%" height="100%" /></View>
+          <View style={styles.art}><Image source={artworkSource} style={StyleSheet.absoluteFill}
+            contentFit="contain" cachePolicy="memory-disk" transition={0} /></View>
           <View style={styles.caption}>
             <Text style={styles.name} numberOfLines={1}>{profile.name}</Text>
             <Text style={styles.serial}>No. {art.serial} / 点击翻面 ↗</Text>

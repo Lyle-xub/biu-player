@@ -8,9 +8,12 @@ const React = fromMobile('react');
 const { act, create } = fromMobile('react-test-renderer');
 const babel = fromMobile('@babel/core');
 global.IS_REACT_ACT_ENVIRONMENT = true;
+const compute = require('../mobile-rn/scripts/build-compute.cjs');
+const runCompute = require(compute())();
 
 function loader(mocks = {}) {
   mocks = {
+    'src/performance/backgroundCompute': { backgroundCompute: async (operation, ...args) => runCompute(operation, ...args) },
     '@react-native-async-storage/async-storage': { getItem: async () => null, setItem: async () => {} },
     'biu-lyric-monet': {},
     'src/screens/discoveryQueue': { DISCOVERY_TARGET: 24, DISCOVERY_LOW_WATER: 12, readDiscoveryQueue: async () => [], writeDiscoveryQueue: async () => {} },
@@ -27,6 +30,19 @@ function loader(mocks = {}) {
     'src/updates/service': { appUpdates: {}, useAppUpdates: () => ({ supported: false, loaded: false }) },
     ...mocks,
   };
+  mocks['@shopify/flash-list'] ||= { FlashList: props => React.createElement(rn.FlatList, props) };
+  mocks['@react-navigation/native'] ||= {};
+  mocks['react-native-gesture-handler'] = { PanGestureHandler: 'PanGestureHandler',
+    State: { BEGAN: 2, ACTIVE: 4, END: 5, CANCELLED: 3 }, ...mocks['react-native-gesture-handler'] };
+  mocks['@react-navigation/native'].NavigationContext ||= React.createContext(null);
+  mocks['@react-navigation/native'].NavigationRouteContext ||= React.createContext(undefined);
+  mocks['src/store/largeStorage'] ||= mocks['@react-native-async-storage/async-storage'];
+  mocks['src/store/largeStorage'].hasItem ||= async key => await mocks['src/store/largeStorage'].getItem(key) != null;
+  const mockBili = mocks['src/api/bili'];
+  if (mockBili && !mockBili.cachedFavFolders) mockBili.cachedFavFolders = async () => [];
+  if (mockBili && !mockBili.homeRecommendations) mockBili.homeRecommendations = (page, limit, options) =>
+    options.music ? mockBili.personalizedMusicRecommendations(page, limit, options.onBatch, options)
+      : mockBili.personalizedRecommendations(page, limit, options);
   const cache = new Map();
   const load = (file) => {
     file = path.resolve(root, file);
@@ -241,7 +257,7 @@ test('anonymous music ranking falls back on -352 while preserving other failures
 
 test('system lyrics share offsets and seek timing, and cannot return after disable or unmount', async () => {
   let state = {
-    current: { bvid: 'lyrics-a', title: 'A' }, position: 7, playing: true, buffering: false,
+    current: { bvid: 'lyrics-a', title: 'A' }, position: 7, playing: false, buffering: false, mediaDeferred: true,
     lyricSettings: { 'lyrics-a': { offset: 2 } }, seekRevision: 0,
     desktopLyricsEnabled: true, lockScreenLyricsEnabled: true, dynamicIslandLyricsEnabled: true,
   };
@@ -261,13 +277,14 @@ test('system lyrics share offsets and seek timing, and cannot return after disab
   });
   const instanceByName = { old: makeInstance('old') };
   instances = [instanceByName.old];
-  let starts = 0;
+  let starts = 0, lyricLoads = 0, coverLoads = 0;
   const Sync = loader({
     'react-native': { Platform: { OS: 'ios' } },
     'biu-lyric-monet': {},
     'src/player/PlayerContext': { usePlayer: () => state, usePlaybackProgress: () => state },
     'src/player/track': { trackKeyOf: (track) => track?.bvid || '', segmentRange: trackModel.segmentRange },
-    'src/player/loadLyrics': { loadTrackLyrics: () => loadedLyrics },
+    'src/player/loadLyrics': { loadTrackLyrics: () => { lyricLoads++; return loadedLyrics; } },
+    'src/player/coverColor': { loadCoverColor: async () => { coverLoads++; return null; } },
     'src/widgets/LyricsWidgets': {
       LyricsWidget: { updateSnapshot: (props) => {
         // Expo Widgets writes props straight into UserDefaults, which rejects
@@ -301,6 +318,12 @@ test('system lyrics share offsets and seek timing, and cannot return after disab
     await act(async () => { tree.update(React.createElement(Sync)); });
   };
   await act(async () => { tree = create(React.createElement(Sync)); });
+  assert.equal(lyricLoads, 0, 'a restored paused bar does not fetch lyrics during cold startup');
+  assert.equal(coverLoads, 0, 'a restored paused bar does not decode colors or prefetch covers');
+  assert.equal(starts, 0, 'cold startup does not create a new live activity');
+  assert.equal(snapshots.at(-1).playing, false, 'the persisted widget is not left playing');
+  await update({ mediaDeferred: false, playing: true });
+  assert.equal(lyricLoads, 1);
   assert.deepEqual(events[0], ['end', 'old', 'immediate'], 'cold launch removes the orphan before starting');
   assert.equal(snapshots.at(-1).currentLine, '', 'cold launch publishes before lyrics have loaded');
   assert.deepEqual(pipFrames.at(-1).slots, [null, null], 'PiP retains the two empty JSON slots');
@@ -694,8 +717,11 @@ const rn = {
   StyleSheet: { create: (x) => x, absoluteFill: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 } },
   useWindowDimensions: () => ({ width: 390, height: 844 }),
   PanResponder: { create: (x) => ({ panHandlers: x }) },
+  Keyboard: { dismiss() {} },
   Easing: { linear: (x) => x, cubic: (x) => x, out: (x) => x, in: (x) => x, bezier: () => (x) => x },
-  Animated: { Value, timing, spring: timing, parallel: (all) => ({ start: () => all.forEach((a) => a.start()) }), View: 'AnimatedView', Text: 'AnimatedText' },
+  Animated: { Value, timing, spring: timing, add: (a, b) => ({ a, b }),
+    event: (mapping, options) => Object.assign(event => mapping[0].nativeEvent.translationY.setValue(event.nativeEvent.translationY), { options, mapping }),
+    parallel: (all) => ({ start: () => all.forEach((a) => a.start()) }), View: 'AnimatedView', Text: 'AnimatedText' },
 };
 const storage = { getItem: async () => null, setItem: async () => {} };
 const safeArea = { SafeAreaProvider: 'SafeAreaProvider', SafeAreaView: 'SafeAreaView',
@@ -905,7 +931,7 @@ function withOverlays(load, Component) {
   return (props) => React.createElement(OverlayProvider, null, React.createElement(Component, props));
 }
 
-test('app gives pushed screens their own background and waits for startup layout and logo', async (t) => {
+test('app releases the native splash on layout without image callbacks and has a missing-layout fallback', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const oldRequest = global.requestAnimationFrame, oldCancel = global.cancelAnimationFrame;
   let reveal;
@@ -929,7 +955,7 @@ test('app gives pushed screens their own background and waits for startup layout
     'expo-blur': { BlurTargetView: 'BlurTargetView', BlurView: 'BlurView' },
     'expo-linear-gradient': { LinearGradient: 'LinearGradient' },
     'react-native-svg': { __esModule: true, default: 'Svg', Defs: 'Defs', RadialGradient: 'RadialGradient', Rect: 'Rect', Stop: 'Stop' },
-    'src/player/PlayerContext': { PlayerProvider: 'PlayerProvider' },
+    'src/player/PlayerContext': { PlayerProvider: 'PlayerProvider', usePlayer: () => ({ discoveryEnabled: true }) },
     'src/store/LanSyncProvider': { LanSyncProvider: 'LanSyncProvider' },
     'src/store/CloudSyncProvider': { CloudSyncProvider: 'CloudSyncProvider' },
     'src/player/useMediaTransition': { mediaScreenOptions: {} },
@@ -951,8 +977,8 @@ test('app gives pushed screens their own background and waits for startup layout
   const before = animationCalls.length;
   await act(async () => { tree = create(React.createElement(App)); });
   let stack = tree.root.findByType('Navigator').props;
-  assert.equal(stack.screenOptions.animation, 'none', 'the page performs one complete transition before popping');
-  assert.equal(stack.screenOptions.presentation, 'transparentModal');
+  assert.equal(stack.screenOptions.animation, 'slide_from_right', 'native-stack owns normal page transitions');
+  assert.equal(stack.screenOptions.presentation, 'card');
   const child = React.createElement('Page');
   const transition = stack.screenLayout({ route: { name: 'Settings' }, options: stack.screenOptions, children: child });
   const page = transition.props.children;
@@ -964,14 +990,27 @@ test('app gives pushed screens their own background and waits for startup layout
     state: { index: 0, routes: [{ name }] }, navigation: {} });
   let chrome;
   await act(async () => { chrome = create(scene('Tabs')); });
+  assert.equal(chrome.root.findByType('BlurTargetView').props.pointerEvents, 'none');
+  assert.equal(chrome.root.findByType('BlurTargetView').findAllByType('Pages').length, 0,
+    'the root blur target never reparents navigation or touch responders');
+  const Tabs = tree.root.findAllByType('Screen').find(node => node.props.name === 'Tabs').props.component;
+  let tabs, tabScene;
+  await act(async () => { tabs = create(React.createElement(Tabs)); });
+  const tabLayout = tabs.root.findByType('Navigator').props.screenLayout;
+  await act(async () => { tabScene = create(tabLayout({ route: { name: 'Discover' }, children: React.createElement('GestureDetector') })); });
+  assert.equal(tabScene.root.findByType('BlurTargetView').findAllByType('GestureDetector').length, 0,
+    'discovery gestures remain outside the native blur target hierarchy');
+  assert.equal(tabScene.root.findAllByType('GestureDetector').length, 1);
+  await act(async () => { tabScene.unmount(); tabs.unmount(); });
   assert.equal(hidden, 0);
-  await act(async () => chrome.root.findByType('AnimatedImage').props.onLoadEnd());
-  assert.equal(hidden, 0, 'image loading alone must not uncover an unlaid-out view');
+  assert.equal(chrome.root.findByType('AnimatedImage').props.onLoadEnd, undefined,
+    'a lost image event cannot retain the native splash or block Android pre-draw');
+  assert.equal(chrome.root.findByType('AnimatedView').props.pointerEvents, 'none');
   await act(async () => chrome.root.findByType('AnimatedView').props.onLayout());
   assert.equal(hidden, 1);
   assert.equal(animationCalls.length, before + 1);
   const fade = animationCalls.at(-1);
-  assert.ok(fade.config.delay >= 350, 'allow the native splash fade to finish');
+  assert.equal(fade.config.delay, undefined, 'do not add a second startup hold after the native fade');
   assert.equal(fade.config.useNativeDriver, true);
   assert.equal(chrome.root.findAllByType('AnimatedImage').length, 1);
   await act(async () => fade.finish());
@@ -988,53 +1027,24 @@ test('app gives pushed screens their own background and waits for startup layout
   assert.equal(chrome.root.findByType('MiniBar').props.visible, true,
     'the mini player enters only after the closing transition ends');
   await act(async () => chrome.unmount());
+  await act(async () => { chrome = create(scene('Tabs')); });
+  await act(async () => t.mock.timers.tick(1000));
+  assert.equal(hidden, 2, 'missing layout also releases the native window within a bounded time');
+  await act(async () => chrome.unmount());
   await act(async () => tree.unmount());
 });
 
-test('ordinary pages retain their content until the exit animation completes and only the focused page blocks removal', async () => {
-  let prevent, focused = true, unmounted = 0;
-  const dispatched = [];
-  const load = loader({
-    'react-native': rn,
-    '@react-navigation/native': {
-      useIsFocused: () => focused,
-      usePreventRemove: (enabled, callback) => { prevent = enabled ? callback : null; },
-    },
-  });
-  const Page = load('src/components/PageTransition.js').default;
-  function Content() {
-    React.useEffect(() => () => { unmounted++; }, []);
-    return React.createElement('Text', null, '设置页完整内容');
-  }
-  const navigation = { dispatch: (action) => dispatched.push(action) };
-  const render = () => React.createElement(Page, { navigation }, React.createElement(Content));
+test('ordinary pages use native transitions and never intercept back while JS is busy', async () => {
+  const load = loader({ 'react-native': rn,
+    '@react-navigation/native': { usePreventRemove: () => assert.fail('ordinary navigation must not wait on JS animation callbacks') } });
+  const {default: Page, pageScreenOptions} = load('src/components/PageTransition.js');
+  assert.equal(pageScreenOptions.presentation, 'card');
+  assert.equal(pageScreenOptions.animation, 'slide_from_right');
   let tree;
-  const before = animationCalls.length;
-  await act(async () => { tree = create(render()); });
-  assert.equal(animationCalls.length, before, 'entry waits for final layout');
-  await act(async () => tree.root.findByType('View').props.onLayout({ nativeEvent: { layout: { width: 412 } } }));
-  await act(async () => animationCalls.at(-1).finish());
-  const content = tree.root.findByType('Text');
-  const action = { type: 'GO_BACK', source: 'Settings', target: 'root' };
-  await act(async () => prevent({ data: { action } }));
-  const exit = animationCalls.at(-1);
-  assert.equal(exit.config.useNativeDriver, true);
-  assert.equal(exit.config.toValue, 1);
-  assert.deepEqual(dispatched, []);
-  assert.equal(unmounted, 0);
-  assert.equal(tree.root.findByType('Text'), content, 'live content must not disappear before the background finishes moving');
-  assert.equal(tree.root.findByType('AnimatedView').props.style[1].opacity, undefined);
-  assert.deepEqual(tree.root.findByType('AnimatedView').props.style[1].transform[0].translateX.config.outputRange, [0, 412]);
-  const count = animationCalls.length;
-  await act(async () => prevent({ data: { action } }));
-  assert.equal(animationCalls.length, count, 'repeated back presses cannot start multiple exits');
-  await act(async () => exit.finish());
-  assert.deepEqual(dispatched, [action]);
-  focused = false;
-  await act(async () => tree.update(render()));
-  assert.equal(prevent, null, 'underlying routes must not intercept a multi-page back action');
+  await act(async () => { tree = create(React.createElement(Page, { navigation: {} }, React.createElement('Text', null, '设置'))); });
+  assert.equal(tree.root.findAllByType('AnimatedView').length, 0);
+  assert.equal(tree.root.findByType('Text').props.children, '设置');
   await act(async () => tree.unmount());
-  assert.equal(unmounted, 1);
 });
 
 test('mine playlist tabs keep the header height when the create button disappears', async () => {
@@ -1104,7 +1114,7 @@ function actionHarness(overrides = {}) {
 }
 const track = { bvid: 'A', cid: 10, title: 'Mix', pic: 'https://cdn/cover.jpg' };
 
-test('app sheets wait for layout, keep closing content, and survive a rapid reopen', async () => {
+test('app sheets animate without waiting for layout, keep closing content, and survive a rapid reopen', async () => {
   const load = loader({ 'react-native': rn, 'react-native-safe-area-context': safeArea });
   const Sheet = withOverlays(load, load('src/components/BottomSheet.js').default);
   let tree;
@@ -1115,7 +1125,7 @@ test('app sheets wait for layout, keep closing content, and survive a rapid reop
   const before = animationCalls.length;
   await act(async () => tree.update(render(true)));
   assert.equal(tree.root.findAllByType('Modal').length, 0, 'sheets never create a native window');
-  assert.equal(animationCalls.length, before, 'do not reveal unmeasured content');
+  assert.equal(animationCalls.length, before + 1, 'entry must not depend on a JS layout callback');
   const surface = () => tree.root.findAllByType('AnimatedView').find((n) => n.props.onLayout);
   await act(async () => surface().props.onLayout({ nativeEvent: { layout: { height: 320 } } }));
   const opening = animationCalls.at(-1);
@@ -1309,7 +1319,7 @@ test('favorite metadata editing uses the desktop endpoint and surfaces failed sa
   await assert.rejects(api.favFolderEdit(12, 'New', ''), /请登录/);
 });
 
-test('home fills recommendation batches across sparse pages and supplements only missing music items', async () => {
+test('home fills the first fifteen unique recommendations and keeps subsequent pagination incremental', async () => {
   const requests = [];
   const plays = [];
   let account = { isLogin: true };
@@ -1353,19 +1363,21 @@ test('home fills recommendation batches across sparse pages and supplements only
     tree = create(React.createElement(Home, { navigation: { navigate() {} } }));
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
-  assert.deepEqual(requests, [[0, 30]]);
+  assert.deepEqual(requests, [[0, 30], [1, 30], [2, 30]]);
   const checkRecommendations = (total) => {
     const banner = tree.root.findByType('HomeBanner').props.tracks;
     const feed = tree.root.findAllByType('TrackCard').map((card) => card.props.track);
-    const blocks = tree.root.findByType('FlatList').props.data;
-    assert.equal(banner.length, 5);
+    const list = tree.root.findByType('FlatList').props;
+    assert.equal(banner.length, Math.min(5, total - 1));
     assert.equal(feed.length, total - banner.length);
-    assert.ok(blocks.length > 1 && blocks.every((block) => block.columns.flat().length <= 8),
-      'the waterfall stays split into bounded recyclable cells');
+    assert.equal(list.masonry, true);
+    assert.equal(list.numColumns, 2);
+    assert.equal(list.optimizeItemArrangement, true);
+    assert.deepEqual(list.data, feed, 'each card is a recyclable masonry item with no eight-card group boundaries');
     assert.equal(new Set([...banner, ...feed].map((track) => track.bvid)).size, total,
       'carousel and waterfall partition the recommendations without duplicate videos');
   };
-  checkRecommendations(30);
+  checkRecommendations(90);
   tree.root.findByType('HomeBanner').props.onPress(null, 2);
   assert.equal(plays.at(-1)[0][plays.at(-1)[1]].bvid, 'BV0-2');
   const firstCard = tree.root.findAllByType('TrackCard')[0];
@@ -1378,14 +1390,14 @@ test('home fills recommendation batches across sparse pages and supplements only
     scroll.props.onEndReached();
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
-  assert.deepEqual(requests, [[0, 30], [1, 30]]);
-  checkRecommendations(60);
+  assert.deepEqual(requests, Array.from({ length: 6 }, (_, i) => [i, 30]));
+  checkRecommendations(180);
   await act(async () => {
     tree.root.findByType('FlatList').props.refreshControl.props.onRefresh();
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
-  checkRecommendations(30);
-  assert.deepEqual(requests, [[0, 30], [1, 30], [2, 30]], 'refresh continues at the next platform page');
+  checkRecommendations(90);
+  assert.deepEqual(requests, Array.from({ length: 9 }, (_, i) => [i, 30]), 'refresh reserves three new platform pages');
   account = { isLogin: false };
   await act(async () => {
     tree.update(React.createElement(Home, { navigation: { navigate() {} } }));
@@ -1399,8 +1411,10 @@ test('home fills recommendation batches across sparse pages and supplements only
     tree.update(React.createElement(Home, { navigation: { navigate() {} } }));
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
-  assert.deepEqual(musicRequests, [0, 1, 2, 3, 4], 'empty and duplicate results do not count towards the batch target');
-  checkRecommendations(20);
+  assert.ok(musicRequests.length >= 4, 'duplicate-heavy pages continue until the target is met');
+  const musicCount = Math.min(Math.max(...musicRequests), 4) * 5;
+  checkRecommendations(musicCount);
+  const musicStart = musicRequests.length;
   assert.equal(rankRequests, 1, 'enough personalized music needs no ranking supplement');
   await act(async () => {
     tree.root.findByType('FlatList').props.onScrollBeginDrag();
@@ -1409,19 +1423,20 @@ test('home fills recommendation batches across sparse pages and supplements only
     } });
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
-  assert.deepEqual(musicRequests, Array.from({ length: 13 }, (_, i) => i),
-    'pagination resumes at the next unread page and stops after eight sparse pages');
+  assert.equal(musicRequests.length - musicStart, 12, 'sparse load-more remains bounded while seeking thirty new matches');
+  assert.deepEqual(musicRequests, Array.from({ length: musicRequests.length }, (_, i) => i));
   const cards = tree.root.findAllByType('TrackCard');
   checkRecommendations(20);
   assert.equal(cards.filter((card) => card.props.track.recommendationReason === '音乐热榜').length, 0);
   assert.equal(rankRequests, 1);
+  const beforeFailure = musicRequests.length;
   failRecommendations = true;
   await act(async () => {
     tree.root.findByType('FlatList').props.onScrollBeginDrag();
     tree.root.findByType('FlatList').props.onEndReached();
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
-  assert.equal(musicRequests.at(-1), 13);
+  assert.equal(musicRequests.length - beforeFailure, 3);
   checkRecommendations(20);
   await act(async () => tree.unmount());
 });
@@ -1452,8 +1467,8 @@ test('home keeps sparse batches visible and publishes fallback before slow profi
   await act(async () => { tree = create(React.createElement(Home, { navigation: {} })); });
   assert.equal(tree.root.findByType('HomeBanner').props.tracks.length, 4);
   assert.equal(feed().length, 1, 'the first five music tracks cannot all disappear into the carousel');
-  assert.equal(tree.root.findByType('FlatList').props.removeClippedSubviews, true,
-    'Android recycles the new bounded waterfall cells');
+  assert.equal(tree.root.findByType('FlatList').props.masonry, true,
+    'the feed uses per-card masonry recycling');
   assert.equal(feed().length, 1, 'the platform batch is visible while optional profile searches are still pending');
   assert.deepEqual(profilePages, [0]);
   await act(async () => {
@@ -1529,14 +1544,14 @@ test('home refresh advances automatic profile searches and excludes the previous
       'automatic profile insertions must not displace platform carousel videos');
     const before = visibleIds();
     await act(async () => tree.root.findByType('FlatList').props.refreshControl.props.onRefresh());
-    assert.equal(platformPages.at(-1), page);
+    assert.equal(platformPages.at(-1), page * 3 + 2);
     assert.equal(profileRequests.at(-1).page, page);
     assert.deepEqual(new Set(profileRequests.at(-1).exclude), new Set(before));
     assert.ok(visibleIds().every((id) => !before.includes(id)), 'refresh must replace previously displayed videos');
   }
   scope = 'account-b';
   await act(async () => tree.update(React.createElement(Home, { navigation: {} })));
-  assert.equal(platformPages.at(-1), 0, 'another account starts a separate feed');
+  assert.equal(platformPages.at(-1), 2, 'another account starts its own first three pages');
   assert.equal(profileRequests.at(-1).page, 0);
   assert.deepEqual(profileRequests.at(-1).exclude, []);
   await act(async () => tree.unmount());
@@ -1575,7 +1590,7 @@ test('strict custom home keeps platform content visible while profile matching r
   const Home = load('src/screens/HomeScreen.js').default;
   let tree;
   await act(async () => { tree = create(React.createElement(Home, { navigation: {} })); });
-  assert.equal(platformCalls, 1, 'platform recommendations are allowed while the custom profile restores');
+  assert.equal(platformCalls, 3, 'platform recommendations are allowed while the custom profile restores');
   await act(async () => gate.resolve(R.normalize({ profiles: [{ id: 'p', name: '钢琴', tags: ['钢琴'] }], activeId: 'p' })));
   assert.equal(tree.root.findByType('HomeBanner').props.tracks.length, 5);
   assert.equal(tree.root.findAllByType('TrackCard').length, 15, 'first platform page displays before profile matching finishes');
@@ -1584,7 +1599,7 @@ test('strict custom home keeps platform content visible while profile matching r
   await act(async () => remaining.resolve());
   assert.equal(tree.root.findByType('HomeBanner').props.tracks.length, 5);
   assert.equal(tree.root.findAllByType('TrackCard').length, 15);
-  assert.equal(platformCalls, 1);
+  assert.equal(platformCalls, 3);
   assert.equal(tree.root.findAllByProps({ accessibilityLabel: '加载更多推荐' }).length, 0);
   await act(async () => tree.root.findByType('FlatList').props.onEndReached());
   assert.equal(requests.length, 1, 'layout changes alone must not request another batch');
@@ -1824,61 +1839,24 @@ test('download writes a complete temporary file before exporting and cancels pen
   await act(async () => tree.unmount());
 });
 
-test('media layout is ready before entry; drag reveals tabs continuously and back dispatch waits for completion', async () => {
-  let remove, result; const dispatched = [];
-  const navigation = { dispatch: (a) => dispatched.push(a), goBack: () => remove({ data: { action: { type: 'GO_BACK' } } }) };
-  const load = loader({ 'react-native': rn, 'react-native-safe-area-context': safeArea,
-    '@react-navigation/native': { usePreventRemove: (enabled, cb) => { if (enabled) remove = cb; } } });
-  const { default: useTransition, mediaScreenOptions } = load('src/player/useMediaTransition.js');
-  function Screen() { result = useTransition(navigation); return null; }
-  const offset = (style) => {
-    const { source, config: { inputRange, outputRange } } = style.transform[0].translateY;
-    const end = inputRange.findIndex((x, i) => i > 0 && source.value <= x);
-    const i = end === -1 ? inputRange.length - 1 : end;
-    return outputRange[i - 1] + (outputRange[i] - outputRange[i - 1])
-      * (source.value - inputRange[i - 1]) / (inputRange[i] - inputRange[i - 1]);
-  };
-  let tree;
+test('media back uses native stack without an animation gate or a transparent blocking route', async () => {
+  let result, backs = 0;
   const before = animationCalls.length;
+  const load = loader({ 'react-native': rn, 'react-native-safe-area-context': safeArea,
+    '@react-navigation/native': { usePreventRemove: () => assert.fail('media removal must never be prevented') } });
+  const { default: useTransition, mediaScreenOptions } = load('src/player/useMediaTransition.js');
+  function Screen() { result = useTransition({ goBack: () => backs++ }); return null; }
+  let tree;
   await act(async () => { tree = create(React.createElement(Screen)); });
-  assert.equal(mediaScreenOptions.presentation, 'transparentModal');
-  assert.equal(animationCalls.length, before, 'do not animate before native layout');
-  await act(async () => result.onLayout({ nativeEvent: { layout: { height: 900 } } }));
-  assert.equal(offset(result.style) + offset(result.viewportStyle), 900, 'use real page height, not window estimate');
-  assert.equal(animationCalls.at(-1).config.toValue, 0);
-  await act(async () => animationCalls.at(-1).finish());
-  const opened = animationCalls.length;
-  await act(async () => result.onLayout({ nativeEvent: { layout: { height: 920 } } }));
-  assert.equal(animationCalls.length, opened, 'relayout must not replay the entry animation');
-  assert.equal(offset(result.style) + offset(result.viewportStyle), 0);
-  const fixedInsets = result.safeStyle;
-  for (const dy of [46, 92, 230]) {
-    result.panHandlers.onPanResponderMove(null, { dy });
-    assert.ok(offset(result.viewportStyle) < 0, 'navigation begins to appear during the drag');
-    assert.ok(Math.abs(offset(result.style) + offset(result.viewportStyle) - dy) < 0.001, 'page follows the finger exactly');
-    assert.deepEqual(result.safeStyle, fixedInsets, 'moving content must not recalculate safe-area padding');
-  }
-  result.panHandlers.onPanResponderRelease(null, { dy: 10, vy: 0 });
-  assert.equal(animationCalls.at(-1).config.toValue, 0);
-  await act(async () => animationCalls.at(-1).finish());
-  assert.equal(offset(result.viewportStyle), 0, 'cancelled drag covers tabs again');
-  const action = { type: 'GO_BACK', source: 'Player' };
-  await act(async () => remove({ data: { action } }));
-  assert.equal(dispatched.length, 0);
-  assert.equal(animationCalls.at(-1).config.toValue, 1);
-  const exits = animationCalls.length;
-  await act(async () => remove({ data: { action } }));
-  assert.equal(animationCalls.length, exits, 'duplicate back does not start another exit');
-  await act(async () => animationCalls.at(-1).finish());
-  assert.equal(dispatched[0], action);
-  await act(async () => tree.unmount());
-
-  await act(async () => { tree = create(React.createElement(Screen)); });
-  await act(async () => remove({ data: { action } }));
-  const earlyExit = animationCalls.at(-1);
-  await act(async () => result.onLayout({ nativeEvent: { layout: { height: 900 } } }));
-  assert.equal(animationCalls.at(-1), earlyExit, 'late layout cannot override an immediate back');
-  await act(async () => earlyExit.finish());
+  assert.equal(mediaScreenOptions.presentation, 'card');
+  assert.equal(mediaScreenOptions.animation, 'slide_from_bottom');
+  assert.equal(animationCalls.length, before);
+  assert.equal(result.panHandlers.onMoveShouldSetPanResponder(null, { dx: 1, dy: 20 }), true);
+  assert.equal(result.panHandlers.onMoveShouldSetPanResponder(null, { dx: 20, dy: 1 }), false);
+  await act(async () => result.panHandlers.onPanResponderRelease(null, { dy: 100, vy: 0 }));
+  assert.equal(backs, 1, 'back dispatches immediately without a completion callback');
+  assert.equal(result.style, undefined, 'no invisible translated page can remain above the navigator');
+  assert.deepEqual(result.safeStyle, { paddingTop: 30, paddingBottom: 24, paddingLeft: 0, paddingRight: 0 });
   await act(async () => tree.unmount());
 });
 
@@ -2000,6 +1978,131 @@ test('iOS transport has one application owner and keeps targets across item chan
     'a cancelled callback must not overwrite artwork even if the player item is unchanged');
   assert.match(native, /info\[MPMediaItemPropertyArtwork\] = artwork \?\? self.fallbackArtwork/,
     'failed artwork loads must use a branded fallback, not clear artwork or retain the previous song');
+});
+
+test('cold startup restores a paused queue locally, loads only on play/resume and never overrides a newer user selection', async () => {
+  const saved = { queue: [{ bvid: 'saved', cid: 1, duration: 100, isSegment: true, from: 20, to: 80 }],
+    index: 0, position: 12, source: 'discovery' };
+  for (const action of ['togglePlay', 'resume', 'late']) {
+    const disk = deferred(), requests = [], writes = [], listeners = {};
+    const player = { playing: false, status: 'idle', currentTime: 0, duration: 100,
+      play() { this.playing = true; }, pause() { this.playing = false; },
+      async replaceAsync(source) { this.source = source; this.status = 'readyToPlay'; listeners.sourceLoad({ videoSource: source }); } };
+    const load = loader({ 'expo-video': { useVideoPlayer: () => player },
+      expo: { useEvent: () => ({}), useEventListener: (_, name, fn) => { listeners[name] = fn; } },
+      '@react-native-async-storage/async-storage': {
+        getItem: async key => key === 'biu.playback-session' ? disk.promise : null,
+        setItem: async (key, value) => { if (key === 'biu.playback-session') writes.push(value); },
+      },
+      'src/api/bili': { videoUrl: async bvid => { requests.push(bvid); return 'https://cdn/' + bvid; } },
+      'src/api/client': { streamHeaders: () => ({}) },
+    });
+    const { PlayerProvider, usePlayer } = load('src/player/PlayerContext.js');
+    let context, tree;
+    function Probe() { context = usePlayer(); return null; }
+    await act(async () => { tree = create(React.createElement(PlayerProvider, null, React.createElement(Probe))); });
+    try {
+      if (action === 'late') await act(async () => context.playQueue([{ bvid: 'chosen', cid: 1 }]));
+      await act(async () => disk.resolve(JSON.stringify(saved)));
+      if (action === 'late') {
+        assert.equal(context.current.bvid, 'chosen');
+        assert.deepEqual(requests, ['chosen']);
+        continue;
+      }
+      assert.equal(context.current.bvid, 'saved');
+      assert.equal(context.queueSource, 'discovery');
+      assert.equal(context.position, 12);
+      assert.equal(context.buffering, false);
+      assert.equal(context.mediaDeferred, true);
+      assert.deepEqual(requests, [], 'restoring a paused bar must not fetch video');
+      assert.deepEqual(writes, [], 'reading the session must not rewrite its entire queue');
+      assert.equal(player.source, undefined);
+      await act(async () => listeners.timeUpdate({ currentTime: 0 }));
+      assert.equal(context.position, 12, 'empty player ticks cannot erase the saved position');
+      await act(async () => context.seekTo(18));
+      assert.equal(context.position, 18);
+      assert.equal(player.currentTime, 0, 'paused restore seek is local until media is loaded');
+      await act(async () => context[action]());
+      assert.deepEqual(requests, ['saved']);
+      assert.equal(player.currentTime, 38, 'first play respects the segment start and locally edited position');
+      assert.equal(player.playing, true);
+      assert.equal(context.mediaDeferred, false);
+    } finally { await act(async () => tree.unmount()); }
+  }
+});
+
+test('background profile updates do not rerender narrow navigation and library subscribers', async () => {
+  const player = { playing: false, status: 'idle', pause() {} };
+  const load = loader({ 'expo-video': { useVideoPlayer: () => player },
+    expo: { useEvent: () => ({}), useEventListener() {} }, 'src/api/client': {}, 'src/api/bili': {} });
+  const { PlayerProvider, usePlayer } = load('src/player/PlayerContext.js');
+  let state, navigationRenders = 0, libraryRenders = 0, tree;
+  function All() { state = usePlayer(); return null; }
+  function Navigation() { usePlayer(['discoveryEnabled']); navigationRenders++; return null; }
+  function Library() { usePlayer(['likes', 'libraryTracks']); libraryRenders++; return null; }
+  await act(async () => { tree = create(React.createElement(PlayerProvider, null,
+    React.createElement(All), React.createElement(Navigation), React.createElement(Library))); });
+  try {
+    const initial = [navigationRenders, libraryRenders];
+    await act(async () => state.recommendationManager.edit({ type: 'save', name: '音乐', tags: ['钢琴'] }));
+    await act(async () => state.discoveryRecommendationManager.edit({ type: 'save', name: '发现', tags: ['cos'] }));
+    assert.deepEqual([navigationRenders, libraryRenders], initial);
+    await act(async () => state.setDiscoveryEnabled(true));
+    assert.equal(navigationRenders, initial[0] + 1, 'a relevant change still updates the tab immediately');
+    assert.equal(libraryRenders, initial[1]);
+  } finally { await act(async () => tree.unmount()); }
+});
+
+test('local likes rebase on a sync commit that arrives during worker serialization', async () => {
+  const held = deferred(), started = deferred();
+  let hold = true, state, tree;
+  const load = loader({
+    'expo-video': { useVideoPlayer: () => player },
+    expo: { useEvent: () => ({}), useEventListener() {} }, 'src/api/client': {}, 'src/api/bili': {},
+    'src/performance/backgroundCompute': { backgroundCompute: async (operation, ...args) => {
+      if (hold && operation === 'stringify' && Array.isArray(args[0]) && args[0].some(t => t.bvid === 'BVlocal')) {
+        hold = false; started.resolve(); await held.promise;
+      }
+      return runCompute(operation, ...args);
+    } },
+  });
+  const player = { playing: false, status: 'idle', pause() {} };
+  const { PlayerProvider, usePlayer } = load('src/player/PlayerContext.js');
+  function Probe() { state = usePlayer(); return null; }
+  await act(async () => { tree = create(React.createElement(PlayerProvider, null, React.createElement(Probe))); });
+  try {
+    let saving;
+    await act(async () => { saving = state.toggleLike({ bvid: 'BVlocal' }); await started.promise; });
+    await act(async () => state.applySyncLibrary({ version: 1, likes: [{ bvid: 'BVremote' }], library: [], playlists: [] }, null, ''));
+    await act(async () => { held.resolve(); await saving; });
+    assert.deepEqual(state.likes.map(t => t.bvid).sort(), ['BVlocal', 'BVremote']);
+  } finally { held.resolve(); await act(async () => tree.unmount()); }
+});
+
+test('background argument transfer never freezes live state or reuses stale serialized objects', async () => {
+  let runtimes = 0;
+  const load = loader({ 'react-native-worklets': {
+    createWorkletRuntime: options => { runtimes++; assert.equal(options.name, 'biu-data'); return {}; },
+    runOnRuntimeAsync: async (_runtime, worklet, ...args) => {
+      const freeze = value => { if (!value || typeof value !== 'object' || Object.isFrozen(value)) return;
+        Object.freeze(value); Object.values(value).forEach(freeze); };
+      args.forEach(freeze);
+      return worklet(...args);
+    },
+  } });
+  const { backgroundCompute } = load('src/performance/backgroundCompute.js');
+  const track = { bvid: 'BVmutable', title: 'before' }, data = { likes: [track] };
+  const raw = await backgroundCompute('stringify', data);
+  assert.equal(JSON.parse(raw).likes[0].title, 'before');
+  track.title = 'after';
+  assert.equal(Object.isFrozen(track), false);
+  assert.equal(JSON.parse(await backgroundCompute('stringify', data)).likes[0].title, 'after');
+  const untrusted = JSON.parse('{"__proto__":{"admin":true},"version":1}');
+  const result = JSON.parse(await backgroundCompute('stringify', untrusted));
+  assert.equal(Object.hasOwn(result, '__proto__'), true);
+  assert.equal({}.admin, undefined);
+  assert.equal(runtimes, 1);
+  delete global.__biuCompute;
 });
 
 test('system previous and next follow the latest queue, including single-repeat and paused playback', async () => {
@@ -2543,6 +2646,10 @@ test('settings default to simple lyrics, apply immediately, persist across resta
   const mount = async () => act(async () => { tree = create(React.createElement(PlayerProvider, null, React.createElement(Probe))); });
   await mount();
   const initialRenders = settingsRenders;
+  assert.ok(initialRenders > 0);
+  assert.equal(tree.root.findAllByType('FlatList').length, 0, 'the fixed form never waits for virtualized batches');
+  assert.ok(tree.root.findAllByType('Text').some(node => node.props.children === 'Biu Player RN'), 'the final settings section is present immediately');
+  assert.ok(touch(tree, '返回'), 'back is available without waiting for settings data');
   const initialSlowRenders = slowRenders;
   const initialProgressRenders = progressRenders;
   for (let i = 1; i <= 8; i++) await act(async () => events.timeUpdate({ currentTime: i / 4 }));
@@ -2550,7 +2657,7 @@ test('settings default to simple lyrics, apply immediately, persist across resta
   assert.equal(progress.position, 2, 'dedicated progress consumers receive the latest playback clock');
   assert.equal(slowRenders, initialSlowRenders, 'playback ticks do not publish the main player context');
   assert.ok(progressRenders > initialProgressRenders, 'the dedicated progress context publishes playback ticks');
-  assert.equal(settingsRenders, initialRenders, '250 ms playback ticks do not rebuild the settings ScrollView');
+  assert.equal(settingsRenders, initialRenders, '250 ms playback ticks do not rebuild the settings list');
   assert.equal(context.quality, 1, 'legacy lossless choice migrates to automatic video quality');
   assert.equal(touch(tree, '自动').props.accessibilityState.checked, true);
   assert.equal(tree.root.findAllByType('Text').some((n) => n.props.children === '在线音质'), false);
@@ -2564,16 +2671,23 @@ test('settings default to simple lyrics, apply immediately, persist across resta
   await click(tree, '1080P');
   assert.equal(context.lyricEffect, 'simple');
   assert.equal(context.recommendMode, 'music');
-  assert.equal(touch(tree, '音乐分区推荐').props.accessibilityState.checked, true);
+  assert.equal(touch(tree, '首页音乐分区推荐').props.accessibilityState.checked, true);
   assert.equal(context.discoveryEnabled, false);
-  assert.equal(tree.root.findAllByProps({ accessibilityLabel: '卡片全部推荐' }).length, 0,
-    'card-feed options stay hidden while the feature is disabled');
+  assert.equal(touch(tree, '发现页全部分区推荐').props.accessibilityState.checked, true, 'discovery range is independently configurable before enabling the page');
   await act(async () => tree.root.findByProps({ accessibilityLabel: '启用卡片发现' }).props.onValueChange(true));
   assert.equal(context.discoveryEnabled, true);
   assert.equal(saved.get('biu.discovery-enabled'), 'true');
   assert.equal(tree.root.findAllByProps({ accessibilityLabel: '卡片全部推荐' }).length, 0);
-  assert.ok(tree.root.findAllByType('Text').some((node) => node.props.children === 'B 站 Web 推荐 → 标签匹配 → 相关视频'));
-  await click(tree, '全部推荐');
+  assert.ok(!tree.root.findAllByType('Text').some((node) => node.props.children === '视频来源'));
+  await click(tree, '发现页音乐分区推荐');
+  assert.equal(context.discoveryRecommendMode, 'music');
+  await click(tree, '发现页全部分区推荐');
+  assert.equal(context.discoveryRecommendMode, 'all');
+  assert.equal(saved.get('biu.discovery-recommend-mode'), '"all"');
+  assert.equal(context.recommendMode, 'music', 'discovery range does not change home range');
+  await click(tree, '发现页音乐分区推荐');
+  await click(tree, '首页全部分区推荐');
+  assert.equal(context.discoveryRecommendMode, 'music', 'changing home range preserves discovery range');
   assert.equal(context.recommendMode, 'all');
   assert.equal(saved.get('biu.recommend-mode'), '"all"');
   assert.equal(touch(tree, '简单').props.accessibilityState.checked, true);
@@ -2586,6 +2700,7 @@ test('settings default to simple lyrics, apply immediately, persist across resta
   assert.equal(context.lyricEffect, 'monet', 'choice survives provider restart');
   assert.equal(context.recommendMode, 'all', 'recommendation choice survives provider restart');
   assert.equal(context.discoveryEnabled, true, 'card discovery survives provider restart');
+  assert.equal(context.discoveryRecommendMode, 'music', 'discovery range survives restart independently of home');
   assert.equal(touch(tree, '莫奈光效').props.accessibilityState.checked, true);
   await click(tree, '简单');
   assert.equal(context.lyricEffect, 'simple');
@@ -2661,6 +2776,7 @@ test('mobile LAN requests allow larger transfers, distinguish timeouts and never
   const timeout=assert.rejects(lanRequest(peer,'123','status'),/连接设备超时/);
   t.mock.timers.tick(3000);await timeout;
   const transfer=lanRequest(peer,'123','sync',{clientId:'phone-test',library:{}});
+  await Promise.resolve(); await Promise.resolve();
   t.mock.timers.tick(5000);assert.equal(options.signal.aborted,false);
   assert.equal(options.credentials,'omit');complete();await transfer;
   peer.addresses.push('192.168.1.3:4000');calls=0;
@@ -2775,14 +2891,28 @@ test('mobile LAN receiver bounds and authenticates fragmented HTTP requests and 
     });
   });
   const headers = `Authorization: Bearer ${token}\r\nX-Biu-Account: 123\r\n`;
+  const finishFeed = load('src/updates/networkGate.js').beginRecommendation();
+  assert.match(await request('GET /v2/status HTTP/1.1\r\n' + headers + '\r\n'), /^HTTP\/1.1 503/);
+  finishFeed();
+  assert.match(await request('GET /v2/status HTTP/1.1\r\n' + headers + '\r\n'), /^HTTP\/1.1 200/);
   const body = JSON.stringify({ clientId: 'phone-sender', library: { version: 1, playlists: [], likes: [{ bvid: 'BVtest', title: '中文标题' }] } });
   const bytes = Buffer.from(body), split = bytes.indexOf(Buffer.from('中文')) + 1;
   const response = await request('POST /v2/sync HTTP/1.1\r\n' + headers + `Content-Length: ${bytes.length}\r\n\r\n`,
     [bytes.subarray(0, split), bytes.subarray(split)]);
   assert.match(response, /^HTTP\/1.1 200/);
   assert.equal(JSON.parse(response.split('\r\n\r\n')[1]).library.likes[0].title, '中文标题');
+  const cover = 'data:image/png;base64,' + 'A'.repeat(8 * 1024 * 1024);
+  const large = Buffer.from(JSON.stringify({ clientId: 'phone-sender', library: {
+    version: 1, likes: [], playlists: [{ id: 'large-cover', title: '大歌单', tracks: [], cover }],
+  } }));
+  const parts = [];
+  for (let offset = 0; offset < large.length; offset += 65536) parts.push(large.subarray(offset, offset + 65536));
+  const largeResponse = await request('POST /v2/sync HTTP/1.1\r\n' + headers + `Content-Length: ${large.length}\r\n\r\n`, parts);
+  assert.match(largeResponse, /^HTTP\/1.1 200/);
+  assert.equal(JSON.parse(largeResponse.split('\r\n\r\n')[1]).library.playlists[0].cover, cover);
+  assert.equal(library.playlists[0].cover, cover);
   assert.match(await request('GET /v2/status HTTP/1.1\r\n' + headers + 'Origin: https://example.com\r\n\r\n'), /^HTTP\/1.1 403/);
-  assert.match(await request('POST /v2/sync HTTP/1.1\r\n' + headers + 'Content-Length: 9000000\r\n\r\n'), /^HTTP\/1.1 413/);
+  assert.match(await request('POST /v2/sync HTTP/1.1\r\n' + headers + 'Content-Length: 9007199254740992\r\n\r\n'), /^HTTP\/1.1 413/);
   assert.match(await request('POST /v2/sync HTTP/1.1\r\n' + headers + 'Transfer-Encoding: chunked\r\n\r\n'), /^HTTP\/1.1 413/);
   assert.match(await request('GET /v2/status HTTP/1.1\r\n' + headers + 'X-Biu-Account: 456\r\n\r\n'), /^HTTP\/1.1 400/);
   await assert.rejects(load('src/store/lanSync.js').lanRequest({ id: 'phone-receiver', token, addresses: ['127.0.0.1:' + port] },
@@ -3139,7 +3269,7 @@ test('mobile recommendation editor saves separate profiles, edits weights and sw
   const load = loader({
     'react-native': { ...rn, Animated: { ...rn.Animated, sequence: (animations) => animations,
       loop: () => ({ start: () => { pulseStarts++; }, stop: () => { pulseStops++; } }) } },
-    'react-native-svg': { SvgXml: (props) => { portraits++; return React.createElement('SvgXml', props); } },
+    'expo-image': { Image: (props) => { portraits++; return React.createElement('PortraitImage', props); } },
     '../renderer/profile-presentation': { ...require('../renderer/profile-presentation'),
       quoteFor: async () => ({ text: '用于检查的主题语录', from: '测试来源', author: '' }) },
     'src/player/PlayerContext': { usePlayer: () => ({ recommendationManager: manager,
@@ -3149,7 +3279,9 @@ test('mobile recommendation editor saves separate profiles, edits weights and sw
   const Card = load('src/components/RecommendationProfileCard.js').default;
   let tree;
   await act(async () => { tree = create(React.createElement(Card)); });
-  assert.equal(tree.root.findAllByType('SvgXml').length, 1);
+  const portrait = tree.root.findByType('PortraitImage');
+  assert.match(Buffer.from(portrait.props.source.uri.split(',')[1], 'base64').toString('utf8'), /<svg[\s>]/);
+  assert.equal(portrait.props.cachePolicy, 'memory-disk');
   const initialPortraits = portraits;
   for (let i = 0; i < 8; i++) await act(async () => tree.update(React.createElement(Card)));
   assert.equal(portraits, initialPortraits, 'unchanged recommendation state cannot repaint the portrait on playback ticks');
@@ -3218,7 +3350,7 @@ test('discovery screen starts swipes on the UI thread, retains failed drops, and
     let preloadClears = 0;
     const localPlaylists = [{ id: 7, title: 'Test folder', tracks: [] }];
     const context = { player: nativePlayer, playing: true, buffering: false, playError: null,
-      current: null, discoveryRecommendMode: 'music', queueSource: 'discovery',
+      current: null, discoveryRecommendMode: 'all', queueSource: 'discovery',
       discoveryRecommendationProfile: profileState,
       discoveryRecommendationManager: { ready: async () => {}, getSnapshot: () => profileState, observeFeed() {},
         async edit(action) {
@@ -3278,6 +3410,7 @@ test('discovery screen starts swipes on the UI thread, retains failed drops, and
       'expo-linear-gradient': { LinearGradient: 'Gradient' },
       'src/screens/DiscoveryWheel': { __esModule: true, default: 'Wheel' },
       'src/components/RemoteImage': { __esModule: true, default: 'CoverImage', optimizedImageUri: (uri) => uri },
+      'src/updates/networkGate': { yieldToInput: async () => {} },
       'src/player/discoveryPreload': {
         preloadDiscoveryQueue: (tracks) => preloadWindows.push(tracks.map((track) => track.bvid)),
         clearDiscoveryPreloads: () => { preloadClears++; },
@@ -3305,6 +3438,7 @@ test('discovery screen starts swipes on the UI thread, retains failed drops, and
       'src/player/PlayerContext': { usePlayer: () => { [, refresh] = React.useState(0); return context; } },
     })('src/screens/DiscoveryScreen.js').default;
     await act(async () => { tree = create(React.createElement(Screen, { navigation: { navigate: (name) => navigation.push(name) } })); });
+    await act(async () => t.mock.timers.tick(32));
     assert.equal(relatedCalls.filter((id) => id === fixtures[0].bvid).length, 1);
     assert.equal(context.queue.filter((item) => item.discoveryOrigin === 'related').length, 6, 'related expansion is capped and synchronized into autoplay');
     assert.equal(new Set(context.queue.map((item) => item.bvid)).size, context.queue.length);
@@ -3460,6 +3594,7 @@ test('discovery screen starts swipes on the UI thread, retains failed drops, and
     assert.equal(tree.root.findAllByType('Wheel').length, 0);
     assert.equal(frameControl.active, false, 'blur stops the wheel frame loop');
     await act(async () => { focused = true; refresh((v) => v + 1); });
+    await act(async () => t.mock.timers.tick(32));
     assert.equal(tree.root.findAllByType('VideoView').length, 1);
     assert.ok(mountedCardTransforms.every((transform) => JSON.stringify(transform) === JSON.stringify(rest)),
       'every new native card starts at rest, including backward navigation');
@@ -3485,6 +3620,7 @@ test('discovery screen starts swipes on the UI thread, retains failed drops, and
     await act(async () => tree.unmount());
     foldersOffline = true;
     await act(async () => { tree = create(React.createElement(Screen, { navigation: {} })); });
+    await act(async () => t.mock.timers.tick(32));
     await act(async () => tree.root.findByProps({ testID: 'discovery-wheel-toggle' }).props.onPress());
     assert.deepEqual(wheel().targets.find((target) => target.id === 99).covers, ['remote1', 'remote2'], 'remount restores folder metadata and covers even when the folder API is offline');
     assert.equal(folderRequests.length, 1, 'persisted fresh covers skip content requests after remount');
@@ -3507,6 +3643,7 @@ test('discovery screen starts swipes on the UI thread, retains failed drops, and
     assert.match(textOf(tree), /已标记不喜欢/);
     await act(async () => tree.unmount());
     await act(async () => { tree = create(React.createElement(Screen, { navigation: {} })); });
+    await act(async () => t.mock.timers.tick(32));
     assert.ok(context.queue.every((item) => item.bvid !== rejected.bvid && !rejectedRelated.includes(item.bvid)), 'new Web pages and remounts cannot reintroduce rejected IDs');
     const anchor = context.current, anchorCard = card(), playsBeforeLeft = revision, savedBeforeLeft = saves.length;
     const left = detector()[0].handlers;
@@ -3619,6 +3756,12 @@ test('discovery source readiness rejects late loads and survives A → B → A d
     assert.equal(player.source.metadata.title, 'A');
     await act(async () => listeners.timeUpdate({ currentTime: 0.25 }));
     assert.deepEqual(context.videoSource, { key: 'A', revision: 3 });
+    assert.equal(context.playing, true);
+    assert.equal(context.buffering, false, 'sourceLoad without sourceChange clears startup even when loading finished before replaceAsync');
+    await act(async () => { player.status = 'loading'; listeners.timeUpdate({ currentTime: 0.5 }); });
+    assert.equal(context.buffering, true, 'a genuine native rebuffer still shows loading even with play intent set');
+    await act(async () => { player.status = 'readyToPlay'; listeners.timeUpdate({ currentTime: 0.75 }); });
+    assert.equal(context.buffering, false);
     await act(async () => listeners.sourceLoad({ videoSource: sources[1] }));
     assert.deepEqual(context.videoSource, { key: 'A', revision: 3 }, 'late B events cannot undo the last selection');
     await act(async () => context.playQueue(tracks, 0, 0, 'discovery'));
@@ -3727,7 +3870,7 @@ test('discovery transfers buffered players without replacing or seeking, isolate
   const { PlayerProvider, usePlayer } = load('src/player/PlayerContext.js');
   function Probe() { context = usePlayer(); return null; }
   const tracks = Array.from({ length: 5 }, (_, i) => ({ bvid: `BVwarm${i}`, title: `Warm ${i}`, cid: i || undefined }));
-  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 140));
   preload.preloadDiscoveryQueue(tracks, 1, ''); await settle();
   assert.equal(decoders.length, 3);
   assert.ok(decoders.every((p) => p.muted && !p.playing && !p.showNowPlayingNotification));
@@ -3843,22 +3986,26 @@ test('discovery API normalizes related videos and tag responses through the auth
   assert.equal(requests[1].searchParams.get('bvid'), 'BVnext');
 });
 
-test('discovery verifies App labels, bounds classification and caches public tags across profile changes', async () => {
+test('discovery verifies App labels, bounds classification and caches public tags across profile changes', { timeout: 5000 }, async () => {
   const R = require('../renderer/recommendation-profile');
   const gates = new Map(), batches = []; let pending = 0, peak = 0;
+  const firstStarted = deferred(), secondStarted = deferred();
   const { filterDiscoveryCandidates } = loader({ 'src/api/bili': { videoTags: async (id) => {
     pending++; peak = Math.max(peak, pending);
     const gate = deferred(); gates.set(id, gate);
+    if (gates.size === 4) firstStarted.resolve();
+    if (gates.size === 6) secondStarted.resolve();
     try { return await gate.promise; } finally { pending--; }
   } } })('src/screens/discoveryFeed.js');
   const candidates = Array.from({ length: 6 }, (_, i) => ({ bvid: `BVtag${i}`, title: `钢琴 ${i}`, tags: ['钢琴'] }));
   const state = R.normalize({ auto: { tags: ['钢琴'] }, profiles: [{ id: 'piano', name: '钢琴', tags: ['钢琴'] }] });
   const result = filterDiscoveryCandidates(candidates, state, (items) => batches.push(items.map((v) => v.bvid)), () => true);
   assert.deepEqual(batches, [], 'App card tags never publish before verification');
+  await firstStarted.promise;
   assert.equal(gates.size, 4);
   gates.get('BVtag0').resolve(['钢琴']); gates.get('BVtag1').resolve(['影视剪辑']);
   gates.get('BVtag2').resolve([]); gates.get('BVtag3').resolve(['钢琴']);
-  await new Promise((resolve) => setImmediate(resolve));
+  await secondStarted.promise;
   assert.equal(gates.size, 6);
   gates.get('BVtag4').resolve(['钢琴']); gates.get('BVtag5').resolve(['游戏']);
   assert.deepEqual((await result).map((v) => v.bvid), ['BVtag0', 'BVtag3', 'BVtag4']);
@@ -3873,12 +4020,13 @@ test('discovery verifies App labels, bounds classification and caches public tag
   assert.deepEqual(raw, candidates, 'only explicit native mode skips filtering');
 });
 
-test('discovery drops late tag batches after a profile reset without starting further requests', async () => {
+test('discovery drops late tag batches after a profile reset without starting further requests', { timeout: 5000 }, async () => {
   const R = require('../renderer/recommendation-profile');
-  const gate = deferred(), batches = []; let current = true, calls = 0;
-  const { filterDiscoveryCandidates } = loader({ 'src/api/bili': { videoTags: async () => { calls++; return gate.promise; } } })('src/screens/discoveryFeed.js');
+  const gate = deferred(), started = deferred(), batches = []; let current = true, calls = 0;
+  const { filterDiscoveryCandidates } = loader({ 'src/api/bili': { videoTags: async () => { calls++; if (calls === 4) started.resolve(); return gate.promise; } } })('src/screens/discoveryFeed.js');
   const result = filterDiscoveryCandidates(Array.from({ length: 8 }, (_, i) => ({ bvid: `BV${i}`, title: '未知' })),
     R.normalize({ auto: { tags: ['钢琴'] } }), (items) => batches.push(items), () => current);
+  await started.promise;
   assert.equal(calls, 4);
   current = false; gate.resolve(['钢琴']);
   assert.deepEqual(await result, []);
@@ -3952,7 +4100,8 @@ test('discovery folders display cover collages and names on their animated front
     'react-native-reanimated': { __esModule: true, default: { View: 'AnimatedView' },
       useAnimatedStyle: (fn) => fn(), useDerivedValue: (fn) => ({ value: fn() }), withTiming: (value) => value,
       useAnimatedReaction: (prepare, react) => { reactToRotation = () => react(prepare(), null); }, runOnJS: (fn) => fn },
-    'react-native-svg': { __esModule: true, default: 'Svg', Defs: 'Defs', LinearGradient: 'Gradient', Path: 'Path', Stop: 'Stop' },
+    '@react-native-masked-view/masked-view': { __esModule: true, default: 'MaskedView' },
+    'react-native-svg': { __esModule: true, default: 'Svg', Defs: 'Defs', LinearGradient: 'Gradient', RadialGradient: 'RadialGradient', Rect: 'Rect', Path: 'Path', Stop: 'Stop' },
     'src/components/RemoteImage': { __esModule: true, default: Cover },
   })('src/screens/DiscoveryWheel.js').default;
   let tree;
@@ -4019,9 +4168,9 @@ test('mobile recommendation cards use Android HD pagination and retain player in
       { goto: 'av', bvid: 'BVnative', param: '1', cover: 'http://i0.hdslb.com/a.jpg', title: 'COS作品',
         args: { up_id: 7, up_name: '作者', tid: 174, tname: '日常' }, player_args: { aid: 1, cid: 2, duration: 18 }, idx: 11 },
       { goto: 'av', bvid: 'BVnative', player_args: { aid: 1 }, idx: 12 },
-      { goto: 'av', param: '170001', player_args: { aid: 170001, cid: 3 }, title: '旧版卡片', idx: 13 },
+      { goto: 'av', param: '170001', can_play: 1, title: '旧版卡片', idx: 13 },
       { goto: 'av', bvid: 'BVad', ad_info: {}, player_args: { aid: 5 }, idx: 14 },
-      { goto: 'live', param: '8', idx: 15 }, { goto: 'av', bvid: 'BVcharge', idx: 16 },
+      { goto: 'live', param: '8', idx: 15 }, { goto: 'av', bvid: 'BVcharge', can_play: 0, idx: 16 },
     ] }; },
     get: async (url) => { metadataCalls.push(url); return { status: 200, body: JSON.stringify({ code: 0,
       data: { aid: 170001, bvid: 'BV17x411w7KC', owner: { name: '旧作者', mid: 8 } } }) }; },
@@ -4037,8 +4186,8 @@ test('mobile recommendation cards use Android HD pagination and retain player in
   assert.deepEqual(result.items.map((v) => v.bvid), ['BVnative', 'BV17x411w7KC']);
   assert.equal(result.items[0].cid, 2); assert.equal(result.items[0].duration, 18);
   assert.equal(result.items[0].tname, '日常'); assert.equal(result.items[0].tid, 174);
-  assert.equal(result.items[0].up, '作者'); assert.equal(result.items[1].up, '旧作者');
-  assert.ok(metadataCalls.every((url) => url.includes('/view?aid=')), 'only missing identifiers use video metadata, never web recommendations');
+  assert.equal(result.items[0].up, '作者'); assert.equal(result.items[1].up, '');
+  assert.equal(metadataCalls.length, 0, 'PiliPlus AV/BV conversion must not issue metadata requests');
 });
 
 
@@ -4349,6 +4498,7 @@ test('discovery queue cache is account/profile scoped, bounded and never extends
   assert.deepEqual(await cache.readDiscoveryQueue('123', profile), [], 'switching to Web does not restore the App queue');
   await cache.writeDiscoveryQueue('123', profile, tracks);
   assert.equal((await cache.readDiscoveryQueue('123', profile)).length, 32);
+  assert.deepEqual(await cache.readDiscoveryQueue('123', profile, 'music'), [], 'all-partition queue cannot leak into music discovery');
   assert.doesNotMatch(values.get('biu.discovery-queue.web@123'), /private-media|private-token/);
   assert.deepEqual(await cache.readDiscoveryQueue('456', profile), []);
   assert.deepEqual(await cache.readDiscoveryQueue('123', { ...profile, enabled: false }), []);
@@ -4390,7 +4540,9 @@ test('discovery folder covers persist across module restarts, stay account scope
 test('discovery builds a 24-card verified buffer and continues beyond empty pages without replacing the active card', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let focused = true, refresh, tree, starts = 0;
-  const pages = [];
+  const pages = [], feedSignals = [], tagSignals = [], observed = [];
+  const navigationListeners = new Map();
+  const navigation = { addListener(name, callback) { navigationListeners.set(name, callback); return () => navigationListeners.delete(name); } };
   let tagsOffline = true, emptyFeed = false;
   let pauseProbe = false, feedGate, tagGate, relatedGate;
   const tagRequests = [];
@@ -4398,7 +4550,7 @@ test('discovery builds a 24-card verified buffer and continues beyond empty page
     profiles: [{ id: 'beauty', name: '美女', tags: ['美女'] }] }), ready: true, revision: 1 };
   const context = { account: { isLogin: false }, likes: [], libraryTracks: [], playing: true, queueSource: 'discovery',
     player: {}, current: null, queue: [], discoveryRecommendationProfile: profile,
-    discoveryRecommendationManager: { ready: async () => {}, getSnapshot: () => profile, observeFeed() {} },
+    discoveryRecommendationManager: { ready: async () => {}, getSnapshot: () => profile, observeFeed: items => observed.push(items) },
     syncDiscoveryQueue(tracks) { context.queue = tracks; }, resume() {},
     playQueue(tracks, index) { starts++; context.queue = tracks; context.current = tracks[index];
       context.videoSource = { key: tracks[index].bvid }; refresh((n) => n + 1); },
@@ -4419,11 +4571,13 @@ test('discovery builds a 24-card verified buffer and continues beyond empty page
     'expo-video': { VideoView: 'VideoView' }, 'expo-linear-gradient': { LinearGradient: 'Gradient' },
     'src/screens/DiscoveryWheel': 'Wheel', 'src/components/RemoteImage': () => null,
     'src/components/BottomSheet': () => null, 'src/components/icons': iconMock,
+    'src/updates/networkGate': { yieldToInput: async () => {} },
     'src/player/discoveryPreload': { clearDiscoveryPreloads() {}, preloadDiscoveryQueue() {} },
     'src/store/playlists': { usePlaylists: () => [] },
     'src/player/PlayerContext': { usePlayer: () => { [, refresh] = React.useState(0); return context; } },
     'src/api/bili': {
-      personalizedRecommendations: async (cursor, limit) => {
+      personalizedRecommendations: async (cursor, limit, options) => {
+        feedSignals.push(options.signal);
         assert.equal(limit, 30, 'discovery requests full Web pages');
         const page = Number(cursor || 0); pages.push(page);
         if (feedGate) await feedGate.promise;
@@ -4434,7 +4588,8 @@ test('discovery builds a 24-card verified buffer and continues beyond empty page
           { bvid: `BVmovie${page}`, title: '影视片段', tname: '影视剪辑', tags: ['美女'] },
         ];
       },
-      videoTags: async (id) => {
+      videoTags: async (id, options) => {
+        tagSignals.push(options.signal);
         tagRequests.push(id);
         if (tagGate) await tagGate.promise;
         if (tagsOffline) throw new Error('HTTP 429');
@@ -4446,13 +4601,16 @@ test('discovery builds a 24-card verified buffer and continues beyond empty page
       },
     },
   })('src/screens/DiscoveryScreen.js').default;
-  await act(async () => { tree = create(React.createElement(Screen, { navigation: {} })); });
+    await act(async () => { tree = create(React.createElement(Screen, { navigation })); });
+    await act(async () => t.mock.timers.tick(32));
   assert.deepEqual(pages, [0]); assert.equal(starts, 0);
   assert.match(JSON.stringify(tree.toJSON()), /视频信息核验失败.*HTTP 429/);
   await act(async () => t.mock.timers.tick(60000));
   assert.deepEqual(pages, [0], 'metadata failure stops the refill spinner and automatic requests');
   tagsOffline = false;
   await click(tree, '重新获取推荐');
+  assert.equal(observed.length, 1, 'only one profile write for a multi-page refill');
+  assert.equal(observed[0].length, 12, 'rejected candidates never trigger profile writes');
   const initial = context.current.bvid;
   assert.equal(context.queue.length, 12); assert.deepEqual(pages, [0, 1, 2, 3]);
   assert.equal(starts, 1, 'the first batch plays before the target buffer is filled');
@@ -4468,6 +4626,7 @@ test('discovery builds a 24-card verified buffer and continues beyond empty page
   await act(async () => t.mock.timers.tick(10000));
   assert.equal(pages.length, 4, 'inactive discovery stops refill timers');
   await act(async () => { focused = true; refresh((n) => n + 1); });
+    await act(async () => t.mock.timers.tick(32));
   await act(async () => t.mock.timers.tick(1500));
   assert.equal(pages.length, 8); assert.equal(context.queue.length, 12);
   await act(async () => t.mock.timers.tick(3000));
@@ -4483,7 +4642,7 @@ test('discovery builds a 24-card verified buffer and continues beyond empty page
   await act(async () => tree.unmount());
 
   emptyFeed = true; pages.length = 0; context.current = null; context.queue = []; context.videoSource = null;
-  await act(async () => { tree = create(React.createElement(Screen, { navigation: {} })); });
+  await act(async () => { tree = create(React.createElement(Screen, { navigation })); });
   for (const delay of [3000, 6000, 12000]) await act(async () => t.mock.timers.tick(delay));
   assert.equal(pages.length, 16);
   assert.match(JSON.stringify(tree.toJSON()), /已检查 16 条推荐，最近几批未命中画像标签/);
@@ -4497,27 +4656,32 @@ test('discovery builds a 24-card verified buffer and continues beyond empty page
   emptyFeed = false; pauseProbe = true; focused = false;
   pages.length = 0; tagRequests.length = 0; context.current = null; context.queue = []; context.videoSource = null;
   feedGate = deferred(); relatedGate = deferred();
-  await act(async () => { tree = create(React.createElement(Screen, { navigation: {} })); });
+  await act(async () => { tree = create(React.createElement(Screen, { navigation })); });
   assert.equal(pages.length, 0, 'an inactive mount does not start the discovery crawl');
   await act(async () => { focused = true; refresh((n) => n + 1); });
+    await act(async () => t.mock.timers.tick(32));
   assert.deepEqual(pages, [0]);
-  await act(async () => { focused = false; refresh((n) => n + 1); });
-  await act(async () => { feedGate.resolve(); });
-  assert.equal(tagRequests.length, 0, 'a late feed response cannot start tag requests in another tab');
+  await act(async () => { focused = false; navigationListeners.get('blur')(); assert.equal(feedSignals.at(-1).aborted, false); t.mock.timers.tick(0); assert.equal(feedSignals.at(-1).aborted, true); refresh((n) => n + 1); });
+  const abortedFeed = feedGate;
+  assert.equal(tagRequests.length, 0);
   assert.equal(context.queue.length, 0);
   feedGate = null; tagGate = deferred();
   await act(async () => { focused = true; refresh((n) => n + 1); });
+    await act(async () => t.mock.timers.tick(32));
   await act(async () => t.mock.timers.tick(0));
-  assert.deepEqual(pages, [0], 'returning consumes the retained page instead of requesting it again');
+  assert.deepEqual(pages, [0, 0], 'an aborted page is retried without waiting for its old transport');
   assert.equal(tagRequests.length, 4);
-  await act(async () => { focused = false; refresh((n) => n + 1); });
+  await act(async () => abortedFeed.resolve());
+  assert.equal(tagRequests.length, 4, 'the late old response cannot start more checks after returning');
+  await act(async () => { focused = false; navigationListeners.get('blur')(); t.mock.timers.tick(0); assert.equal(tagSignals.at(-1).aborted, true); refresh((n) => n + 1); });
   await act(async () => { tagGate.resolve(); });
   assert.equal(tagRequests.length, 4, 'blur finishes only the four in-flight tag requests, with no following batches');
   assert.equal(context.queue.length, 0, 'late tag results cannot update the global playback queue');
   tagGate = null;
   await act(async () => { focused = true; refresh((n) => n + 1); });
+    await act(async () => t.mock.timers.tick(32));
   await act(async () => t.mock.timers.tick(0));
-  assert.deepEqual(pages, [0, 1]);
+  assert.deepEqual(pages, [0, 0, 1]);
   assert.equal(context.queue.length, 24, 'paused candidate checks resume without losing the page');
   assert.equal(new Set(context.queue.map((item) => item.bvid)).size, 24);
   assert.equal(context.queue.filter((item) => item.bvid.startsWith('BVpaused0')).length, 12);
@@ -4530,6 +4694,7 @@ test('discovery builds a 24-card verified buffer and continues beyond empty page
   assert.equal(context.queue.length, 24, 'related tag results also stop publishing after blur');
   tagGate = null;
   await act(async () => { focused = true; refresh((n) => n + 1); });
+    await act(async () => t.mock.timers.tick(32));
   assert.equal(context.queue.filter((item) => item.bvid.startsWith('BVpausedRelated')).length, 4,
     'paused related checks remain eligible on return instead of being lost in the seen set');
   await act(async () => tree.unmount());
@@ -4574,6 +4739,8 @@ test('discovery abandons a stalled speculative decoder and uses its URL for norm
   })('src/player/discoveryPreload.js');
   const track = { bvid: 'BVblocked', cid: 1 };
   cache.preloadDiscoveryQueue([track], 1, '123');
+  await new Promise((resolve) => setImmediate(resolve));
+  t.mock.timers.tick(32);
   await new Promise((resolve) => setImmediate(resolve));
   const pending = cache.takeDiscoveryPreload(track, 1, '123');
   t.mock.timers.tick(751);
@@ -4838,4 +5005,801 @@ test('likes, library and playlist rows expose swipe deletion and safe long-press
       if (source === 'library') assert.equal(context.likes.length, 0);
     } finally { await act(async () => tree.unmount()); }
   }
+});
+
+
+test('home always uses signed Web recommendations and never calls App auth, including empty or failed pages', async () => {
+  let appCalls = 0, mode = 'ok'; const calls = [], batches = [], loaded = [];
+  const api = loader({ './client': {
+    appGet: async () => { appCalls++; throw Error('App must not be called'); },
+    get: async (url, opts) => {
+      calls.push([url, opts]);
+      assert.ok(url.includes('/x/web-interface/wbi/index/top/feed/rcmd'));
+      if (mode === 'fail') return { status: 412, body: '' };
+      return { status: 200, body: JSON.stringify({ code: 0, data: { item: mode === 'empty' ? [] : [
+        { goto: 'av', bvid: 'BVmusic', owner: {}, tid: 3 },
+        { goto: 'av', bvid: 'BVgame', owner: {}, tid: 17 },
+      ] } }) };
+    },
+  } })('src/api/bili.js');
+  const result = await api.homeRecommendations(7, 20, { music: true, onBatch: (items) => batches.push(...items), onPageLoaded: () => loaded.push(7) });
+  assert.deepEqual(result.map((item) => item.bvid), ['BVmusic']);
+  assert.equal(batches.length, 1); assert.deepEqual(loaded, [7]);
+  assert.equal(new URL(calls[0][0]).searchParams.get('fresh_idx'), '7');
+  assert.equal(calls[0][1].wbi, true);
+  assert.equal((await api.homeRecommendations(8)).length, 2);
+  mode = 'empty'; assert.deepEqual(await api.homeRecommendations(9), []);
+  mode = 'fail'; await assert.rejects(api.homeRecommendations(10), /HTTP 412/);
+  const controller = new AbortController(); controller.abort();
+  await assert.rejects(api.homeRecommendations(11, 20, { signal: controller.signal }), /取消/);
+  assert.equal(calls.length, 4, 'failed pages do not retry or switch source; cancelled pages issue no request');
+  assert.equal(appCalls, 0);
+});
+
+test('request deadlines include storage and shared WBI preparation; expired callers cannot send late requests', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const original = global.fetch; t.after(() => { global.fetch = original; });
+  let calls = [];
+  global.fetch = async (url) => { calls.push(url); return { text: async () => '{}', headers: { get: () => null } }; };
+  const storage = deferred();
+  const blocked = loader({ '@react-native-async-storage/async-storage': { getItem: () => storage.promise, setItem: async () => {} } })('src/api/client.js');
+  const pending = blocked.get('https://api.bilibili.com/late', { timeout: 50 });
+  t.mock.timers.tick(50); assert.equal((await pending).status, -1);
+  storage.resolve(JSON.stringify({ buvid3: 'test' }));
+  await new Promise((resolve) => setImmediate(resolve)); assert.equal(calls.length, 0);
+  const nav = deferred(); calls = [];
+  global.fetch = async (url) => { calls.push(url); return url.includes('/nav') ? nav.promise : { status: 200, text: async () => '{}', headers: { get: () => null } }; };
+  const client = loader({ '@react-native-async-storage/async-storage': {
+    getItem: async () => JSON.stringify({ buvid3: 'test' }), setItem: async () => {},
+  } })('src/api/client.js');
+  const first = client.get('https://api.bilibili.com/first', { wbi: true, timeout: 50 });
+  const second = client.get('https://api.bilibili.com/second', { wbi: true, timeout: 50 });
+  await new Promise((resolve) => setImmediate(resolve)); assert.equal(calls.length, 1, 'WBI nav is shared');
+  t.mock.timers.tick(50); assert.equal((await first).status, -1); assert.equal((await second).status, -1);
+  nav.resolve({ status: 200, text: async () => JSON.stringify({ data: { wbi_img: { img_url: 'https://x/' + 'a'.repeat(32) + '.png', sub_url: 'https://x/' + 'b'.repeat(32) + '.png' } } }), headers: { get: () => null } });
+  await new Promise((resolve) => setImmediate(resolve)); assert.equal(calls.length, 1);
+  assert.equal((await client.get('https://api.bilibili.com/fresh', { wbi: true })).status, 200);
+  assert.equal(calls.length, 2);
+});
+
+test('home cancels superseded pages, times out stalled loads and retains cards while background sync waits', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const stale = deferred(), stalled = deferred(); let phase = 'initial', staleSignal;
+  const cards = (name) => Array.from({ length: 15 }, (_, i) => ({ bvid: name + i, title: name }));
+  const load = loader({
+    'react-native': { ...rn, RefreshControl: 'RefreshControl' }, 'react-native-safe-area-context': safeArea,
+    'src/api/bili': { homeRecommendations: (_page, _count, options) => {
+      if (phase === 'stale') { staleSignal = options.signal; return stale.promise; }
+      if (phase === 'stalled') return stalled.promise;
+      return Promise.resolve(cards(phase === 'initial' ? 'old' : 'new'));
+    } },
+    'src/player/PlayerContext': { usePlayer: () => ({ likes: [], account: { isLogin: true, mid: 123 }, recommendMode: 'all', playQueue() {} }) },
+    'src/components/TrackCard': { default: 'TrackCard', __esModule: true },
+    'src/components/HomeBanner': { default: 'HomeBanner', __esModule: true },
+    'src/screens/DailyScreen': { DailyCard: 'DailyCard' }, 'src/components/icons': iconMock,
+  });
+  const gate = load('src/updates/networkGate.js'), Home = load('src/screens/HomeScreen.js').default;
+  let tree; await act(async () => { tree = create(React.createElement(Home, { navigation: {} })); });
+  t.after(async () => { await act(async () => tree.unmount()); });
+  const refresh = () => tree.root.findByType('FlatList').props.refreshControl.props.onRefresh();
+  const visible = () => tree.root.findAllByType('TrackCard').map((v) => v.props.track.bvid);
+  const before = visible(); phase = 'stale'; await act(async () => refresh());
+  const cancelledSync = new AbortController();
+  const waiting = gate.waitForRecommendationIdle(cancelledSync.signal);
+  cancelledSync.abort(); await assert.rejects(waiting, { name: 'AbortError' });
+  let synced = false; const sync = gate.waitForRecommendationIdle().then(() => { synced = true; });
+  assert.equal(synced, false); assert.deepEqual(visible(), before);
+  phase = 'stalled'; await act(async () => refresh()); assert.ok(staleSignal.aborted);
+  await act(async () => stale.resolve(cards('stale'))); assert.deepEqual(visible(), before);
+  await act(async () => t.mock.timers.tick(18000));
+  await sync; assert.ok(synced); assert.equal(gate.isRecommendationBusy(), false);
+  assert.deepEqual(visible(), before); assert.ok(tree.root.findAllByType('Text').some((node) => String(node.props.children).includes('首页推荐请求超时')));
+  phase = 'new'; await act(async () => refresh()); assert.ok(visible().every((id) => id.startsWith('new')));
+  await act(async () => stalled.resolve(cards('late'))); assert.ok(visible().every((id) => id.startsWith('new')));
+});
+
+test('home streams Web music matches immediately and fills fifteen across pages despite metadata failures', async (t) => {
+  const next = deferred(), pages = []; let detailCalls = 0;
+  const cards = (page) => Array.from({ length: 20 }, (_, i) => ({
+    goto: 'av', bvid: `BVweb${page}-${i}`, owner: {}, title: '推荐',
+    tid: i < 3 ? 3 : 17, tname: i < 3 ? '音乐' : '游戏',
+  }));
+  const api = loader({ './client': {
+    appGet: async () => { throw Error('App recommendations must not be used'); },
+    get: async (url) => {
+      if (url.includes('/feed/rcmd')) {
+        const idx = Number(new URL(url).searchParams.get('fresh_idx'));
+        pages.push(idx);
+        if (idx >= 1) await next.promise;
+        const items = cards(idx);
+        const unknown = (item) => { delete item.tid; delete item.tname; };
+        if (idx === 2) items.slice(3, 8).forEach(unknown);
+        if (idx === 3) items.forEach(unknown);
+        return { status: 200, body: JSON.stringify({ code: 0, data: { item: items } }) };
+      }
+      assert.ok(url.includes('/view?'));
+      detailCalls++; throw Error('HTTP 412');
+    },
+  } })('src/api/bili.js');
+  const load = loader({
+    'react-native': { ...rn, RefreshControl: 'RefreshControl' }, 'react-native-safe-area-context': safeArea,
+    'src/api/bili': api,
+    'src/player/PlayerContext': { usePlayer: () => ({ likes: [], account: { isLogin: true, mid: 123 }, recommendMode: 'music', playQueue() {} }) },
+    'src/components/TrackCard': { default: 'TrackCard', __esModule: true },
+    'src/components/HomeBanner': { default: 'HomeBanner', __esModule: true },
+    'src/screens/DailyScreen': { DailyCard: 'DailyCard' }, 'src/components/icons': iconMock,
+  });
+  const Home = load('src/screens/HomeScreen.js').default;
+  let tree; await act(async () => { tree = create(React.createElement(Home, { navigation: {} })); });
+  t.after(async () => { await act(async () => tree.unmount()); });
+  const visible = () => [...tree.root.findByType('HomeBanner').props.tracks,
+    ...tree.root.findAllByType('TrackCard').map((node) => node.props.track)];
+  assert.equal(visible().length, 3, 'first three matches display while the second page is pending');
+  assert.ok(load('src/updates/networkGate.js').isRecommendationBusy());
+  await act(async () => next.resolve());
+  assert.ok(pages.includes(5), 'metadata failures advance past the consumed page');
+  assert.deepEqual(pages, Array.from({ length: pages.length }, (_, i) => i), 'concurrent pages reserve distinct increasing cursors');
+  assert.ok(pages.length <= 8, 'at most two additional pages may already be in flight when the target arrives');
+  assert.equal(visible().length, 15);
+  assert.equal(new Set(visible().map((item) => item.bvid)).size, 15);
+  assert.ok(visible().every((item) => item.tid === 3), 'music filtering remains strict');
+  assert.equal(detailCalls, 2, 'each concurrent home page caps details at two; confirmed music skips metadata entirely');
+  assert.equal(load('src/updates/networkGate.js').isRecommendationBusy(), false);
+  assert.ok(!tree.root.findAllByType('Text').some((node) => /412|不足/.test(String(node.props.children))));
+});
+
+test('home bounds concurrent fill to three and retains every in-flight result beyond fifteen', async (t) => {
+  const pending = new Map(), signals = new Map(), requested = []; let active = 0, peak = 0;
+  const cards = (prefix, count) => Array.from({ length: count }, (_, i) => ({ bvid: prefix + i, tid: 3 }));
+  const load = loader({
+    'react-native': { ...rn, RefreshControl: 'RefreshControl' }, 'react-native-safe-area-context': safeArea,
+    'src/api/bili': { homeRecommendations: (page, _limit, { signal }) => {
+      requested.push(page); signals.set(page, signal);
+      if (page === 0) return Promise.resolve(cards('first', 3));
+      active++; peak = Math.max(peak, active);
+      let ended = false;
+      const end = () => { if (!ended) { ended = true; active--; } };
+      signal.addEventListener('abort', end, { once: true });
+      const gate = deferred(); pending.set(page, gate);
+      return gate.promise.finally(end); // Deliberately ignores abort to test the coordinator's cancellation race.
+    } },
+    'src/player/PlayerContext': { usePlayer: () => ({ likes: [], account: { isLogin: true, mid: 123 }, recommendMode: 'music', playQueue() {} }) },
+    'src/components/TrackCard': { default: 'TrackCard', __esModule: true },
+    'src/components/HomeBanner': { default: 'HomeBanner', __esModule: true },
+    'src/screens/DailyScreen': { DailyCard: 'DailyCard' }, 'src/components/icons': iconMock,
+  });
+  const Home = load('src/screens/HomeScreen.js').default;
+  let tree; await act(async () => { tree = create(React.createElement(Home, { navigation: {} })); });
+  t.after(async () => { await act(async () => tree.unmount()); });
+  const visible = () => [...tree.root.findByType('HomeBanner').props.tracks,
+    ...tree.root.findAllByType('TrackCard').map((node) => node.props.track)].map((item) => item.bvid);
+  assert.deepEqual(requested, [0, 1, 2, 3]); assert.equal(active, 3);
+  await act(async () => pending.get(2).resolve([...cards('first', 3), ...cards('fast', 6)]));
+  assert.equal(visible().length, 9, 'duplicate cards do not count towards the target');
+  assert.ok(visible().includes('fast0'), 'page two renders while page one is still blocked');
+  assert.equal(active, 3, 'the free slot begins another page');
+  await act(async () => pending.get(3).resolve(cards('last', 6)));
+  assert.equal(visible().length, 15); assert.equal(peak, 3); assert.equal(active, 2);
+  assert.equal(signals.get(1).aborted, false); assert.equal(signals.get(4).aborted, false);
+  assert.equal(load('src/updates/networkGate.js').isRecommendationBusy(), true);
+  const complete = visible();
+  await act(async () => { pending.get(1).resolve(cards('late', 20)); pending.get(4).resolve(cards('late4', 20)); });
+  assert.equal(visible().length, 55, 'all in-flight results append even after reaching fifteen');
+  assert.ok(complete.every((id) => visible().includes(id)));
+  assert.equal(active, 0);
+  assert.equal(load('src/updates/networkGate.js').isRecommendationBusy(), false);
+});
+
+test('home related API keeps Web cancellation and independently verifies music rather than inheriting the seed partition', async () => {
+  let raw = [
+    { bvid: 'seed', tid: 3 }, { bvid: 'music', tid: 3 }, { bvid: 'music', tid: 3 },
+    { bvid: 'game', tid: 17 }, { bvid: 'unknown' },
+  ];
+  const calls = [], batches = [], signal = new AbortController().signal;
+  const api = loader({ './client': {
+    get: async (url, opts) => {
+      calls.push([url, opts]);
+      const data = url.includes('/archive/related') ? raw
+        : { tid: new URL(url).searchParams.get('bvid') === 'verified' ? 3 : 17 };
+      return { status: 200, body: JSON.stringify({ code: 0, data }) };
+    },
+  } })('src/api/bili.js');
+  const result = await api.homeRelatedRecommendations('seed', { music: true, signal, onBatch: (items) => batches.push(...items) });
+  assert.deepEqual(result.map((item) => item.bvid), ['music']);
+  assert.equal(calls.length, 1); assert.equal(calls[0][1].signal, signal); assert.equal(batches.length, 1);
+  raw = [{ bvid: 'verified' }, { bvid: 'not-music' }];
+  assert.deepEqual((await api.homeRelatedRecommendations('seed', { music: true })).map((item) => item.bvid), ['verified']);
+  assert.equal(calls.length, 4);
+  const cancelled = new AbortController(); cancelled.abort();
+  await assert.rejects(api.homeRelatedRecommendations('seed', { signal: cancelled.signal }), /取消/);
+  assert.equal(calls.length, 4);
+});
+
+test('home starts three Web pages immediately, streams related videos concurrently and keeps extra results on every load', async (t) => {
+  const feeds = new Map(), related = new Map(), pages = [], seeds = [], signals = [];
+  const cards = (prefix, count) => Array.from({ length: count }, (_, i) => ({ bvid: prefix + i, tid: 3 }));
+  const initial = cards('seed', 3);
+  const load = loader({
+    'react-native': { ...rn, RefreshControl: 'RefreshControl' }, 'react-native-safe-area-context': safeArea,
+    'src/api/bili': {
+      homeRecommendations: (page, count, options) => {
+        pages.push(page); signals.push(options.signal); assert.equal(count, 30);
+        if (page >= 3) return Promise.resolve(cards('page' + page + '-', 10));
+        const gate = deferred(); feeds.set(page, gate);
+        if (page === 0) options.onBatch(initial);
+        return gate.promise;
+      },
+      homeRelatedRecommendations: (bvid, options) => {
+        seeds.push(bvid); signals.push(options.signal); assert.equal(options.music, true);
+        if (seeds.length > 2) return seeds.length === 3 ? Promise.reject(Error('related offline')) : Promise.resolve(initial);
+        const gate = deferred(); related.set(bvid, gate); return gate.promise;
+      },
+    },
+    'src/player/PlayerContext': { usePlayer: () => ({ likes: [], account: { isLogin: true, mid: 123 }, recommendMode: 'music', playQueue() {} }) },
+    'src/components/TrackCard': { default: 'TrackCard', __esModule: true },
+    'src/components/HomeBanner': { default: 'HomeBanner', __esModule: true },
+    'src/screens/DailyScreen': { DailyCard: 'DailyCard' }, 'src/components/icons': iconMock,
+  });
+  const Home = load('src/screens/HomeScreen.js').default;
+  let tree; await act(async () => { tree = create(React.createElement(Home, { navigation: {} })); });
+  t.after(async () => { await act(async () => tree.unmount()); });
+  const visible = () => [...tree.root.findByType('HomeBanner').props.tracks,
+    ...tree.root.findAllByType('TrackCard').map((node) => node.props.track)].map((item) => item.bvid);
+  assert.deepEqual(pages, [0, 1, 2]); assert.deepEqual(seeds, ['seed0', 'seed1']);
+  assert.equal(visible().length, 3);
+  await act(async () => related.get('seed0').resolve([...initial, ...cards('related', 12)]));
+  assert.equal(visible().length, 15, 'related results display before any recommendation page completes');
+  assert.ok(signals.every((signal) => !signal.aborted), 'fifteen is not a cancellation threshold');
+  await act(async () => {
+    feeds.get(0).resolve(initial);
+    feeds.get(1).resolve(cards('feed1-', 6));
+    feeds.get(2).resolve([...cards('feed2-', 5), { bvid: 'related0', tid: 3 }]);
+    related.get('seed1').resolve([...cards('more-related', 4), { bvid: 'feed1-0', tid: 3 }]);
+  });
+  assert.equal(visible().length, 30); assert.equal(new Set(visible()).size, 30);
+  assert.equal(seeds.length, 2, 'related results never recursively expand');
+  assert.equal(load('src/updates/networkGate.js').isRecommendationBusy(), false);
+  await act(async () => {
+    const list = tree.root.findByType('FlatList'); list.props.onScrollBeginDrag(); list.props.onEndReached();
+  });
+  assert.deepEqual(pages, [0, 1, 2, 3, 4, 5]); assert.equal(seeds.length, 4);
+  assert.equal(visible().length, 60, 'load-more also gathers three pages and retains all new results');
+  assert.ok(!tree.root.findAllByType('Text').some((node) => String(node.props.children).includes('related offline')));
+});
+
+test('large account storage migrates CursorWindow rows durably and isolates iOS/Android account and profile buckets', async () => {
+  const { createLargeStorage } = loader()('src/store/largeStorageCore.js');
+  const key = 'biu.lan-baseline@123:phone-peer';
+  const huge = JSON.stringify({ cover: '中文😀'.repeat(400000) });
+  const legacyValues = new Map([[key, huge]]), values = new Map(); let fail = true, recovered = 0;
+  const legacy = { getItem: async (key) => {
+    const value = legacyValues.get(key) ?? null;
+    if (value && value.length > 100000) assert.fail('Android migration must bypass oversized CursorWindow reads entirely');
+    return value;
+  }, setItem: async (key,value) => legacyValues.set(key,value), removeItem: async (key) => legacyValues.delete(key) };
+  const storage = createLargeStorage({ legacy, readLegacyLarge: async (key) => { recovered++; return legacyValues.get(key) ?? null; },
+    files: { read: async (key) => values.get(key) ?? null,
+      write: async (key,value) => { if (fail) throw Error('disk full'); values.set(key,value); }, remove: async (key) => values.delete(key) } });
+  await assert.rejects(storage.getItem(key), /disk full/); assert.equal(legacyValues.get(key),huge); assert.equal(values.size,0);
+  fail = false; assert.equal(await storage.getItem(key),huge); assert.equal(legacyValues.has(key),false); assert.equal(recovered,2);
+  assert.equal(await storage.getItem(key),huge); assert.equal(recovered,2, 'subsequent reads never touch the oversized SQLite row');
+  for (const bucket of ['biu.likes@123','biu.library@123','biu.playlists@123','biu.recommendation-profiles@123','biu.discovery-recommendation-profiles@123']) {
+    await storage.setItem(bucket,bucket); assert.equal(await storage.getItem(bucket),bucket);
+    assert.equal(await storage.getItem(bucket.replace('@123','@456')),null);
+  }
+  await storage.setItem('biu.quality','80'); assert.equal(legacyValues.get('biu.quality'),'80');
+  fail = true; await assert.rejects(storage.setItem(key,'new'), /disk full/); assert.equal(await storage.getItem(key),huge);
+});
+
+test('cold account adoption checks existence without reading large target values and still copies missing guest buckets', async () => {
+  const { createLargeStorage } = loader()('src/store/largeStorageCore.js');
+  for (const fileBacked of [true, false]) {
+    const reads = [], values = new Map([['biu.likes', '["guest"]'], ['biu.likes@123', '["account"]'],
+      ['biu.library', '["guest-library"]']]);
+    const legacyValues = fileBacked ? new Map([['biu.history@123', '["old-history"]']]) : values;
+    const legacy = { getAllKeys: async () => [...legacyValues.keys()],
+      getItem: async key => { reads.push(key); return legacyValues.get(key) ?? null; },
+      setItem: async (key, value) => legacyValues.set(key, value), removeItem: async key => legacyValues.delete(key) };
+    const store = createLargeStorage({ legacy, files: fileBacked ? {
+      exists: async key => values.has(key),
+      read: async key => { reads.push(key); return values.get(key) ?? null; },
+      write: async (key, value) => values.set(key, value), remove: async key => values.delete(key),
+    } : null });
+    const { adoptGuestLibrary } = loader({ 'src/store/largeStorage': store })('src/store/accountStorage.js');
+    await adoptGuestLibrary('123');
+    assert.ok(!reads.includes('biu.likes@123'), 'existing account values are never fetched for migration');
+    assert.ok(!reads.includes('biu.history@123'), 'legacy existence also bypasses CursorWindow value reads');
+    assert.equal(values.get('biu.likes@123'), '["account"]');
+    assert.equal(values.get('biu.library@123'), '["guest-library"]');
+    assert.equal(values.get('biu.library'), '["guest-library"]');
+  }
+});
+
+test('large storage serializes legacy migration against new writes without resurrecting stale state', async () => {
+  const { createLargeStorage } = loader()('src/store/largeStorageCore.js'), old = deferred();
+  let value = null;
+  const storage = createLargeStorage({ legacy: { getItem: () => old.promise, removeItem: async () => {} },
+    files: { read: async () => value, write: async (_,next) => { value = next; }, remove: async () => { value = null; } } });
+  const migrating = storage.getItem('biu.library@123'), updating = storage.setItem('biu.library@123','new');
+  old.resolve('old'); assert.equal(await migrating,'old'); await updating; assert.equal(value,'new');
+  await storage.removeItem('biu.library@123'); assert.equal(value,null);
+});
+
+test('discovery applies the selected partition to native, tagged and focused related recommendations', async () => {
+  const calls = [];
+  const load = loader({ 'src/api/client': { get: async (url) => {
+    const u = new URL(url), id = u.searchParams.get('bvid'); calls.push(id);
+    const data = u.pathname.endsWith('/tag') ? [{ tag_name: id === 'wrong-tags' ? '游戏' : '钢琴' }]
+      : { tid: id === 'unknown-music' ? 3 : 17, tname: id === 'unknown-music' ? '音乐' : '游戏' };
+    return { status: 200, body: JSON.stringify({ code: 0, data }) };
+  } } });
+  const {filterDiscoveryCandidates, buildRelatedRun} = load('src/screens/discoveryFeed.js');
+  const candidates = [{bvid:'music',tid:3},{bvid:'film',tid:181},{bvid:'unknown-music'},{bvid:'unknown-game'},{bvid:'wrong-tags',tid:3}];
+  const R = require('../renderer/recommendation-profile'), snapshot = R.normalize({auto:{tags:['钢琴']}});
+  const ids = (items) => items.map(x=>x.bvid);
+  assert.deepEqual(ids(await filterDiscoveryCandidates(candidates,snapshot,()=>{},()=>true,'music')),['music','unknown-music']);
+  assert.ok(!calls.includes('film'), 'known non-music partitions do not fetch tags');
+  assert.deepEqual(ids(await filterDiscoveryCandidates(candidates,{...snapshot,enabled:false},()=>{},()=>true,'music')),['music','wrong-tags','unknown-music']);
+  assert.equal((await filterDiscoveryCandidates(candidates,{...snapshot,enabled:false},()=>{},()=>true,'all')).length,5);
+  assert.ok(ids(await filterDiscoveryCandidates(candidates,snapshot,()=>{},()=>true,'all')).includes('film'),'all partitions still obey verified profile tags');
+  const related = await buildRelatedRun({bvid:'seed'},snapshot,async()=>candidates,()=>false,()=>true,'music');
+  assert.deepEqual(ids(related),['music','unknown-music']);
+});
+
+test('home cancels hidden startup work and resumes without keeping settings navigation busy', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const events={}, requests=[];
+  const load=loader({
+    'react-native':{...rn,RefreshControl:'RefreshControl'},'react-native-safe-area-context':safeArea,
+    'src/api/bili':{homeRecommendations:(page,limit,options)=>{const gate=deferred();requests.push({page,gate,...options});return gate.promise;}},
+    'src/player/PlayerContext':{usePlayer:()=>({likes:[],account:{isLogin:true,mid:123},recommendMode:'all',playQueue(){}})},
+    'src/components/TrackCard':{default:'TrackCard',__esModule:true},
+    'src/components/HomeBanner':{default:'HomeBanner',__esModule:true},
+    'src/screens/DailyScreen':{DailyCard:'DailyCard'},'src/components/icons':iconMock,
+  });
+  const Home=load('src/screens/HomeScreen.js').default;
+  const navigation={addListener:(name,fn)=>{events[name]=fn;return()=>{delete events[name];};}};
+  let tree;await act(async()=>{tree=create(React.createElement(Home,{navigation}));});
+  t.after(async()=>{await act(async()=>tree.unmount());});
+  assert.equal(requests.length,3);
+  await act(async()=>events.blur());
+  assert.ok(requests.every(x=>!x.signal.aborted), 'blur invalidates results before native cancellation fan-out');
+  await act(async()=>t.mock.timers.tick(0));
+  assert.ok(requests.every(x=>x.signal.aborted));
+  assert.equal(load('src/updates/networkGate.js').isRecommendationBusy(),false);
+  await act(async()=>requests.forEach(x=>x.gate.resolve([{bvid:'stale'}])));
+  assert.equal(tree.root.findAllByType('TrackCard').length,0,'late results cannot rebuild a hidden homepage');
+  await act(async()=>events.focus());
+  assert.equal(requests.length,3,'focus does not start network work inside navigation dispatch');
+  await act(async()=>t.mock.timers.tick(32));
+  assert.equal(requests.length,6,'returning resumes the pending feed');
+});
+
+test('tab bar selection follows navigator state after return, and the first press targets the current tab navigator', async () => {
+  const actions=[], events=[];
+  const mocks={
+    'react-native':rn,'react-native-safe-area-context':safeArea,
+    '@react-navigation/native':{DefaultTheme:{colors:{}},TabActions:{jumpTo:name=>({type:'JUMP_TO',payload:{name}})}},
+    '@react-navigation/bottom-tabs':{createBottomTabNavigator:()=>({})},
+    '@react-navigation/native-stack':{createNativeStackNavigator:()=>({})},
+    'react-native-gesture-handler':{GestureHandlerRootView:'Root'},
+    'expo-status-bar':{StatusBar:'StatusBar'},expo:{isRunningInExpoGo:()=>true},
+    'expo-splash-screen':{preventAutoHideAsync:async()=>{}},
+    'expo-blur':{BlurView:'BlurView',BlurTargetView:'BlurTargetView'},
+    'expo-linear-gradient':{LinearGradient:'Gradient'},'react-native-svg':{},
+    'src/player/PlayerContext':{},'src/store/LanSyncProvider':{},'src/store/CloudSyncProvider':{},
+    'src/player/useMediaTransition':{},'src/components/MiniBar':()=>null,'src/components/Overlay':{},
+    'src/components/icons':iconMock,'src/components/AppUpdateCard':{},'src/components/LyricsActivitySync':()=>null,
+    'assets/splash-icon.png':1,
+  };
+  for(const file of fs.readdirSync(path.join(root,'src/screens')))mocks[`src/screens/${file.replace(/\.js$/,'')}`]={default:()=>null};
+  const {GlassTabBar}=loader(mocks)('App.js');
+  const routes=['Home','Search','Mine','Discover'].map(name=>({name,key:name+'-route'}));
+  let state={key:'tabs-one',index:0,routes}, prevented=false, liveState;
+  const navigation={getState:()=>liveState||state,dispatch:action=>actions.push(action),emit:event=>{events.push(event);return {defaultPrevented:prevented};}};
+  const blurTargets=Object.fromEntries(routes.map(route=>[route.name,{current:route.name}]));
+  const render=()=>React.createElement(GlassTabBar,{state,navigation,blurTargets});
+  let tree;await act(async()=>{tree=create(render());});
+  await click(tree,'我的');assert.deepEqual(actions.at(-1),{type:'JUMP_TO',payload:{name:'Mine'},target:'tabs-one'});
+  state={...state,index:2};await act(async()=>tree.update(render()));
+  assert.equal(touch(tree,'我的').props.accessibilityState.selected,true);
+  assert.equal(touch(tree,'首页').props.accessibilityState.selected,false);
+  liveState={key:'tabs-live',index:3,routes:routes.map(route=>({...route,key:route.name+'-live'}))};
+  const beforeRapidReturn=actions.length;
+  await click(tree,'我的');
+  assert.equal(actions.length,beforeRapidReturn+1,'returning to the still-painted tab cannot be discarded before React catches up');
+  assert.deepEqual(actions.at(-1),{type:'JUMP_TO',payload:{name:'Mine'},target:'tabs-live'});
+  assert.equal(events.at(-1).target,'Mine-live','tabPress targets the actual current navigator route');
+  await click(tree,'发现');
+  assert.equal(actions.at(-1).payload.name,'Discover','every valid discovery tap is dispatched, even during a delayed commit');
+  liveState=null;
+  state={...state,key:'tabs-after-return',index:1};await act(async()=>tree.update(render()));
+  assert.equal(touch(tree,'搜索').props.accessibilityState.selected,true,'external navigation updates selection without an extra tap');
+  assert.equal(tree.root.findByType('BlurView').props.blurTarget,blurTargets.Search);
+  await click(tree,'首页');assert.equal(actions.at(-1).target,'tabs-after-return');
+  assert.equal(actions.at(-1).payload.name,'Home');
+  await click(tree,'首页');assert.ok(events.some(x=>x.type==='homeDoublePress'&&x.target==='Home-route'));
+  prevented=true;const before=actions.length;await click(tree,'我的');assert.equal(actions.length,before);
+  await act(async()=>tree.unmount());
+});
+
+
+test('favorite folder loads coalesce, cache last success by account, and retry malformed or failed responses', async () => {
+  const disk = new Map(), requests = [];
+  const load = loader({
+    '@react-native-async-storage/async-storage': {
+      getItem: async key => disk.get(key) || null, setItem: async (key, value) => disk.set(key, value),
+    },
+    'src/api/client': { get: (url, options) => { const task = deferred(); requests.push({ url, options, task }); return task.promise; } },
+  });
+  const api = load('src/api/bili.js');
+  const a = api.favFolders(123), b = api.favFolders('123');
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].options.timeout, 10000);
+  requests[0].task.resolve({ status: 200, body: JSON.stringify({ code: 0, data: { list: [{ id: 9, title: '我的收藏', media_count: 5 }] } }) });
+  const [first, second] = await Promise.all([a, b]);
+  assert.deepEqual(first, second);
+  assert.deepEqual(await api.favFolders(123), first);
+  assert.equal(requests.length, 1, 'rapid focus uses the fresh in-memory result');
+  assert.deepEqual(await load('src/api/bili.js').cachedFavFolders(456), [], 'another account never receives this cache');
+  const refresh = api.favFolders(123, { force: true });
+  requests[1].task.resolve({ status: 200, body: '{"code":0,"data":{}}' });
+  await assert.rejects(refresh, /不完整/);
+  assert.deepEqual(await api.cachedFavFolders(123), first);
+  const offline = api.favFolders(123, { force: true });
+  requests[2].task.reject(new Error('offline'));
+  await assert.rejects(offline, /offline/);
+  const restarted = loader({
+    '@react-native-async-storage/async-storage': { getItem: async key => disk.get(key) || null, setItem: async () => {} },
+    'src/api/client': {},
+  })('src/api/bili.js');
+  assert.deepEqual(await restarted.cachedFavFolders(123), first, 'last good folders survive process restart');
+  const empty = api.favFolders(123, { force: true });
+  requests[3].task.resolve({ status: 200, body: '{"code":0,"data":{"list":null,"count":0}}' });
+  assert.deepEqual(await empty, [], 'a verified empty list replaces old cached folders');
+});
+
+test('Mine keeps cached folders and navigation available during refresh, and ignores old-account results', async () => {
+  const context = { likes: [], libraryTracks: [], history: [], account: { isLogin: true, mid: 123 } };
+  const tasks = [], listeners = new Map(), navigated = [];
+  const Mine = loader({
+    'react-native': rn, 'react-native-safe-area-context': safeArea,
+    'src/player/PlayerContext': { usePlayer: () => context },
+    'src/store/playlists': { usePlaylists: () => [] },
+    'src/store/favoriteCovers': { stabilizeFavoriteCovers: async (_, folders) => folders },
+    'src/api/bili': {
+      cachedFavFolders: async mid => [{ id: Number(mid), title: '缓存' + mid, count: 3 }],
+      favFolders: (mid) => { const task = deferred(); tasks.push({ mid, task }); return task.promise; },
+    },
+    'src/api/client': {}, 'src/components/BiliLogin': () => null,
+    'src/components/DefaultCover': () => null, 'src/components/RemoteImage': () => null, 'src/components/icons': iconMock,
+  })('src/screens/MineScreen.js').default;
+  const navigation = { navigate: (...args) => navigated.push(args), addListener: (name, fn) => { listeners.set(name, fn); return () => listeners.delete(name); } };
+  let tree;
+  await act(async () => { tree = create(React.createElement(Mine, { navigation })); });
+  await click(tree, '收藏夹');
+  assert.equal(tree.root.findByType('FlatList').props.data[0].title, '缓存123');
+  await act(async () => { listeners.get('focus')(); listeners.get('focus')(); });
+  assert.equal(tasks.length, 1);
+  await click(tree, '设置');
+  assert.equal(navigated.at(-1)[0], 'Settings', 'background loading does not gate buttons');
+  context.account = { isLogin: true, mid: 456 };
+  await act(async () => { tree.update(React.createElement(Mine, { navigation })); });
+  await act(async () => { tasks[0].task.resolve([{ id: 1, title: '旧账号返回' }]); tasks[1].task.reject(new Error('offline')); });
+  assert.equal(tree.root.findByType('FlatList').props.data[0].title, '缓存456');
+  await click(tree, '重试');
+  assert.equal(tasks.length, 3, 'failed refresh can be retried without hiding cached rows');
+  assert.equal(tree.root.findByType('FlatList').props.data.length, 1);
+  await act(async () => tree.unmount());
+  await act(async () => tasks[2].task.resolve([]));
+});
+
+test('favorite detail serializes pagination, preserves rows on failure and cancels stale folders', async () => {
+  const requests = [], context = { account: { mid: 123, isLogin: true } };
+  const Detail = loader({
+    'react-native': rn, 'react-native-safe-area-context': safeArea,
+    'src/player/PlayerContext': { usePlayer: () => context },
+    'src/api/bili': { favItems: (id, page, size, options) => { const task = deferred(); requests.push({ id, page, options, task }); return task.promise; } },
+    'src/components/TrackRow': host('TrackRow'), 'src/components/PlaylistEditor': () => null,
+    'src/components/icons': iconMock,
+  })('src/screens/PlaylistDetailScreen.js').default;
+  const render = id => React.createElement(Detail, { navigation: {}, route: { params: { mediaId: id } } });
+  let tree;
+  await act(async () => { tree = create(render(9)); });
+  await act(async () => requests[0].task.resolve({ list: [{ bvid: 'BV1' }], total: 80, hasMore: true }));
+  await act(async () => { const list = tree.root.findByType('FlatList'); list.props.onEndReached(); list.props.onEndReached(); });
+  assert.equal(requests.length, 2); assert.equal(requests[1].page, 2);
+  await act(async () => requests[1].task.reject(new Error('offline')));
+  assert.equal(tree.root.findByType('FlatList').props.data.length, 1);
+  await click(tree, '重试');
+  assert.equal(requests[2].page, 2);
+  await act(async () => tree.update(render(10)));
+  assert.equal(requests[2].options.signal.aborted, true);
+  await act(async () => {
+    requests[3].task.resolve({ list: [{ bvid: 'BVnew' }], hasMore: false, total: 1 });
+    requests[2].task.resolve({ list: [{ bvid: 'BVold' }], hasMore: true, total: 80 });
+  });
+  assert.deepEqual(tree.root.findByType('FlatList').props.data.map(t => t.bvid), ['BVnew']);
+  await act(async () => tree.unmount());
+});
+
+test('large mobile storage uses async string I/O and commits only after the temporary write succeeds', async () => {
+  const disk = new Map(), write = deferred(), operations = [];
+  const storage = loader({
+    'expo-file-system': { File: class { constructor(uri) { this.uri = uri; } async text() { operations.push('readAsync'); return disk.get(this.uri); } } },
+    'expo-file-system/legacy': { writeAsStringAsync: async (uri, value) => { operations.push('writeAsync'); await write.promise; disk.set(uri, value); } },
+    'src/cloud/platform': { native: {}, directory: '/data/video-cloud', path: { join: (...parts) => parts.join('/'), dirname: () => '/data' },
+      fs: { existsSync: uri => disk.has(uri), mkdirSync() {}, renameSync: (from, to) => { operations.push('commit'); disk.set(to, disk.get(from)); disk.delete(from); }, unlinkSync: uri => disk.delete(uri) } },
+    '@react-native-async-storage/async-storage': { getItem: async () => null, removeItem: async () => operations.push('removeLegacy') },
+  })('src/store/largeStorage.js').default;
+  const saving = storage.setItem('biu.library@123', '你好'.repeat(1000000));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(operations, ['writeAsync']);
+  write.resolve(); await saving;
+  assert.deepEqual(operations, ['writeAsync', 'commit', 'removeLegacy']);
+  assert.equal((await storage.getItem('biu.library@123')).length, 2000000);
+  assert.equal(operations.at(-1), 'readAsync');
+});
+
+test('LAN idle probes reuse immutable snapshots and invalidate each independent profile and library edit', async () => {
+  const { createLibrarySnapshot } = loader()('src/store/lanSync.js');
+  const snapshot = createLibrarySnapshot();
+  const R = require('../renderer/recommendation-profile');
+  let saved = null;
+  const manager = R.createManager({ read: async () => null, write: async value => { saved = value; }, get: async () => ({}), getLikes: () => [] });
+  const profile = await manager.exportSync();
+  assert.strictEqual(await manager.exportSync(), profile, 'idle exports retain identity for snapshot reuse');
+  const original = { version: 1, likes: [{ bvid: 'BV1' }], library: [], playlists: [], recommendation: profile,
+    discoveryRecommendation: R.normalize({ profiles: [{ id: 'beauty', name: '美女', tags: ['cos'] }] }) };
+  const first = await snapshot(original);
+  assert.strictEqual(await snapshot(original), first);
+  const desktop = await snapshot(original, { discovery: false });
+  assert.equal(desktop.library.discoveryRecommendation, undefined);
+  assert.notEqual(desktop.revision, first.revision);
+  const discoveryEdit = { ...original, discoveryRecommendation: R.normalize({ profiles: [{ id: 'beauty', name: '美女', tags: ['舞蹈'] }] }) };
+  assert.notEqual((await snapshot(discoveryEdit)).revision, first.revision);
+  assert.equal((await snapshot(discoveryEdit, { discovery: false })).revision, desktop.revision);
+  const libraryEdit = { ...original, library: [{ bvid: 'BV2' }] };
+  assert.notEqual((await snapshot(libraryEdit)).revision, first.revision);
+  await manager.applySync(R.normalize({ profiles: [{ id: 'main', name: '音乐', tags: ['钢琴'] }] }));
+  const mainEdit = await manager.exportSync();
+  assert.notStrictEqual(mainEdit, profile); assert.ok(saved);
+  assert.notEqual((await snapshot({ ...original, recommendation: mainEdit })).revision, first.revision);
+  manager.dispose();
+});
+
+
+test('closing sheets immediately release touch and back even when animation completion never arrives', async () => {
+  const load = loader({ 'react-native': rn, 'react-native-safe-area-context': safeArea });
+  const Sheet = withOverlays(load, load('src/components/BottomSheet.js').default);
+  const render = visible => React.createElement(Sheet, { visible, onClose() {} }, React.createElement('Text', null, 'Panel'));
+  let tree;
+  await act(async () => { tree = create(render(true)); });
+  const surface = () => tree.root.findAllByType('AnimatedView').find(n => n.props.onLayout);
+  await act(async () => surface().props.onLayout({ nativeEvent: { layout: { height: 300 } } }));
+  await act(async () => animationCalls.at(-1).finish());
+  const layers = () => tree.root.findAllByType('View').filter(n => 'accessibilityViewIsModal' in n.props);
+  assert.equal(layers()[0].props.pointerEvents, 'auto');
+  assert.equal(backListeners.size, 1);
+  await act(async () => tree.update(render(false)));
+  // Deliberately never finish the native close animation.
+  assert.equal(layers()[0].props.pointerEvents, 'none');
+  assert.equal(backListeners.size, 0, 'the next hardware back belongs to navigation');
+  const content = tree.root.findAllByType('View').find(n => n.props.importantForAccessibility === 'auto');
+  assert.notEqual(content.props.pointerEvents, 'none', 'the root app responder is never disabled');
+  await act(async () => new Promise(resolve => setTimeout(resolve, 380)));
+  assert.equal(layers().length, 0, 'missing callbacks cannot leak a permanent invisible portal');
+  await act(async () => tree.unmount());
+});
+
+test('offscreen and frozen route overlays release the host and cannot mask a new page', async () => {
+  const NavigationContext = React.createContext(null), listeners = new Map();
+  let focused = true, closed = 0;
+  const navigation = { isFocused: () => focused, addListener(name, callback) {
+    if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name).add(callback);
+    return () => listeners.get(name).delete(callback);
+  } };
+  const load = loader({ 'react-native': rn, '@react-navigation/native': { NavigationContext } });
+  const { default: Overlay, OverlayProvider } = load('src/components/Overlay.js');
+  const render = text => React.createElement(OverlayProvider, null,
+    React.createElement(NavigationContext.Provider, { value: navigation },
+      React.createElement(Overlay, { onClose: () => closed++ }, React.createElement('Text', null, text))));
+  let tree;
+  await act(async () => { tree = create(render('old page')); });
+  const layers = () => tree.root.findAllByType('View').filter(n => 'accessibilityViewIsModal' in n.props);
+  assert.equal(layers().length, 1);
+  await act(async () => { focused = false; for (const fn of listeners.get('blur')) fn(); });
+  assert.equal(closed, 1);
+  assert.equal(layers().length, 0);
+  assert.equal(backListeners.size, 0);
+  await act(async () => tree.update(render('late request from hidden page')));
+  assert.equal(layers().length, 0, 'background completion on a mounted hidden route cannot reopen its portal');
+  await act(async () => tree.unmount());
+  assert.equal([...listeners.values()].reduce((n, set) => n + set.size, 0), 0);
+});
+
+
+test('nested portals retain their source navigation and release input when their parent starts closing', async () => {
+  const NavigationContext = React.createContext(null), NavigationRouteContext = React.createContext(undefined);
+  const route = { key: 'settings-1', name: 'Settings' }, navigation = { isFocused: () => true, addListener: () => () => {} };
+  const load = loader({ 'react-native': rn, '@react-navigation/native': { NavigationContext, NavigationRouteContext } });
+  const { default: Overlay, OverlayProvider } = load('src/components/Overlay.js');
+  const observed = [];
+  function Nested() {
+    observed.push([React.useContext(NavigationContext), React.useContext(NavigationRouteContext)]);
+    return React.createElement(Overlay, { onClose() {} }, React.createElement('Text', null, 'nested'));
+  }
+  const render = active => React.createElement(OverlayProvider, null,
+    React.createElement(NavigationContext.Provider, { value: navigation },
+      React.createElement(NavigationRouteContext.Provider, { value: route },
+        React.createElement(Overlay, { active, onClose() {} }, React.createElement(Nested)))));
+  let tree;
+  await act(async () => { tree = create(render(true)); });
+  assert.ok(observed.every(([nav, owner]) => nav === navigation && owner === route));
+  const layers = () => tree.root.findAllByType('View').filter(n => 'accessibilityViewIsModal' in n.props);
+  assert.equal(layers().length, 2);
+  assert.equal(layers().filter(n => n.props.pointerEvents === 'auto').length, 1);
+  await act(async () => tree.update(render(false)));
+  assert.ok(layers().every(n => n.props.pointerEvents === 'none'), 'a retained nested dialog must not outlive parent input ownership');
+  assert.equal(backListeners.size, 0);
+  await act(async () => tree.unmount());
+});
+
+
+test('sheet resume restores visible content when opening animation or layout callbacks were interrupted', async () => {
+  const load = loader({ 'react-native': rn, 'react-native-safe-area-context': safeArea });
+  const Sheet = withOverlays(load, load('src/components/BottomSheet.js').default);
+  let tree;
+  await act(async () => { tree = create(React.createElement(Sheet, { visible: true, animationType: 'fade', onClose() {} }, 'visible panel')); });
+  const animation = animationCalls.at(-1);
+  assert.equal(animation.value.value, 0);
+  // Do not dispatch onLayout or finish() at all; simulate returning from another app.
+  await act(async () => { for (const fn of appStateListeners) fn('active'); });
+  assert.equal(animation.value.value, 1, 'a visible modal cannot remain a transparent input blocker');
+  await act(async () => tree.unmount());
+});
+
+
+test('cached discovery filtering yields to input and abort stops all following batches', async () => {
+  let tagCalls = 0;
+  const { filterDiscoveryCandidates } = loader({ 'src/api/bili': { videoTags: async () => { tagCalls++; return ['钢琴']; } } })('src/screens/discoveryFeed.js');
+  const profile = require('../renderer/recommendation-profile').normalize({ auto: { tags: ['钢琴'] } });
+  const candidates = Array.from({ length: 32 }, (_, i) => ({ bvid: 'BVfair' + i }));
+  await filterDiscoveryCandidates(candidates, profile, () => {}, () => true);
+  assert.equal(tagCalls, 32);
+  const controller = new AbortController(), delivered = [];
+  let inputHandled = false;
+  await assert.rejects(filterDiscoveryCandidates(candidates, profile, batch => {
+    delivered.push(...batch);
+    setTimeout(() => { inputHandled = true; controller.abort(); }, 0);
+  }, () => true, 'all', { signal: controller.signal }), /取消/);
+  assert.equal(inputHandled, true);
+  assert.equal(delivered.length, 4, 'input runs between cache-hit batches, before the remaining 28 candidates');
+  assert.equal(tagCalls, 32, 'the test exercises cached metadata rather than network waiting');
+});
+
+test('sheet handles drive native dragging, spring back, dismiss on distance or velocity, and leave content scrolling alone', async () => {
+  const load = loader({ 'react-native': rn, 'react-native-safe-area-context': safeArea });
+  const Sheet = withOverlays(load, load('src/components/BottomSheet.js').default);
+  let tree, closeCount = 0;
+  const render = (visible, placement = 'bottom') => React.createElement(Sheet,
+    { visible, placement, onClose: () => closeCount++ }, React.createElement('ScrollView', null, 'menu'));
+  await act(async () => { tree = create(render(true)); });
+  const surface = () => tree.root.findAllByType('AnimatedView').find(node => node.props.onLayout);
+  await act(async () => surface().props.onLayout({ nativeEvent: { layout: { height: 400 } } }));
+  await act(async () => animationCalls.at(-1).finish());
+  const handle = () => tree.root.findByType('PanGestureHandler');
+  assert.equal(handle().findAllByType('ScrollView').length, 0, 'only the handle captures the pan');
+  assert.equal(handle().props.onGestureEvent.options.useNativeDriver, true, 'movement stays off the JS thread');
+  const drag = handle().props.onGestureEvent.mapping[0].nativeEvent.translationY;
+  const finish = (translationY, velocityY = 0, state = 5) => act(async () => {
+    handle().props.onGestureEvent({ nativeEvent: { translationY } });
+    handle().props.onHandlerStateChange({ nativeEvent: { oldState: 4, state, translationY, velocityY } });
+  });
+  await finish(30);
+  assert.equal(closeCount, 0);
+  assert.equal(animationCalls.at(-1).config.toValue, 0);
+  await act(async () => animationCalls.at(-1).finish());
+  assert.equal(drag.value, 0);
+  await finish(200, 900, 3);
+  assert.equal(closeCount, 0, 'cancelled gestures always return to rest');
+  await finish(-100, -1000);
+  assert.equal(closeCount, 0, 'upward drags never close');
+  await finish(85);
+  assert.equal(closeCount, 1);
+  await act(async () => tree.update(render(false)));
+  assert.equal(handle().props.enabled, false);
+  await act(async () => tree.update(render(true)));
+  assert.equal(drag.value, 0, 'reopening cancels the previous drag offset');
+  await finish(20, 1000);
+  assert.equal(closeCount, 2, 'a deliberate fast downward flick closes');
+  await act(async () => tree.update(render(false)));
+  await act(async () => animationCalls.at(-1).finish());
+  await act(async () => tree.update(render(true, 'center')));
+  assert.equal(tree.root.findAllByType('PanGestureHandler').length, 0, 'centered confirmation dialogs keep their existing behavior');
+  await act(async () => tree.unmount());
+});
+
+test('discovery spreads decoder creation and defers blur teardown without reviving cancelled buffers', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const players = [], released = [];
+  const pool = loader({
+    'expo-video': { createVideoPlayer: () => {
+      const id = players.length;
+      const player = { addListener: () => ({ remove() {} }), replaceAsync: async () => {}, release: () => released.push(id) };
+      players.push(player); return player;
+    } },
+    'src/api/bili': { videoUrl: async bvid => 'https://cdn/' + bvid },
+    'src/api/client': { streamHeaders: () => ({}) },
+  })('src/player/discoveryPreload.js');
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  const tick = async ms => { t.mock.timers.tick(ms); await flush(); };
+  const tracks = [1, 2, 3].map(id => ({ bvid: 'BVframe' + id, cid: id }));
+  pool.preloadDiscoveryQueue(tracks, 1, ''); await flush();
+  assert.equal(players.length, 0, 'cached URLs do not allocate players in the entry commit');
+  for (let count = 1; count <= 3; count++) { await tick(32); assert.equal(players.length, count); }
+  pool.clearDiscoveryPreloads({ defer: true }); await flush();
+  assert.deepEqual(released, [], 'blur does no synchronous native teardown');
+  assert.equal(pool.takeDiscoveryPreload(tracks[0], 1, ''), null, 'invalidated players cannot be claimed');
+  pool.preloadDiscoveryQueue([{ bvid: 'BVreturned', cid: 4 }], 1, ''); await flush();
+  await tick(299); assert.deepEqual(released, []);
+  await tick(1); assert.deepEqual(released, [0]);
+  await tick(16); assert.deepEqual(released, [0, 1]);
+  await tick(16); assert.deepEqual(released, [0, 1, 2]);
+  assert.equal(players.length, 3, 'returning cannot allocate beyond the old decoder budget');
+  await tick(16); await tick(32); assert.equal(players.length, 4);
+  pool.clearDiscoveryPreloads(); assert.deepEqual(released, [0, 1, 2, 3]);
+});
+
+test('home search waits for entry before focusing and never opens the keyboard after leaving', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const listeners = new Map(); let focuses = 0, backs = 0;
+  const navigation = { isFocused: () => true, goBack: () => backs++,
+    addListener: (name, fn) => { listeners.set(name, fn); return () => listeners.delete(name); } };
+  const Search = loader({
+    'react-native': { ...rn, TextInput: ({ ref, ...props }) => {
+      React.useImperativeHandle(ref, () => ({ focus: () => focuses++ }));
+      return React.createElement('TextInput', props);
+    } },
+    'react-native-safe-area-context': safeArea, 'src/components/icons': iconMock,
+    'src/player/PlayerContext': { usePlayer: () => ({}) }, 'src/api/bili': {}, 'src/api/client': {},
+    'src/components/TrackRow': 'TrackRow',
+  })('src/screens/SearchScreen.js').default;
+  let tree;
+  const render = () => React.createElement(Search, { navigation, route: { name: 'SearchInput' } });
+  await act(async () => { tree = create(render()); });
+  assert.equal(focuses, 0);
+  await act(async () => listeners.get('transitionEnd')({ data: { closing: false } }));
+  assert.equal(focuses, 1);
+  await act(async () => t.mock.timers.tick(300)); assert.equal(focuses, 1);
+  await click(tree, '取消搜索'); assert.equal(backs, 1);
+  await act(async () => tree.unmount());
+  await act(async () => { tree = create(render()); });
+  await act(async () => listeners.get('blur')());
+  await act(async () => t.mock.timers.tick(300));
+  assert.equal(focuses, 1, 'a quick back cancels delayed keyboard focus');
+  await act(async () => tree.unmount());
+  assert.equal(listeners.size, 0);
+});
+
+test('split recognition uses NCM first, Shazam fallback and releases native WASM signatures', async () => {
+  const vm = require('node:vm');
+  const source = fs.readFileSync(path.join(root, 'src/split/identify.js'), 'utf8');
+  let calls = [], freed = 0, hit = { title: 'Song' };
+  const sandbox = vm.createContext({ ncm: { Encode: async () => 'fingerprint' },
+    shazam: { init: async () => {}, DecodedSignature: { new: () => ({ uri: 'signature', samplems: 6000, free: () => freed++ }) } },
+    renderClipRate: async pcm => pcm, rpc: async (method, args) => { calls.push({ method, args }); return method === 'netease' ? hit : { title: 'Fallback' }; } });
+  vm.runInContext(source, sandbox);
+  assert.equal((await sandbox.identifyAudioClip(new Float32Array(48000 * 6), 48000)).title, 'Song');
+  assert.deepEqual(calls.map(v => v.method), ['netease']);
+  hit = null; calls = [];
+  assert.equal((await sandbox.identifyAudioClip(new Float32Array(48000 * 12), 48000)).title, 'Fallback');
+  assert.deepEqual(calls.map(v => v.method), ['netease', 'shazam']); assert.equal(freed, 1);
+  await assert.rejects(sandbox.identifyAudioClip(new Float32Array(1), 48000), /太短/);
+  const match = loader({ 'src/api/client': { streamHeaders: () => ({ 'User-Agent': 'test' }) } })('src/split/service.js').matchFingerprint;
+  await assert.rejects(match('shazam', { uri: 'file:///private', samplems: 1000 }, () => { throw Error('must not request'); }), /无效/);
+  require('../mobile-rn/scripts/build-split.cjs')();
+  const html = require('../mobile-rn/src/split/editor.generated.json');
+  new vm.Script(html.slice(html.indexOf('<script>') + 8, html.lastIndexOf('</script>')));
+  assert.ok(fs.readFileSync(path.join(root, 'src/split/runtime.js'), 'utf8').includes('return identifyAudioClip('));
 });

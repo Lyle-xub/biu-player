@@ -3,7 +3,7 @@
  * 在线播放清晰度：音画共用视频流，保留 biu.quality 以兼容旧设置。
  */
 import React from 'react';
-import { Platform, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
+import { ScrollView, Platform, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors } from '../theme';
 import { usePlayer } from '../player/PlayerContext';
@@ -20,7 +20,7 @@ const LYRIC_EFFECTS = [
 ];
 const RECOMMEND_MODES = [
   { key: 'music', label: '音乐分区推荐', desc: '从真实个性推荐中只保留音乐区内容，默认使用此模式。' },
-  { key: 'all', label: '全部推荐', desc: '显示账号完整的个性推荐，不限制内容分区。' },
+  { key: 'all', label: '全部分区推荐', desc: '显示账号完整的个性推荐，不限制内容分区。' },
 ];
 
 export default function SettingsScreen({ navigation }) {
@@ -30,7 +30,7 @@ export default function SettingsScreen({ navigation }) {
     lockScreenLyricsEnabled, setLockScreenLyricsEnabled,
     dynamicIslandLyricsEnabled, setDynamicIslandLyricsEnabled,
     recommendMode, setRecommendMode,
-    discoveryEnabled, setDiscoveryEnabled,
+    discoveryEnabled, setDiscoveryEnabled, discoveryRecommendMode, setDiscoveryRecommendMode,
   } = usePlayer();
 
   return <SettingsContent navigation={navigation} {...{
@@ -39,36 +39,28 @@ export default function SettingsScreen({ navigation }) {
     lockScreenLyricsEnabled, setLockScreenLyricsEnabled,
     dynamicIslandLyricsEnabled, setDynamicIslandLyricsEnabled,
     recommendMode, setRecommendMode,
-    discoveryEnabled, setDiscoveryEnabled,
+    discoveryEnabled, setDiscoveryEnabled, discoveryRecommendMode, setDiscoveryRecommendMode,
   }} />;
 }
 
-// Playback ticks must not rebuild the settings ScrollView and its native views.
+// Playback ticks must not rebuild the settings list and its native views.
 const SettingsContent = React.memo(function SettingsContent({ navigation,
   quality, setQuality, lyricEffect, setLyricEffect,
   desktopLyricsEnabled, setDesktopLyricsEnabled,
   lockScreenLyricsEnabled, setLockScreenLyricsEnabled,
   dynamicIslandLyricsEnabled, setDynamicIslandLyricsEnabled,
   recommendMode, setRecommendMode,
-  discoveryEnabled, setDiscoveryEnabled,
+  discoveryEnabled, setDiscoveryEnabled, discoveryRecommendMode, setDiscoveryRecommendMode,
 }) {
 
-  return (
-    <SafeAreaView style={styles.safe} edges={['top']}>
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} hitSlop={10} style={styles.backBtn}>
-          <IconBack size={22} color={colors.text} />
-        </TouchableOpacity>
-        <Text style={styles.title}>设置</Text>
-      </View>
-      <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+  const sections = <>
         <Text style={styles.sectionTitle}>首页</Text>
         <View style={styles.card}>
-          <Text style={styles.rowTitle}>个性推荐范围</Text>
-          <Text style={styles.rowDesc}>切换后首页自动刷新</Text>
+          <Text style={styles.rowTitle}>首页推荐分区</Text>
+          <Text style={styles.rowDesc}>仅用于首页，切换后自动刷新</Text>
           <View style={styles.seg}>
             {RECOMMEND_MODES.map(({ key, label }) => (
-              <TouchableOpacity key={key} accessibilityRole="radio" accessibilityLabel={label}
+              <TouchableOpacity key={key} accessibilityRole="radio" accessibilityLabel={'首页' + label}
                 accessibilityState={{ checked: recommendMode === key }}
                 style={[styles.segBtn, recommendMode === key && styles.segBtnOn]}
                 onPress={() => setRecommendMode(key)}>
@@ -94,11 +86,21 @@ const SettingsContent = React.memo(function SettingsContent({ navigation,
               onValueChange={setDiscoveryEnabled} trackColor={{ false: '#363832', true: colors.accentSoft }}
               thumbColor={discoveryEnabled ? colors.accent : '#a4a69f'} />
           </View>
-          {discoveryEnabled ? <View style={styles.discoveryOptions}>
-            <Text style={styles.rowTitle}>视频来源</Text>
-            <Text style={styles.rowDesc}>B 站 Web 推荐 → 标签匹配 → 相关视频</Text>
-            <Text style={styles.qualityDesc}>在发现页右上角切换画像；下方可管理发现页的独立画像。</Text>
-          </View> : null}
+        </View>
+        <View style={styles.card}>
+            <Text style={styles.rowTitle}>发现页推荐分区</Text>
+            <Text style={styles.rowDesc}>仅用于发现页，独立保存</Text>
+            <View style={styles.seg}>
+              {RECOMMEND_MODES.map(({ key }) => {
+                const label = key === 'music' ? '音乐分区推荐' : '全部分区推荐';
+                return <TouchableOpacity key={key} accessibilityRole="radio" accessibilityLabel={'发现页' + label}
+                  accessibilityState={{ checked: discoveryRecommendMode === key }}
+                  style={[styles.segBtn, discoveryRecommendMode === key && styles.segBtnOn]}
+                  onPress={() => setDiscoveryRecommendMode(key)}>
+                  <Text style={[styles.segText, discoveryRecommendMode === key && styles.segTextOn]}>{label}</Text>
+                </TouchableOpacity>;
+              })}
+            </View>
         </View>
         {discoveryEnabled ? <RecommendationProfileCard source="discovery" /> : null}
 
@@ -190,6 +192,19 @@ const SettingsContent = React.memo(function SettingsContent({ navigation,
           </View>
           <Text style={styles.rowDesc}>B 站音乐播放器 · 与桌面端共享同一套接口逻辑</Text>
         </View>
+  </>;
+  return (
+    <SafeAreaView style={styles.safe} edges={['top']}>
+      <View style={styles.header}>
+        <TouchableOpacity accessibilityRole="button" accessibilityLabel="返回" onPress={() => navigation.goBack()} hitSlop={10} style={styles.backBtn}>
+          <IconBack size={22} color={colors.text} />
+        </TouchableOpacity>
+        <Text style={styles.title}>设置</Text>
+      </View>
+      {/* A fixed settings form must not wait for VirtualizedList's deferred
+          batches, or unmount editors while the user scrolls. */}
+      <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+        {sections}
       </ScrollView>
     </SafeAreaView>
   );
@@ -221,10 +236,6 @@ const styles = StyleSheet.create({
   },
   switchInfo: { flex: 1, minWidth: 0 },
   featureSwitchRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  discoveryOptions: {
-    marginTop: 16, paddingTop: 14,
-    borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.cardBorder,
-  },
   seg: {
     flexDirection: 'row', gap: 6, marginTop: 12,
     backgroundColor: 'rgba(255,255,255,0.05)', borderRadius: 12, padding: 4,

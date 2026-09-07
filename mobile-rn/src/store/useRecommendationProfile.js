@@ -1,24 +1,27 @@
 import { useEffect, useMemo, useSyncExternalStore } from 'react';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import AsyncStorage from './largeStorage';
 import * as client from '../api/client';
 import { usePlaylists } from './playlists';
-import { accountKey, readAccountValue } from './accountStorage';
+import { accountKey } from './accountStorage';
 import { createManager } from '../../../renderer/recommendation-profile';
+import { backgroundCompute } from '../performance/backgroundCompute';
 
 export default function useRecommendationProfile(
   account, likes, libraryReady, storageName = 'biu.recommendation-profiles',
 ) {
   const playlists = usePlaylists();
   const scope = account?.isLogin && account.mid ? String(account.mid) : '';
-  const source = useMemo(() => ({ current: likes }), [scope]);
+  const source = useMemo(() => ({ current: likes, playlists }), [scope]);
   source.current = likes;
+  source.playlists = playlists;
   const manager = useMemo(() => {
     const key = accountKey(storageName, scope);
     return createManager({
       get: client.get, getLikes: () => source.current,
-      getPlaylists: () => readAccountValue('biu.playlists', scope, []),
-      read: async () => { const raw = await AsyncStorage.getItem(key); return raw ? JSON.parse(raw) : null; },
-      write: (value) => AsyncStorage.setItem(key, JSON.stringify(value)),
+      getPlaylists: () => source.playlists,
+      compute: backgroundCompute,
+      read: async () => { const raw = await AsyncStorage.getItem(key); return raw ? backgroundCompute('parse', raw) : null; },
+      write: async (value) => AsyncStorage.setItem(key, await backgroundCompute('stringify', value)),
     });
   }, [scope, source, storageName]);
   const state = useSyncExternalStore(manager.subscribe, manager.getSnapshot);

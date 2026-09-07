@@ -1,26 +1,44 @@
 /* Shared cloud protocol; platform adapters supply storage and cryptography. */
-module.exports = function ({ fs, path, crypto, Buffer }) {
-const { normalize, reconcile } = require('./library-sync');
+module.exports = function ({ fs, path, crypto, Buffer, compute }) {
+const { normalize, reconcile, libraryCount } = require('./library-sync');
 const INTERVALS = [3,6,12,24];
 const fingerprint = v => crypto.createHash('sha256').update(JSON.stringify(normalize(v))).digest('hex');
-function atomic(file, value) {
+async function atomic(file, raw) {
   fs.mkdirSync(path.dirname(file), {recursive:true,mode:0o700});
-  fs.writeFileSync(file+'.tmp',JSON.stringify(value),{mode:0o600});
+  if (fs.promises?.writeFile) await fs.promises.writeFile(file+'.tmp',raw,{mode:0o600});
+  else fs.writeFileSync(file+'.tmp',raw,{mode:0o600});
   fs.renameSync(file+'.tmp',file);
 }
-function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writeLibrary, protect, unprotect, onStatus=()=>{}, now=Date.now, syncDiscovery=true }) {
+function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writeLibrary, protect, unprotect, onStatus=()=>{}, now=Date.now, syncDiscovery=true, waitForForeground=()=>{} }) {
+  const normalizeData = (...args) => compute ? compute('libraryNormalize', ...args) : Promise.resolve(normalize(...args));
+  const mergeData = (...args) => compute ? compute('libraryReconcile', ...args) : Promise.resolve(reconcile(...args));
+  const digest = value => compute ? compute('libraryFingerprint', value) : Promise.resolve(fingerprint(value));
+  const parse = raw => compute ? compute('parse', raw) : Promise.resolve(JSON.parse(raw));
+  const stringify = value => compute ? compute('stringify', value) : Promise.resolve(JSON.stringify(value));
   let scope='', config=null, running=null, controller=null, timer=null, logs=[], progress={}, preview='', decoded='', error='', paused=false;
   const fileFor = s => path.join(directory,s,'state.json');
-  function load(s) {
+  async function load(s) {
     const file=fileFor(s);
     if (!fs.existsSync(file)) return {enabled:false,intervalHours:3,device:crypto.randomUUID(),heads:{},slots:{},sequence:0,lastSync:0,nextRun:0};
+    const corrupt = () => new Error('云同步配置损坏，请从恢复文件恢复密钥；不会自动覆盖原配置');
+    let value;
     try {
-      const value=JSON.parse(fs.readFileSync(file,'utf8'));
-      if (!INTERVALS.includes(value.intervalHours) || !value.device || !value.heads || !value.slots) throw Error();
-      return value;
-    } catch { throw new Error('云同步配置损坏，请从恢复文件恢复密钥；不会自动覆盖原配置'); }
+      value=await parse(fs.promises?.readFile ? await fs.promises.readFile(file,'utf8') : fs.readFileSync(file,'utf8'));
+    } catch (cause) {
+      if (cause?.name === 'SyntaxError') throw corrupt();
+      throw new Error('云同步配置读取失败，请重试；原配置与密钥已保留', { cause });
+    }
+    if (!value || !INTERVALS.includes(value.intervalHours) || !value.device || !value.heads || !value.slots) throw corrupt();
+    return value;
   }
-  const save = () => atomic(fileFor(scope),config);
+  let saving = Promise.resolve();
+  const save = () => {
+    const file = fileFor(scope), value = { ...config, heads: { ...config.heads }, slots: { ...config.slots },
+      ...(config.history ? { history: { ...config.history } } : {}) };
+    const operation = saving.catch(() => {}).then(async () => atomic(file, await stringify(value)));
+    saving = operation;
+    return operation;
+  };
   function trimVideoCache() {
     const root=path.join(directory,scope,'snapshots');
     try {
@@ -48,11 +66,15 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
       symbol:`有效数据包 ${event.symbols}/${event.needed}`,verified:`AES-GCM 与数据摘要验证通过${event.verifiedSeconds!=null?` · ${event.verifiedSeconds}s · 已读取 ${(100*event.downloadFraction).toFixed(1)}%`:''}`};
     progress={...progress,...event};
     if(event.type==='upload' || event.type==='download')progress.transfer=event.type;
-    // Frame/download counters are live; avoid adding hundreds of redundant log lines.
-    if (!['frame','download'].includes(event.type) || now()-(emit.last || 0)>250) {
-      logs.push({at:now(),type:event.type,message:labels[event.type] || event.message || event.type});
-      logs=logs.slice(-140);emit.last=now();
-    }
+    // Progress can arrive once per frame/packet. Throttle React notifications too,
+    // not just logs; keep phase changes, completion and errors immediate.
+    const continuous = ['encode', 'upload', 'download', 'frame', 'symbol'].includes(event.type) && !event.message;
+    const complete = event.total > 0 && (event.bytes >= event.total || event.frames >= event.total)
+      || event.needed > 0 && event.symbols >= event.needed;
+    if (continuous && !complete && emit.type === event.type && now() - emit.last < 250) return;
+    emit.type = event.type; emit.last = now();
+    logs.push({at:now(),type:event.type,message:labels[event.type] || event.message || event.type});
+    logs=logs.slice(-140);
     publish();
   }
   function schedule() {
@@ -83,8 +105,9 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
     if (!/^\d{0,20}$/.test(next)) throw new Error('同步账号无效');
     if (next===scope && config) return status();
     stop(); if (running) await running.catch(()=>{});
+    await saving.catch(()=>{});
     scope=next;logs=[];progress={};preview='';decoded='';error='';config=null;paused=false;
-    try { config=next?load(next):null; } catch(e) {error=e.message;publish();throw e;}
+    try { config=next?await load(next):null; } catch(e) {error=e.message;publish();throw e;}
     schedule();publish();return status();
   }
   async function configure(patch) {
@@ -93,7 +116,7 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
     await ensureAccount(scope);
     if ('intervalHours' in patch && !INTERVALS.includes(Number(patch.intervalHours))) throw new Error('不支持的同步间隔');
     if (patch.enabled===false) {stop();if(running)await running.catch(()=>{});}
-    const previous=JSON.parse(JSON.stringify(config));
+    const previous=await parse(await stringify(config));
     try {
     if ('intervalHours' in patch) {config.intervalHours=Number(patch.intervalHours);config.nextRun=config.lastSync?config.lastSync+config.intervalHours*3600000:now();}
     if (typeof patch.enabled==='boolean') config.enabled=patch.enabled;
@@ -104,10 +127,11 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
       config.channel=crypto.createHash('sha256').update(secret).digest('hex').slice(0,16);
       config.nextRun=now();
     }
-    save();} catch(e) {config=previous;throw e;}
+    await save();} catch(e) {config=previous;throw e;}
     schedule();publish();return status();
   }
   async function decodeArchive(archive,signal,gate=false) {
+    await waitForForeground(signal);
     const streams=await api.streams(archive.bvid,signal,archive.meta.snapshotId);
     const options=gate?['360p','480p']:Object.keys(streams).sort((a,b)=>(streams[a].bandwidth || Infinity)-(streams[b].bandwidth || Infinity));
     if (!options.length) throw new Error('视频尚未完成转码');
@@ -119,11 +143,14 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
       emit({type:'decode',message:`开始流式读取 ${quality} · ${archive.bvid}`});
       const out=path.join(directory,scope,'decoded-'+crypto.randomUUID()+'.json');
       try {
+        await waitForForeground(signal);
         const proof=await runtime.run({operation:'decode',url:media.url,key:key().toString('hex'),snapshotId:archive.meta.snapshotId,output:out},signal,emit);
-        const raw=JSON.parse(fs.readFileSync(out,'utf8'));
-        result=normalize(raw);
+        await waitForForeground(signal);
+        const raw=await parse(fs.promises?.readFile ? await fs.promises.readFile(out,'utf8') : fs.readFileSync(out,'utf8'));
+        result=await normalizeData(raw);
         config.lastRead={quality,snapshotId:archive.meta.snapshotId,receivedBytes:proof.receivedBytes,totalBytes:proof.totalBytes,seconds:proof.verifiedSeconds,symbols:proof.symbols,scannedFrames:proof.scannedFrames};
-        decoded=JSON.stringify(normalize(result,{discovery:syncDiscovery}),null,2).slice(0,32000);
+        decoded=compute ? await compute('libraryPreview',result,{discovery:syncDiscovery})
+          : JSON.stringify(normalize(result,{discovery:syncDiscovery}),null,2).slice(0,32000);
         publish();
         if (!gate) break;
       } catch(e) {problem=e;if(gate)throw e;}
@@ -136,34 +163,37 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
     if (!config.pending) return true;
     const pending=config.pending;
     try {
+      await waitForForeground(signal);
       const current=await api.list(config.channel,key(),signal);
       const latest=current[0];
       if(latest && latest.meta.sequence>=pending.archive.meta.sequence && latest.meta.snapshotId!==pending.archive.meta.snapshotId && !latest.meta.parts?.some(p=>p.snapshotId===pending.archive.meta.snapshotId)) {
-        config.pending=null;save();emit({type:'conflict',message:'检测到其他设备同时更新，将合并最新版本后重试'});return true;
+        config.pending=null;await save();emit({type:'conflict',message:'检测到其他设备同时更新，将合并最新版本后重试'});return true;
       }
       const restored=await decodeArchive(pending.archive,signal,true);
-      if (fingerprint(restored)!==pending.hash) throw new Error('云端回读与待发布快照不同');
+      if (await digest(restored)!==pending.hash) throw new Error('云端回读与待发布快照不同');
       if (signal.aborted) throw new Error('同步已停止');
       config.archive=pending.archive;config.base=restored;config.baseSequence=pending.archive.meta.sequence;remember(pending.archive.meta.snapshotId,restored);
       config.activeBvid=pending.archive.bvid;config.lastPublishedHash=pending.hash;config.lastPublishedSnapshot=pending.archive.meta.snapshotId;config.baseSnapshotId=pending.archive.meta.snapshotId;
       config.pending=null;config.lastSync=now();config.nextRun=now()+config.intervalHours*3600000;
-      save();emit({type:'complete',message:'云端 360p / 480p 均验证通过，已保留上一快照分 P'});return true;
+      await save();emit({type:'complete',message:'云端 360p / 480p 均验证通过，已保留上一快照分 P'});return true;
     } catch(e) {
       if(signal.aborted)throw e;
       // Keep the previous verified slot; never mark an unverified candidate as synced.
       emit({type:'waiting',message:'等待平台转码或审核；本地数据和上一版本已保留'});
       error=now()-pending.createdAt>24*3600000?'候选稿件超过一天仍未验证，请到创作中心检查审核结果':'';
-      save();return false;
+      await save();return false;
     }
   }
   async function work(readOnly,signal,ownScope,force) {
     await ensureAccount(ownScope);
+    await waitForForeground(signal);
     if(!config.secret)throw new Error('请先开启云同步或导入恢复密钥');
     const secret=key();
     if(config.pending){await runtime.ensure(signal,emit);if (!await checkPending(signal)) return;force=false;}
     emit({type:'query',message:'检查同账号的云端快照'});
     const archives=await api.list(config.channel,secret,signal);
     if(archives.length>1)throw new Error('检测到多个同步稿件，请先在创作中心确认保留哪一个；不会继续覆盖');
+    await waitForForeground(signal);
     await runtime.ensure(signal,emit);
     const archive=archives[0];
     if(!archive && (config.archive || config.activeBvid || config.lastPublishedSnapshot))throw new Error('暂时查不到原同步稿件，请检查审核或删除状态；不会另建稿件');
@@ -177,18 +207,21 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
           try{remote=await decodeArchive({...archive,meta:{...archive.meta,...part}},signal);}
           catch(e){if(signal.aborted)throw e;emit({type:'fallback',message:'当前快照尚不可读，尝试上一分 P'});continue;}
           if(signal.aborted || scope!==ownScope)throw new Error('同步已停止');
-          const local=normalize(await readLibrary(scope));
+          await waitForForeground(signal);
+          const local=await normalizeData(await readLibrary(scope));
           const common=archive.meta.parentSnapshotId && config.history?.[archive.meta.parentSnapshotId] || config.base || null;
-          const merged=reconcile(common,local,remote);
-          await writeLibrary(scope,normalize(merged,{discovery:syncDiscovery}),normalize(local,{discovery:syncDiscovery}));
+          const merged=await mergeData(common,local,remote);
+          const filtered=await normalizeData(merged,{discovery:syncDiscovery}),base=await normalizeData(local,{discovery:syncDiscovery});
+          if(signal.aborted || scope!==ownScope)throw new Error('同步已停止');
+          await writeLibrary(scope,filtered,base);
           config.base=remote;config.baseSnapshotId=part.snapshotId;config.baseSequence=part.sequence;remember(part.snapshotId,remote);
-          config.activeBvid=archive.bvid;save();
-          emit({type:'merge',message:`已合并 ${merged.likes.length} 首喜欢、${merged.library.length} 首音乐库、${merged.playlists.length} 个歌单`});break;
+          config.activeBvid=archive.bvid;await save();
+          emit({type:'merge',message:`已合并 ${merged.likes.length} 首喜欢、${libraryCount(merged)} 首音乐库、${merged.playlists.length} 个歌单`});break;
         }
         if(!remote)throw new Error('云端两个快照都无法恢复，已保留本地数据');
         if(config.baseSnapshotId!==archive.meta.snapshotId) {
           emit({type:'waiting',message:'最新分 P 仍在转码审核，本次只读取上一快照，不覆盖待审核更新'});
-          config.nextRun=now()+60000;save();return;
+          config.nextRun=now()+60000;await save();return;
         }
       }
     }
@@ -200,22 +233,26 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
       }
       return;
     }
-    const local=normalize(await readLibrary(scope),{discovery:syncDiscovery});
+    await waitForForeground(signal);
+    const local=await normalizeData(await readLibrary(scope),{discovery:syncDiscovery});
     // A desktop upload must leave the mobile-only field in the shared cloud snapshot untouched.
-    const library=normalize({...local,...(!syncDiscovery && config.base?.discoveryRecommendation
-      ? {discoveryRecommendation:config.base.discoveryRecommendation} : {})}),hash=fingerprint(library);
-    if(!force && archive && (hash===config.lastPublishedHash && archive.meta.snapshotId===config.lastPublishedSnapshot || config.base && hash===fingerprint(config.base))){config.lastSync=now();config.nextRun=now()+config.intervalHours*3600000;save();emit({type:'idle',message:'音乐库没有变化，无需上传'});return;}
+    const library=await normalizeData({...local,...(!syncDiscovery && config.base?.discoveryRecommendation
+      ? {discoveryRecommendation:config.base.discoveryRecommendation} : {})}),hash=await digest(library);
+    if(signal.aborted || scope!==ownScope)throw new Error('同步已停止');
+    if(!force && archive && (hash===config.lastPublishedHash && archive.meta.snapshotId===config.lastPublishedSnapshot || config.base && hash===await digest(config.base))){config.lastSync=now();config.nextRun=now()+config.intervalHours*3600000;await save();emit({type:'idle',message:'音乐库没有变化，无需上传'});return;}
     if(!archive && config.imported)throw new Error('等待原设备创建同步稿件；导入密钥的设备不会另建稿件');
     const slot=archive?.meta.slot==='A'?'B':'A';
     const folder=path.join(directory,scope,'snapshots',crypto.randomUUID());
     const parents=archive?[archive.meta.snapshotId]:[];
     emit({type:'encode',message:'正在生成加密快照'});
+    await waitForForeground(signal);
     const encoded=await runtime.run({operation:'encode',library,key:secret.toString('hex'),folder,device:config.device,parents},signal,emit);
     const meta={version:2,channel:config.channel,device:config.device,slot,sequence:(archive?.meta.sequence || 0)+1,snapshotId:encoded.snapshotId,parentSnapshotId:archive?.meta.snapshotId || null};
     if(signal.aborted)throw new Error('同步已停止');
+    await waitForForeground(signal);
     const submitted=await api.submit({file:path.join(folder,'video.mp4'),meta,key:secret,existing:archive,signal,emit});
     // Persist submission before polling; restart resumes verification, never resubmits it.
-    config.sequence=meta.sequence;config.pending={archive:submitted,hash,folder,createdAt:now()};config.nextRun=now()+45000;save();
+    config.sequence=meta.sequence;config.pending={archive:submitted,hash,folder,createdAt:now()};config.nextRun=now()+45000;await save();
     emit({type:'submitted',message:`稿件已提交 ${submitted.bvid}，等待转码与回读验证`});
     await checkPending(signal);
   }
@@ -225,8 +262,8 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
     paused=false;
     controller=new AbortController();const signal=controller.signal,ownScope=scope;
     error='';progress={};decoded='';
-    running=Promise.resolve().then(()=>work(readOnly,signal,ownScope,force)).catch(e=>{
-      if(!signal.aborted){error=e.message;emit({type:'error',message:error});if(config){config.nextRun=now()+15*60000;save();}}
+    running=Promise.resolve().then(async()=>{await waitForForeground(signal);if(signal.aborted || scope!==ownScope)throw new Error('同步已取消');return work(readOnly,signal,ownScope,force);}).catch(async e=>{
+      if(!signal.aborted){error=e.message;emit({type:'error',message:error});if(config){config.nextRun=now()+15*60000;await save();}}
       throw e;
     }).finally(()=>{trimVideoCache();running=null;controller=null;publish();schedule();});
     publish();return running;
@@ -252,7 +289,7 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
         const before=config;
         config={...config,secret:protect(value.key),channel,imported:true,nextRun:now(),
           activeBvid:/^BV\w+$/.test(value.bvid || '')?value.bvid:(config.activeBvid || '')};
-        try{save();}catch(e){config=before;throw e;}
+        try{await save();}catch(e){config=before;throw e;}
         error='';emit({type:'key',message:'已从同账号局域网设备同步云同步密钥'});schedule();
       }
     }
@@ -265,7 +302,7 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
     if(channel!==value.channel)throw new Error('恢复文件校验失败');
     config={enabled:false,intervalHours:config?.intervalHours || 3,device:crypto.randomUUID(),heads:{},slots:{},sequence:0,lastSync:0,nextRun:now(),secret:protect(value.key),channel,imported:true,
       activeBvid:/^BV\w+$/.test(value.bvid || '')?value.bvid:''};
-    save();decoded='';preview='';error='';publish();return status();
+    await save();decoded='';preview='';error='';publish();return status();
   }
   return {status,setAccount,configure,run,stop,resume,loadPreview,exportRecovery,importRecovery,lanKeyStatus,exchangeLanRecovery};
 }

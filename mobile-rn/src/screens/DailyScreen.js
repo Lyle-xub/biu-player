@@ -1,3 +1,4 @@
+import { waitForRecommendationIdle } from '../updates/networkGate';
 import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, AppState, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -15,10 +16,11 @@ export function DailyCard({ navigation }) {
   const { recommendationManager: manager, recommendationProfile: state, libraryReady } = usePlayer();
   useEffect(() => {
     if (!libraryReady) return undefined;
-    const refresh = () => manager.generateDaily().catch(() => {});
+    const controller = new AbortController();
+    const refresh = () => waitForRecommendationIdle(controller.signal).then(() => manager.generateDaily()).catch(() => {});
     const timer = setTimeout(refresh, 3000);
     const sub = AppState.addEventListener('change', (status) => { if (status === 'active') refresh(); });
-    return () => { clearTimeout(timer); sub.remove(); };
+    return () => { controller.abort(); clearTimeout(timer); sub.remove(); };
   }, [manager, libraryReady]);
   const daily = state?.daily, entry = daily && dailyCurrent(daily);
   return <TouchableOpacity accessibilityRole="button" accessibilityLabel="打开每日推荐" style={styles.card}

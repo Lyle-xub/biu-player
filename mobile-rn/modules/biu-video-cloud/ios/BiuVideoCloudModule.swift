@@ -3,8 +3,11 @@ import AVFoundation
 import CoreVideo
 import Darwin
 import Security
+import Dispatch
 
 public class BiuVideoCloudModule: Module {
+  // Keep long codec work off Expo's shared serial AsyncFunctionQueue.
+  private let codecQueue = DispatchQueue(label: "biu.video-cloud", qos: .utility)
   private let lock = NSLock()
   private var cancelled = false
   private func cancel(_ value: Bool) { lock.lock(); cancelled=value; lock.unlock() }
@@ -40,16 +43,17 @@ public class BiuVideoCloudModule: Module {
     }
     AsyncFunction("encode") { (input: String, output: String, sid: String) -> [String: Any] in
       try self.encode(input,output,sid)
-    }
+    }.runOnQueue(codecQueue)
     AsyncFunction("decode") { (input: String, sid: String) -> [String: Any] in
       try self.decode(input,sid)
-    }
+    }.runOnQueue(codecQueue)
+    OnDestroy { self.cancel(true) }
   }
   private func encode(_ input: String, _ output: String, _ sid: String) throws -> [String: Any] {
-    let deadline=Date().addingTimeInterval(600)
+    var deadline=Date().addingTimeInterval(60)
     guard let inputURL=URL(string:input),let outputURL=URL(string:output),inputURL.isFileURL,outputURL.isFileURL else {throw problem("无效文件地址")}
     let payload=try Data(contentsOf:inputURL)
-    guard (192...524288).contains(payload.count) else {throw problem("音乐库超过视频容量")}
+    guard payload.count>=192 else {throw problem("加密快照无效")}
     let carrier=BIUCarrier(payload:payload,snapshot:sid)
     guard carrier.failure.isEmpty else {throw problem(carrier.failure)}
     let count=Int(carrier.frames()),width=1920,height=1080
@@ -79,6 +83,7 @@ public class BiuVideoCloudModule: Module {
         while !stream.isReadyForMoreMediaData {try check(deadline);if writer.status == .failed {throw problem("视频编码失败")};Thread.sleep(forTimeInterval:0.005)}
         guard adapter.append(buffer,withPresentationTime:CMTime(value:Int64(index*15+repeatIndex),timescale:30)) else {throw problem("视频写入失败")}
       }
+      deadline=Date().addingTimeInterval(60)
       sendEvent("progress",["type":"encode","frames":index+1,"total":count])
     }
     stream.markAsFinished();let finished=DispatchSemaphore(value:0)
@@ -88,10 +93,10 @@ public class BiuVideoCloudModule: Module {
     success=true;return ["snapshotId":sid,"symbols":count,"duration":Double(count)/2]
   }
   private func decode(_ input: String, _ sid: String) throws -> [String: Any] {
-    let deadline=Date().addingTimeInterval(300)
+    var deadline=Date().addingTimeInterval(60)
     guard let url=URL(string:input),url.isFileURL else {throw problem("无效视频地址")}
     let size=(try FileManager.default.attributesOfItem(atPath:url.path)[.size] as? NSNumber)?.intValue ?? 0
-    guard size>0 && size<=536870912 else {throw problem("视频大小超出限制")}
+    guard size>0 else {throw problem("云端视频为空")}
     let carrier=BIUCarrier(snapshot:sid);guard carrier.failure.isEmpty else {throw problem(carrier.failure)}
     let asset=AVURLAsset(url:url)
     guard let track=asset.tracks(withMediaType:.video).first else {throw problem("未找到视频轨道")}
@@ -117,6 +122,7 @@ public class BiuVideoCloudModule: Module {
         }}
       }
       CVPixelBufferUnlockBaseAddress(image,.readOnly);scanned+=1
+      deadline=Date().addingTimeInterval(60)
       if let payload=carrier.feed(levels) {return ["payload":payload.base64EncodedString(),"scannedFrames":scanned]}
       if !carrier.failure.isEmpty {throw problem(carrier.failure)}
       if scanned%4==0 {sendEvent("progress",["type":"frame","frame":scanned,"mediaSeconds":seconds])}

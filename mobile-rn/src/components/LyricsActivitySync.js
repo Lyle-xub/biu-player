@@ -13,7 +13,7 @@ const defaultCoverColor = [9 / 255, 9 / 255, 11 / 255];
 
 export default function LyricsActivitySync() {
   const {
-    current, queue, index, playing, buffering, lyricSettings, seekRevision,
+    current, queue, index, playing, buffering, mediaDeferred, lyricSettings, seekRevision,
     desktopLyricsEnabled, lockScreenLyricsEnabled, dynamicIslandLyricsEnabled,
   } = usePlayer();
   const { position } = usePlaybackProgress();
@@ -28,8 +28,8 @@ export default function LyricsActivitySync() {
   const setting = lyricSettings[key];
   const lines = lyricResult.key === key ? lyricResult.lines : [];
   const lyricPosition = (Number(position) || 0) + (Number(setting?.offset) || 0);
-  const needsLyrics = desktopLyricsEnabled || lockScreenLyricsEnabled || dynamicIslandLyricsEnabled;
-  const needsActivity = lockScreenLyricsEnabled || dynamicIslandLyricsEnabled;
+  const needsLyrics = !mediaDeferred && (desktopLyricsEnabled || lockScreenLyricsEnabled || dynamicIslandLyricsEnabled);
+  const needsActivity = !mediaDeferred && (lockScreenLyricsEnabled || dynamicIslandLyricsEnabled);
 
   useEffect(() => {
     if (!supported) return undefined;
@@ -91,7 +91,7 @@ export default function LyricsActivitySync() {
   const activityTick = Math.floor(lyricPosition);
 
   useEffect(() => {
-    if (!supported || !activityRendererReady || !current) return;
+    if (!supported || !activityRendererReady || !current || mediaDeferred) return;
     const line = slots[activeSlot];
     const nextLine = slots[1 - activeSlot];
     const base = {
@@ -166,9 +166,19 @@ export default function LyricsActivitySync() {
       }).catch(() => { lastActivityInput.current = null; });
     }
   }, [
-    slotKey, activeSlot, activityRendererReady, activityTick, buffering, current, desktopLyricsEnabled, dynamicIslandLyricsEnabled,
+    slotKey, activeSlot, activityRendererReady, activityTick, buffering, current, mediaDeferred, desktopLyricsEnabled, dynamicIslandLyricsEnabled,
     coverColor, lines, lockScreenLyricsEnabled, needsActivity, playing, seekRevision, setting?.offset,
   ]);
+
+  useEffect(() => {
+    if (!supported || !mediaDeferred || !current) return;
+    setLyricsPiPEnabled(false);
+    // Clear a widget's old playing state using local metadata only.
+    if (desktopLyricsEnabled) LyricsWidget.updateSnapshot({
+      title: current.title || 'Biu Player', artist: current.up || '',
+      currentLine: '', nextLine: '', playing: false,
+    });
+  }, [mediaDeferred, current, desktopLyricsEnabled]);
 
   useEffect(() => {
     if (!supported || desktopLyricsEnabled) return;

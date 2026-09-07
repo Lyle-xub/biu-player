@@ -63,25 +63,48 @@ Bytes read(const Grid& levels){
  std::array<Bytes,4> words;for(auto& w:words)w.resize(255);for(int i=0;i<4*255*8;i++){int p=layout.cells[i],byte=i/8;words[byte%4][byte/4]|=((levels[p]>threshold)^layout.mask[p])<<(7-i%8);}
  Bytes packet;for(auto& w:words){if(!correct(w))return {};packet.insert(packet.end(),w.begin(),w.begin()+191);}packet.resize(PACKET);return packet;
 }
-Encoder::Encoder(const Bytes& data,const std::string& id):length(data.size()),sid(parseSid(id)){
- require(length>=192&&length<=512*1024,"Invalid payload size");count=std::max(2,int((length+BLOCK-1)/BLOCK));require(count<=900,"Video capacity exceeded");message=data;message.resize(count*BLOCK);initWire();codec=wirehair_encoder_create(nullptr,message.data(),message.size(),BLOCK);require(codec,"Encoder initialization failed");
+static constexpr uint32_t GROUP_BLOCKS=1024;
+Encoder::Encoder(const Bytes& data,const std::string& id):sid(parseSid(id)){
+ require(data.size()>=192&&data.size()<=UINT32_MAX,"Invalid payload size");length=uint32_t(data.size());count=std::max(2,int((uint64_t(length)+BLOCK-1)/BLOCK));segmented=count>900;
+ message=data;message.resize(size_t(count)*BLOCK);initWire();
 }
 Encoder::~Encoder(){if(codec)wirehair_free(codec);}
 Bytes Encoder::packet(int index)const{
- require(index>=0&&index<frames(),"Invalid frame");Bytes out(PACKET);std::memcpy(out.data(),"BQ02",4);out[4]=2;out[5]=2;out[6]=BLOCK&255;out[7]=BLOCK>>8;std::copy(sid.begin(),sid.end(),out.begin()+8);put32(out.data()+24,index);put32(out.data()+28,count);put32(out.data()+32,length);uint32_t written=0;
- require(wirehair_encode(codec,index,out.data()+40,BLOCK,&written)==Wirehair_Success&&written==BLOCK,"Encode failed");put32(out.data()+36,crc(out));return out;
+ require(index>=0&&index<frames(),"Invalid frame");
+ uint32_t group=segmented?uint32_t(index)/(GROUP_BLOCKS*2):0,start=group*GROUP_BLOCKS;
+ uint32_t n=segmented?std::min(GROUP_BLOCKS,uint32_t(count)-start):count,local=uint32_t(index)-start*2;
+ if(codecGroup!=int(group)){
+  if(codec)wirehair_free(codec);codec=nullptr;
+  // A one-block tail has a known zero padding block; emit data and a repair symbol.
+  if(n==1){tail.assign(2*BLOCK,0);std::copy(message.begin()+size_t(start)*BLOCK,message.end(),tail.begin());codec=wirehair_encoder_create(nullptr,tail.data(),tail.size(),BLOCK);}
+  else codec=wirehair_encoder_create(nullptr,message.data()+size_t(start)*BLOCK,uint64_t(n)*BLOCK,BLOCK);
+  require(codec,"Encoder initialization failed");codecGroup=group;
+ }
+ Bytes out(PACKET);std::memcpy(out.data(),segmented?"BQ03":"BQ02",4);out[4]=segmented?3:2;out[5]=2;out[6]=BLOCK&255;out[7]=BLOCK>>8;std::copy(sid.begin(),sid.end(),out.begin()+8);put32(out.data()+24,index);put32(out.data()+28,count);put32(out.data()+32,length);uint32_t written=0;
+ require(wirehair_encode(codec,n==1&&local==1?2:local,out.data()+40,BLOCK,&written)==Wirehair_Success&&written==BLOCK,"Encode failed");put32(out.data()+36,crc(out));return out;
 }
 Grid Encoder::grid(int index)const{return render(packet(index));}
 Decoder::Decoder(const std::string& id):expected(id){parseSid(id);initWire();}
-Decoder::~Decoder(){if(codec)wirehair_free(codec);}
+Decoder::~Decoder()=default;
 bool Decoder::feed(const Grid& levels){auto p=read(levels);return !p.empty()&&packet(p);}
 bool Decoder::packet(const Bytes& p){
  if(p.size()!=PACKET)return false;auto copy=p;auto checksum=get32(p.data()+36);put32(copy.data()+36,0);if(crc(copy)!=checksum)return false;
- require(!std::memcmp(p.data(),"BQ02",4)&&p[4]==2&&p[5]==2&&(p[6]|p[7]<<8)==BLOCK,"Unsupported packet");auto sid=parseSid(expected);require(std::equal(sid.begin(),sid.end(),p.begin()+8),"Unexpected snapshot");
- auto index=get32(p.data()+24),n=get32(p.data()+28),len=get32(p.data()+32);require(len>=192&&len<=512*1024&&n==std::max(2u,(len+BLOCK-1)/BLOCK)&&index<n*2,"Invalid packet bounds");
- if(!codec){count=n;length=len;codec=wirehair_decoder_create(nullptr,count*BLOCK,BLOCK);require(codec,"Decoder initialization failed");}
- require(count==int(n)&&length==len,"Conflicting headers");auto existing=seen.find(index);if(existing!=seen.end()){require(existing->second==p,"Conflicting symbol");return !payload.empty();}seen[index]=p;
- auto result=wirehair_decode(codec,index,p.data()+40,BLOCK);require(result==Wirehair_Success||result==Wirehair_NeedMore,"Decode failed");if(result!=Wirehair_Success)return false;
- payload.resize(count*BLOCK);require(wirehair_recover(codec,payload.data(),payload.size())==Wirehair_Success,"Recovery failed");payload.resize(length);return true;
+ int v=p[4];require(((v==2&&!std::memcmp(p.data(),"BQ02",4))||(v==3&&!std::memcmp(p.data(),"BQ03",4)))&&p[5]==2&&(p[6]|p[7]<<8)==BLOCK,"Unsupported packet");auto sid=parseSid(expected);require(std::equal(sid.begin(),sid.end(),p.begin()+8),"Unexpected snapshot");
+ auto index=get32(p.data()+24),n=get32(p.data()+28),len=get32(p.data()+32);require(len>=192&&n==std::max(uint64_t(2),(uint64_t(len)+BLOCK-1)/BLOCK)&&uint64_t(index)<uint64_t(n)*2,"Invalid packet bounds");
+ if(!count){count=n;length=len;version=v;}
+ require(count==int(n)&&length==len&&version==v,"Conflicting headers");
+ uint32_t group=v==3?index/(GROUP_BLOCKS*2):0,start=group*GROUP_BLOCKS,local=index-start*2;
+ uint32_t blocks=v==3?std::min(GROUP_BLOCKS,n-start):n;
+ auto& entry=groups[group];if(!entry){entry=std::make_unique<Group>();entry->codec=wirehair_decoder_create(nullptr,uint64_t(std::max(2u,blocks))*BLOCK,BLOCK);require(entry->codec,"Decoder initialization failed");
+  if(blocks==1){Bytes zero(BLOCK);require(wirehair_decode(entry->codec,1,zero.data(),BLOCK)==Wirehair_NeedMore,"Padding initialization failed");}}
+ auto& state=*entry;auto existing=state.seen.find(local);if(existing!=state.seen.end()){require(existing->second==p,"Conflicting symbol");return !payload.empty();}state.seen[local]=p;totalSymbols++;
+ if(state.recovered.empty()){
+  auto result=wirehair_decode(state.codec,blocks==1&&local==1?2:local,p.data()+40,BLOCK);require(result==Wirehair_Success||result==Wirehair_NeedMore,"Decode failed");if(result!=Wirehair_Success)return false;
+  state.recovered.resize(size_t(std::max(2u,blocks))*BLOCK);require(wirehair_recover(state.codec,state.recovered.data(),state.recovered.size())==Wirehair_Success,"Recovery failed");state.recovered.resize(size_t(blocks)*BLOCK);
+ }
+ uint32_t needed=v==3?(n+GROUP_BLOCKS-1)/GROUP_BLOCKS:1;
+ if(groups.size()!=needed)return false;
+ for(const auto& item:groups)if(item.second->recovered.empty())return false;
+ payload.clear();payload.reserve(length);for(const auto& item:groups)payload.insert(payload.end(),item.second->recovered.begin(),item.second->recovered.end());payload.resize(length);return true;
 }
 }

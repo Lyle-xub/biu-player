@@ -18,9 +18,12 @@ function createVideoRuntime({ source, runtime = path.join(source, 'runtime') }) 
       const child = spawn(bin, args, { cwd: source, env: { ...env, ...extraEnv }, stdio: ['pipe', 'pipe', 'pipe'], detached: !windows, windowsHide: true });
       let buffer = '', error = '', settled = false;
       const cancel = () => { try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); } };
-      const deadline = setTimeout(cancel, 10*60*1000);deadline.unref?.();
+      let deadline;
+      const progress = () => { clearTimeout(deadline); deadline = setTimeout(cancel, 10*60*1000); deadline.unref?.(); };
+      progress();
       signal?.addEventListener('abort', cancel, { once: true });
       child.stdout.on('data', chunk => {
+        progress();
         buffer += chunk.toString();
         let at;
         while ((at = buffer.indexOf('\n')) >= 0) { onLine(buffer.slice(0, at)); buffer = buffer.slice(at + 1); }

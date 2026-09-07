@@ -35,6 +35,7 @@ yarn-error.*
 
 # typescript
 *.tsbuildinfo
+/src/performance/compute.generated.js
 
 # generated native folders
 /ios

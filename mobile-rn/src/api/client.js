@@ -97,16 +97,20 @@ const MIXIN_TAB = [46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
   57, 62, 11, 36, 20, 34, 44, 52];
 let wbiKeys = null;
 let wbiKeysAt = 0;
+let wbiPending = null;
 
 async function getWbiKeys() {
   if (wbiKeys && Date.now() - wbiKeysAt < 12 * 3600 * 1000) return wbiKeys;
-  const data = await biliFetch('https://api.bilibili.com/x/web-interface/nav', { skipBuvid: true }, async (res) => JSON.parse(await res.text()));
-  const wbi = data.data && data.data.wbi_img;
-  if (!wbi) throw new Error('无法获取 WBI 密钥');
-  const keyOf = (u) => u.split('/').pop().split('.')[0];
-  wbiKeys = { img: keyOf(wbi.img_url), sub: keyOf(wbi.sub_url) };
-  wbiKeysAt = Date.now();
-  return wbiKeys;
+  if (!wbiPending) wbiPending = (async () => {
+    const data = await biliFetch('https://api.bilibili.com/x/web-interface/nav', { skipBuvid: true }, async (res) => JSON.parse(await res.text()));
+    const wbi = data.data && data.data.wbi_img;
+    if (!wbi) throw new Error('无法获取 WBI 密钥');
+    const keyOf = (u) => u.split('/').pop().split('.')[0];
+    wbiKeys = { img: keyOf(wbi.img_url), sub: keyOf(wbi.sub_url) };
+    wbiKeysAt = Date.now();
+    return wbiKeys;
+  })().finally(() => { wbiPending = null; });
+  return wbiPending;
 }
 
 async function signWbi(query) {
@@ -140,20 +144,6 @@ async function ensureBuvid() {
 
 /* ---------- 统一请求：UA/Referer/Cookie/超时，opts.wbi 时签名 ---------- */
 export async function biliFetch(url, opts = {}, consume = (res) => res) {
-  await initClient();
-  if (!opts.skipBuvid) await ensureBuvid();
-  const u = new URL(url);
-  if (opts.wbi) {
-    const signed = await signWbi(u.search.replace(/^\?/, ''));
-    url = u.origin + u.pathname + '?' + signed;
-  }
-  const cookie = opts.cookies === false ? '' : cookieHeaderFor(u.hostname);
-  const headers = {
-    'User-Agent': UA,
-    Referer: opts.referer || REFERER,
-    ...(cookie ? { Cookie: cookie } : {}),
-    ...(opts.headers || {}),
-  };
   const controller = new AbortController();
   let rejectAbort;
   const interrupted = new Promise((_, reject) => { rejectAbort = reject; });
@@ -166,6 +156,23 @@ export async function biliFetch(url, opts = {}, consume = (res) => res) {
   const timer = setTimeout(abort, opts.timeout || 10000);
   try {
     return await Promise.race([interrupted, (async () => {
+      if (controller.signal.aborted) throw Object.assign(new Error('请求已取消'), { name: 'AbortError' });
+      await initClient();
+      if (controller.signal.aborted) throw Object.assign(new Error('请求已取消'), { name: 'AbortError' });
+      if (!opts.skipBuvid) await ensureBuvid();
+      if (controller.signal.aborted) throw Object.assign(new Error('请求已取消'), { name: 'AbortError' });
+      const u = new URL(url);
+      if (opts.wbi) {
+        const signed = await signWbi(u.search.replace(/^\?/, ''));
+        url = u.origin + u.pathname + '?' + signed;
+      }
+      const cookie = opts.cookies === false ? '' : cookieHeaderFor(u.hostname);
+      const headers = {
+        'User-Agent': UA,
+        Referer: opts.referer || REFERER,
+        ...(cookie ? { Cookie: cookie } : {}),
+        ...(opts.headers || {}),
+      };
       if (controller.signal.aborted) throw Object.assign(new Error('请求已取消'), { name: 'AbortError' });
       const res = await fetch(url, {
         method: opts.method || 'GET',
@@ -517,9 +524,9 @@ async function completeAppLogin(grant, data, signal) {
   if (!grant.login) grant.check();
   return { status: 'authorized', ...(auth ? { auth } : {}) };
 }
-export async function appGet(path, params = {}) {
+export async function appGet(path, params = {}, { signal, timeout } = {}) {
   if (path !== '/x/v2/feed/index') throw new Error('不支持的移动端接口');
-  const session = await appSession();
+  const session = await appSession(signal);
   let auth;
   try { auth = JSON.parse(await SecureStore.getItemAsync(session.storageKey)); } catch { /* Request App approval again. */ }
   session.check();
@@ -527,7 +534,7 @@ export async function appGet(path, params = {}) {
     throw appAuthRequired();
   }
   if (!(auth.expiresAt > Date.now() + 60000)) throw appAuthRequired('App 推荐授权已到期，请打开 B 站重新授权');
-  const opts = await appOptions();
+  const opts = { ...await appOptions(signal), timeout };
   session.check();
   const response = await get(`https://app.bilibili.com${path}?${signApp({ ...params, access_key: auth.token })}`, opts);
   session.check();

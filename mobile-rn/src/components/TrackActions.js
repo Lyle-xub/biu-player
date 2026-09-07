@@ -95,7 +95,6 @@ function TrackActionsSheet({ track, source, playlistId, removeTrack, onClose }) 
   const liked = context.isLiked(track), inLibrary = context.isInLibrary(track);
   const collectionName = source === 'likes' ? '我的喜欢' : source === 'library' ? '音乐库' : '歌单';
   return <BottomSheet visible onClose={onClose} style={styles.sheet}>
-    <View accessible={false} style={styles.handle} />
     <View style={styles.header}>
       <RemoteImage uri={track.pic} width={160} height={160} transition={0} style={styles.cover}
         fallback={<View style={styles.coverFallback}><IconNote size={24} color={colors.accent} /></View>} />
@@ -144,7 +143,6 @@ function TrackActionsSheet({ track, source, playlistId, removeTrack, onClose }) 
 }
 const styles = StyleSheet.create({
   sheet: { maxHeight: '86%', borderTopLeftRadius: 28, borderTopRightRadius: 28, paddingTop: 10 },
-  handle: { width: 32, height: 4, borderRadius: 2, backgroundColor: colors.cardBorder, alignSelf: 'center', marginBottom: 18 },
   header: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 20 },
   cover: { width: 56, height: 56, borderRadius: 14, backgroundColor: colors.card },
   coverFallback: { flex: 1, alignItems: 'center', justifyContent: 'center' },

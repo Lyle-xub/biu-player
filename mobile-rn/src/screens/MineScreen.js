@@ -7,9 +7,9 @@
  *   双列卡片网格：自建歌单 = 本地数据层（src/store/playlists.js，封面按歌单固定），
  *   收藏夹 = B 站 favFolders（需登录，未登录引导登录）
  */
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View,
+  FlatList, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors } from '../theme';
@@ -28,7 +28,8 @@ import {
 } from '../components/icons';
 
 export default function MineScreen({ navigation }) {
-  const { likes, libraryTracks = [], playQueue, history, account: auth, switchAccount } = usePlayer();
+  const { likes, libraryTracks = [], playQueue, history, account: auth, switchAccount } = usePlayer(
+    ['likes', 'libraryTracks', 'playQueue', 'history', 'account', 'switchAccount']);
   const playlists = usePlaylists();
   const [gridTab, setGridTab] = useState('local'); // local 自建歌单 | fav 收藏夹
   const [confirm, setConfirm] = useState(null);
@@ -39,24 +40,37 @@ export default function MineScreen({ navigation }) {
   const [createVisible, setCreateVisible] = useState(false);
   const [newPlName, setNewPlName] = useState('');
   const [loginVisible, setLoginVisible] = useState(false);
-  /* ---------- 收藏夹（B 站同步，需登录） ---------- */
-  const loadFavs = useCallback(async (a) => {
-    if (!a || !a.isLogin) { setFavs([]); return; }
-    setFavLoading(true);
-    setFavError(null);
+  /* ---------- 收藏夹（缓存立即显示，刷新失败保留旧列表） ---------- */
+  const scope = auth?.isLogin && auth.mid ? String(auth.mid) : '';
+  const favGeneration = useRef(0), favPending = useRef(null);
+  const loadFavs = useCallback(async (force = false) => {
+    if (!scope || favPending.current) return;
+    const generation = favGeneration.current;
+    const token = {}; favPending.current = token;
+    const valid = () => generation === favGeneration.current;
+    setFavLoading(true); setFavError(null);
     try {
-      const folders = await bili.favFolders(a.mid);
-      setFavs(await stabilizeFavoriteCovers(a.mid, folders));
+      const cached = await bili.cachedFavFolders(scope);
+      if (!valid()) return;
+      if (cached.length) setFavs(cached);
+      const folders = await bili.favFolders(scope, { force });
+      if (!valid()) return;
+      const stable = await stabilizeFavoriteCovers(scope, folders);
+      if (valid()) setFavs(stable);
     } catch (e) {
-      console.warn('[MineScreen] 收藏夹加载失败：', String(e.message || e));
-      setFavError(String(e.message || e));
+      if (valid()) setFavError(String(e.message || e));
     } finally {
-      setFavLoading(false);
+      if (favPending.current === token) favPending.current = null;
+      if (valid()) setFavLoading(false);
     }
-  }, []);
+  }, [scope]);
 
-  useEffect(() => { if (auth) loadFavs(auth); }, [auth, loadFavs]);
-  useEffect(() => navigation.addListener?.('focus', () => loadFavs(auth)), [navigation, auth, loadFavs]);
+  useEffect(() => {
+    setFavs([]); setFavError(null); setFavLoading(false);
+    loadFavs();
+    return () => { favGeneration.current++; favPending.current = null; };
+  }, [loadFavs]);
+  useEffect(() => navigation.addListener?.('focus', () => loadFavs()), [navigation, loadFavs]);
   const doLogout = async () => {
     await logout();
     await switchAccount({ isLogin: false });
@@ -122,7 +136,26 @@ export default function MineScreen({ navigation }) {
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
-      <ScrollView contentContainerStyle={styles.content}>
+      <FlatList
+        keyboardShouldPersistTaps="handled"
+        contentContainerStyle={styles.content}
+        data={gridTab === 'local' ? playlists : favs}
+        extraData={gridTab}
+        keyExtractor={item => `${gridTab}:${item.id}`}
+        numColumns={2}
+        columnWrapperStyle={styles.grid}
+        initialNumToRender={6} maxToRenderPerBatch={4} windowSize={5}
+        renderItem={({ item }) => renderGridCard(gridTab === 'local' ? {
+          key: item.id, pic: item.cover, seed: defaultCoverSeed(item.id), title: item.title,
+          meta: `${item.tracks.length} 首`,
+          onPress: () => navigation.navigate('LocalPlaylist', { id: item.id }),
+          onLongPress: () => confirmDeletePl(item),
+        } : {
+          key: item.id, pic: item.pic, seed: item.seed, title: item.title, meta: `${item.count} 首`,
+          onPress: () => navigation.navigate('PlaylistDetail', { mediaId: item.id, title: item.title, intro: item.intro }),
+        })}
+        ListHeaderComponent={<>
+
         {/* 资料卡 */}
         <View style={styles.accountCard}>
           {auth && auth.isLogin ? (
@@ -158,7 +191,7 @@ export default function MineScreen({ navigation }) {
         {/* 圆形图标菜单 */}
         <View style={styles.menuRow}>
           {menuItems.map(({ key, label, count, Icon, onPress }) => (
-            <TouchableOpacity key={key} style={styles.menuItem} activeOpacity={0.7} onPress={onPress}>
+            <TouchableOpacity key={key} accessibilityRole="button" accessibilityLabel={label} style={styles.menuItem} activeOpacity={0.7} onPress={onPress}>
               <View style={styles.menuCircle}>
                 <Icon size={20} color={colors.text} />
               </View>
@@ -231,46 +264,23 @@ export default function MineScreen({ navigation }) {
           ) : null}
         </View>
 
-        {gridTab === 'local' ? (
-          playlists.length ? (
-            <View style={styles.grid}>
-              {playlists.map((pl) => renderGridCard({
-                key: pl.id,
-                pic: pl.cover,
-                seed: defaultCoverSeed(pl.id),
-                title: pl.title,
-                meta: `${pl.tracks.length} 首`,
-                onPress: () => navigation.navigate('LocalPlaylist', { id: pl.id }),
-                onLongPress: () => confirmDeletePl(pl),
-              }))}
-            </View>
-          ) : (
-            <Text style={styles.gridHint}>还没有自建歌单，点右上角 + 新建一个</Text>
-          )
+        </>}
+        ListEmptyComponent={gridTab === 'local' ? (
+          <Text style={styles.gridHint}>还没有自建歌单，点右上角 + 新建一个</Text>
         ) : favLoading ? (
           <Text style={styles.gridHint}>收藏夹加载中…</Text>
-        ) : favError ? (
+        ) : !favError ? (
+          <Text style={styles.gridHint}>还没有收藏夹，去 B 站创建一个吧</Text>
+        ) : null}
+        ListFooterComponent={gridTab === 'fav' && favError ? (
           <View style={styles.gridMsgBox}>
-            <Text style={styles.gridHint}>{favError}</Text>
-            <TouchableOpacity style={styles.actionBtn} onPress={() => loadFavs(auth)}>
+            <Text style={styles.gridHint}>{favs.length ? '更新失败，已保留上次的收藏夹' : favError}</Text>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="重试" style={styles.actionBtn} onPress={() => loadFavs(true)}>
               <Text style={styles.actionText}>重试</Text>
             </TouchableOpacity>
           </View>
-        ) : favs.length ? (
-          <View style={styles.grid}>
-            {favs.map((f) => renderGridCard({
-              key: f.id,
-              pic: f.pic,
-              seed: f.seed,
-              title: f.title,
-              meta: `${f.count} 首`,
-              onPress: () => navigation.navigate('PlaylistDetail', { mediaId: f.id, title: f.title, intro: f.intro }),
-            }))}
-          </View>
-        ) : (
-          <Text style={styles.gridHint}>还没有收藏夹，去 B 站创建一个吧</Text>
-        )}
-      </ScrollView>
+        ) : null}
+      />
 
       {/* 新建歌单弹窗 */}
       <Dialog visible={createVisible} onClose={() => setCreateVisible(false)}>
@@ -385,7 +395,7 @@ const styles = StyleSheet.create({
 
   /* 双列卡片网格 */
   grid: {
-    flexDirection: 'row', flexWrap: 'wrap', gap: 12, paddingHorizontal: 14,
+    gap: 12, paddingHorizontal: 14, paddingBottom: 12,
   },
   gridCard: { width: '47.6%' },
   gridCover: {

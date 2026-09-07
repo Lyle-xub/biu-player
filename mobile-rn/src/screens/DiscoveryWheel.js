@@ -1,7 +1,8 @@
 import React, { useId, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import Animated, { runOnJS, useAnimatedReaction, useAnimatedStyle, useDerivedValue, withTiming } from 'react-native-reanimated';
-import Svg, { Defs, LinearGradient, Path, Stop } from 'react-native-svg';
+import Svg, { Defs, LinearGradient, RadialGradient, Rect, Path, Stop } from 'react-native-svg';
+import MaskedView from '@react-native-masked-view/masked-view';
 import RemoteImage from '../components/RemoteImage';
 import { visibleWheelSlots, wheelGeometry, wheelPosition, wrap } from './discoveryGesture';
 
@@ -55,7 +56,24 @@ const WheelItem = React.memo(function WheelItem({ target, slot, count, height, r
     <GlassFolder target={target} open={open} />
   </Animated.View>;
 });
-function DiscoveryWheel({ targets, height, rotation, hover, visibility }) {
+const WheelHaze = React.memo(function WheelHaze({ backdrop }) {
+  const hazeId = useId().replace(/:/g, '') + 'haze';
+  return (
+    <MaskedView pointerEvents="none" androidRenderingMode="hardware" style={s.haze}
+      maskElement={<Svg width="100%" height="100%" viewBox="0 0 340 220" preserveAspectRatio="none">
+        <Defs><RadialGradient id={hazeId} cx="72%" cy="65%" rx="72%" ry="65%">
+          <Stop offset="0" stopColor="#fff" stopOpacity="0.85" />
+          <Stop offset="0.38" stopColor="#fff" stopOpacity="0.5" />
+          <Stop offset="1" stopColor="#fff" stopOpacity="0" />
+        </RadialGradient></Defs>
+        <Rect width="340" height="220" fill={`url(#${hazeId})`} />
+      </Svg>}>
+      <RemoteImage uri={backdrop} width={720} height={960} blurRadius={64} transition={0}
+        cachePolicy="memory-disk" style={StyleSheet.absoluteFill} />
+    </MaskedView>
+  );
+});
+function DiscoveryWheel({ targets, height, rotation, hover, visibility, backdrop }) {
   const [center, setCenter] = useState(0);
   const { radius, halfHeight } = wheelGeometry(targets.length, height);
   const count = targets.length;
@@ -64,6 +82,7 @@ function DiscoveryWheel({ targets, height, rotation, hover, visibility }) {
     (slot, previous) => { if (slot !== null && slot !== previous) runOnJS(setCenter)(slot); }, [count]);
   const appearance = useAnimatedStyle(() => ({ opacity: visibility.value, transform: [{ translateX: 24 * (1 - visibility.value) }] }));
   return <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, appearance]}>
+    <WheelHaze backdrop={backdrop} />
     <View style={[s.ring, { width: radius * 2, height: radius * 2, borderRadius: radius,
       right: 52 - radius * 2, top: height / 2 - radius }]} />
     <Text style={[s.edge, { top: height / 2 - halfHeight - 20 }]}>↑ 贴边加速</Text>
@@ -76,6 +95,7 @@ function DiscoveryWheel({ targets, height, rotation, hover, visibility }) {
 }
 export default React.memo(DiscoveryWheel);
 const s = StyleSheet.create({
+  haze: { position: 'absolute', right: -70, bottom: -32, width: 340, height: 220 },
   ring: { position: 'absolute', borderWidth: 1, borderColor: 'rgba(255,255,255,0.15)' },
   edge: { position: 'absolute', right: 24, color: '#a6adb2', fontSize: 10 },
   item: { position: 'absolute', right: 12, top: -39, width: 104, height: 78 },

@@ -1,7 +1,22 @@
+import { isRecommendationBusy } from '../updates/networkGate';
 import md5 from 'js-md5';
-import { endpoint, normalize, profileCount, privateIPv4 } from '../../../renderer/library-sync';
+import { endpoint, libraryCount, profileCount, privateIPv4 } from '../../../renderer/library-sync';
+import { backgroundCompute } from '../performance/backgroundCompute';
 
-export const libraryRevision = (library) => md5(JSON.stringify(normalize(library)));
+export const libraryRevision = async (library) => (await backgroundCompute('librarySnapshot', library)).revision;
+// PlayerContext and committed baselines are immutable. Reuse their validated
+// wire snapshots so a 4-second status probe does not scan/hash the whole library.
+export function createLibrarySnapshot() {
+  const cache = new WeakMap();
+  return (source, { discovery = true } = {}) => {
+    const entries = cache.get(source);
+    if (entries?.has(discovery)) return entries.get(discovery);
+    const result = backgroundCompute('librarySnapshot', source, { discovery });
+    const next = entries || new Map(); next.set(discovery, result); cache.set(source, next);
+    result.catch(() => { if (next.get(discovery) === result) next.delete(discovery); });
+    return result;
+  };
+}
 export function discoveredPeer(service, scope) {
   const txt = service?.txt;
   if (!/^\d{1,20}$/.test(scope) || txt?.version !== '2' || txt.account !== md5('biu-lan:' + scope)
@@ -29,7 +44,7 @@ export async function lanRequest(peer, scope, path, payload, signal) {
         method: payload ? 'POST' : 'GET', signal: controller.signal, redirect: 'error', credentials: 'omit',
         headers: { Authorization: 'Bearer ' + peer.token, 'X-Biu-Account': scope,
           ...(payload ? { 'Content-Type': 'application/json' } : {}) },
-        ...(payload ? { body: JSON.stringify(payload) } : {}),
+        ...(payload ? { body: await backgroundCompute('stringify', payload) } : {}),
       });
       const result = await response.json();
       receivedResponse = true;
@@ -54,7 +69,7 @@ export async function lanRequest(peer, scope, path, payload, signal) {
 // One runner per foreground account, independent of the current screen.
 // Only exchange full libraries when either side changed; idle polls are tiny.
 export function startAutoSync({ scope, clientId, discovery, implementation = 'DNSSD', storage, getLibrary, applyLibrary, syncCloudKey, getInboundStatus, onStatus, interval = 4000 }) {
-  const peers = new Map(), baselines = new Map();
+  const peers = new Map(), baselines = new Map(), snapshot = createLibrarySnapshot();
   const controller = new AbortController();
   const { signal } = controller;
   let busy = false, timer;
@@ -67,7 +82,7 @@ export function startAutoSync({ scope, clientId, discovery, implementation = 'DN
     catch (e) { report({ connected: false, message: '局域网发现暂不可用，请检查网络权限或重新进入 App' }); }
   };
   async function poll() {
-    if (signal.aborted || busy) return;
+    if (signal.aborted || busy || isRecommendationBusy()) return;
     busy = true;
     try {
       let connected = false, failureMessage = '';
@@ -78,14 +93,15 @@ export function startAutoSync({ scope, clientId, discovery, implementation = 'DN
           if (!baselines.has(peer.id)) {
             const raw = await storage.getItem(key);
             let value = null;
-            try { value = raw ? normalize(JSON.parse(raw)) : null; } catch { /* First exchange after a damaged snapshot. */ }
+            try { value = raw ? await backgroundCompute('libraryNormalize', await backgroundCompute('parse', raw)) : null; } catch { /* First exchange after a damaged snapshot. */ }
             baselines.set(peer.id, value);
           }
           const remote = await lanRequest(peer, scope, 'status', null, signal);
           if (peers.get(peer.id) !== peer) continue;
           const supported = { discovery: remote.discoveryProfiles === true };
           const savedBase = baselines.get(peer.id);
-          const base = savedBase ? normalize(savedBase, supported) : null;
+          const baseSnapshot = savedBase ? await snapshot(savedBase, supported) : null;
+          const base = baseSnapshot?.library || null;
           // Key changes are independent of library revisions, including an idle library.
           if(syncCloudKey && remote.cloudKey) {
             try {
@@ -94,23 +110,26 @@ export function startAutoSync({ scope, clientId, discovery, implementation = 'DN
                 :keyResult==='synced'?'云同步密钥已自动同步':''});
             } catch {report({cloudKeyMessage:'云同步密钥暂未同步，将自动重试'});}
           }
-          const local = normalize(await getLibrary(scope), supported);
+          const localSnapshot = await snapshot(await getLibrary(scope), supported);
+          const local = localSnapshot.library;
           if (signal.aborted) return;
-          const sharedRevision = base && libraryRevision(base);
-          if (!peer.synced || sharedRevision !== remote.revision || sharedRevision !== libraryRevision(local)) {
+          const sharedRevision = baseSnapshot?.revision;
+          if (!peer.synced || sharedRevision !== remote.revision || sharedRevision !== localSnapshot.revision) {
             const result = await lanRequest(peer, scope, 'sync', { clientId, base, library: local }, signal);
             if (signal.aborted) return;
-            const incoming = normalize(result.library, supported);
+            const incoming = await backgroundCompute('libraryNormalize', result.library, supported);
             if (typeof result.receipt !== 'string') throw new Error('同步确认信息缺失');
             await applyLibrary(incoming, local, scope);
             if (signal.aborted) return;
-            await storage.setItem(key, JSON.stringify(incoming));
+            const raw = await backgroundCompute('stringify', incoming);
+            if (signal.aborted) return;
+            await storage.setItem(key, raw);
             baselines.set(peer.id, incoming);
             await lanRequest(peer, scope, 'ack', { clientId, receipt: result.receipt }, signal);
             peer.synced = true;
-            report({ message: '已同步 · ' + incoming.likes.length + ' 首喜欢 · ' + incoming.library.length + ' 首音乐库 · ' + incoming.playlists.length + ' 个歌单 · ' + profileCount(incoming) + ' 份画像',
+            report({ message: '已同步 · ' + incoming.likes.length + ' 首喜欢 · ' + libraryCount(incoming) + ' 首音乐库 · ' + incoming.playlists.length + ' 个歌单 · ' + profileCount(incoming) + ' 份画像',
               connected: true, lastSync: Date.now() });
-          } else report({ connected: true, message: '已同步 · ' + base.likes.length + ' 首喜欢 · ' + base.library.length + ' 首音乐库 · ' + base.playlists.length + ' 个歌单 · ' + profileCount(base) + ' 份画像' });
+          } else report({ connected: true, message: '已同步 · ' + base.likes.length + ' 首喜欢 · ' + libraryCount(base) + ' 首音乐库 · ' + base.playlists.length + ' 个歌单 · ' + profileCount(base) + ' 份画像' });
           connected = true;
         } catch (e) {
           if (peers.get(peer.id) !== peer) continue;

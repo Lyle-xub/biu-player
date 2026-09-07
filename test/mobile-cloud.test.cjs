@@ -34,6 +34,7 @@ test('mobile crypto and Buffer share signed descriptors with desktop; keys stay 
    // java.io.File(URI) rejects an authority, as FileSystem.info does on Android.
    assert.equal(new URL(uri).host,'');require('node:url').fileURLToPath(uri);return {exists:false};
   }},File:class{},Directory:class{}},
+  'expo-file-system/legacy': {writeAsStringAsync: async () => {}},
   'expo-modules-core':{requireOptionalNativeModule:()=>({
    randomHex:size=>require('node:crypto').randomBytes(size).toString('hex'),
    writeTextFile:(uri,value)=>nativeWrites.push({uri,value,type:'text'}),
@@ -63,4 +64,15 @@ test('mobile crypto and Buffer share signed descriptors with desktop; keys stay 
  assert.equal(signed,desktop.descriptor(meta,key));assert.deepEqual(api.parseDescriptor(signed,key),meta);
  const reference=mobile.protect(fixture.key);assert.notEqual(reference,fixture.key);assert.equal(mobile.unprotect(reference),fixture.key);
  assert.throws(()=>mobile.unprotect('arbitrary-key'));
+});
+test('mobile cloud removes library quotas while retaining authenticated roundtrips above 512KB compressed and 8MB JSON', async () => {
+ const {seal,unseal}=await import('../mobile-rn/src/cloud/envelope.js');
+ const crypto=require('node:crypto'),key=crypto.randomBytes(32);
+ const library={version:1,likes:[],playlists:[],entropy:crypto.randomBytes(850000).toString('hex'),padding:'中'.repeat(3*1024*1024)};
+ assert.ok(Buffer.byteLength(JSON.stringify(library))>8*1024*1024);
+ const {payload,snapshotId}=seal(library,key,crypto.randomBytes(12),'large-phone');
+ assert.ok(payload.length>512*1024);
+ assert.deepEqual(unseal(payload,key,snapshotId),library);
+ const large=require('../renderer/library-sync').normalize({version:1,likes:Array.from({length:20001},(_,i)=>({bvid:'BV'+i})),playlists:[]});
+ assert.equal(large.likes.length,20001);
 });

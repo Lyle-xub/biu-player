@@ -3,7 +3,6 @@
   if (typeof module === 'object' && module.exports) module.exports = factory(require('./recommendation-profile'));
   else root.BiuLibrarySync = factory(root.BiuRecommendation);
 })(typeof window === 'object' ? window : this, function (recommendation) {
-  const MAX_TRACKS = 20000;
   const object = (v) => v && typeof v === 'object' && !Array.isArray(v);
   const text = (v, max = 2048) => typeof v === 'string' && v.length <= max;
   function track(v) {
@@ -27,7 +26,7 @@
   const trackKey = (t) => t.isLive ? `live:${t.roomid}` : t.isSegment
     ? `${t.bvid}:${t.cid || 0}:${t.from}:${t.to}` : t.bvid;
   function tracks(values) {
-    if (!Array.isArray(values) || values.length > MAX_TRACKS) throw new Error('歌曲数量无效或超过 20000 首');
+    if (!Array.isArray(values)) throw new Error('歌曲数据格式无效');
     return unique(values.map(track), trackKey);
   }
   function unique(values, key) {
@@ -36,19 +35,16 @@
     return [...result.values()];
   }
   function normalize(v, { discovery = true } = {}) {
-    if (!object(v) || v.version !== 1 || !Array.isArray(v.playlists) || v.playlists.length > 1000) throw new Error('同步数据格式或版本不兼容');
+    if (!object(v) || v.version !== 1 || !Array.isArray(v.playlists)) throw new Error('同步数据格式或版本不兼容');
     const likes = tracks(v.likes);
     const library = tracks(v.library || []);
-    let count = likes.length + library.length;
     const playlists = v.playlists.map((p) => {
       if (!object(p) || !(text(p.id, 128) && p.id || Number.isSafeInteger(p.id) && p.id > 0)
         || !text(p.title) || !p.title.trim()) throw new Error('歌单数据无效');
       const out = { id: p.id, title: p.title, tracks: tracks(p.tracks) };
-      count += out.tracks.length;
-      if (count > MAX_TRACKS) throw new Error('本次同步歌曲总数超过 20000 首');
       if (Number.isFinite(p.createdAt)) out.createdAt = p.createdAt;
       if (text(p.desc, 8192)) out.desc = p.desc;
-      if (text(p.cover, 512000) && /^(https?:\/\/|data:image\/(png|jpeg|webp);base64,)/i.test(p.cover)) out.cover = p.cover;
+      if (typeof p.cover === 'string' && /^(https?:\/\/|data:image\/(png|jpeg|webp);base64,)/i.test(p.cover)) out.cover = p.cover;
       return out;
     });
     if (new Set(playlists.map((p) => String(p.id))).size !== playlists.length) throw new Error('歌单标识重复');
@@ -106,6 +102,7 @@
       recommendation: recommendation.reconcile(base.recommendation, local.recommendation, remote.recommendation),
       discoveryRecommendation: recommendation.reconcile(base.discoveryRecommendation, local.discoveryRecommendation, remote.discoveryRecommendation) });
   }
+  const libraryCount = (value) => new Set([...(value.likes || []), ...(value.library || [])].map(trackKey)).size;
   const profileCount = (library) => [library.recommendation, library.discoveryRecommendation]
     .reduce((count, state) => count + (state ? state.profiles.length + 1 : 0), 0);
   function privateIPv4(address) {
@@ -120,5 +117,5 @@
     if (!match || !privateIPv4(match[1]) || +match[2] < 1 || +match[2] > 65535) throw new Error('请输入电脑显示的局域网地址和端口，例如 192.168.1.10:43821');
     return `http://${match[1]}:${Number(match[2])}`;
   }
-  return { normalize, merge, reconcile, profileCount, trackKey, privateIPv4, endpoint };
+  return { normalize, merge, reconcile, libraryCount, profileCount, trackKey, privateIPv4, endpoint };
 });

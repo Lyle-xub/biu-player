@@ -2,6 +2,7 @@
  * endpoint 与参数与桌面端一致；返回结构与原 api 对象相同。
  */
 import * as client from './client';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { mediaUrl } from './mediaUrl';
 import { fetchSubtitles } from '../../../renderer/subtitles';
 
@@ -90,7 +91,7 @@ export async function ranking() {
 }
 
 // B 站首页的真实个性推荐。该接口依赖当前账号 Cookie，并直接保留服务端推荐顺序。
-export async function personalizedRecommendations(freshIdx = 0, limit = 12) {
+export async function personalizedRecommendations(freshIdx = 0, limit = 12, opts = {}) {
   const index = Math.max(0, Number(freshIdx) || 0);
   const query = new URLSearchParams({
     version: '1', feed_version: 'V8', homepage_ver: '1', ps: String(Math.min(30, Math.max(1, limit))),
@@ -98,10 +99,14 @@ export async function personalizedRecommendations(freshIdx = 0, limit = 12) {
   });
   const request = () => jget(
     'https://api.bilibili.com/x/web-interface/wbi/index/top/feed/rcmd?' + query,
-    { wbi: true });
+    { ...opts, wbi: true });
   let data;
   try { data = await request(); }
-  catch { await new Promise((resolve) => setTimeout(resolve, 400)); data = await request(); }
+  catch (error) {
+    if (opts.signal?.aborted || opts.retry === false) throw error;
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    data = await request();
+  }
   const seen = new Set();
   return (data.item || [])
     .filter((item) => {
@@ -114,8 +119,19 @@ export async function personalizedRecommendations(freshIdx = 0, limit = 12) {
     .map((item) => recommendationToTrack(item, item));
 }
 
+// AV/BV conversion used by PiliPlus IdUtils (51-bit archive IDs).
+export function aidToBvid(aid) {
+  if (!Number.isSafeInteger(aid) || aid <= 0 || aid >= 2 ** 51) return null;
+  const alphabet = 'FcwAPNKTMug3GV5Lj7EJnHpWsx4tb8haYeviqBz6rkCy12mUSDQX9RdoZf';
+  const out = Array.from('BV1000000000');
+  let value = (BigInt(aid) | (1n << 51n)) ^ 23442827791579n, index = 11;
+  while (value) { out[index--] = alphabet[Number(value % 58n)]; value /= 58n; }
+  [out[3], out[9]] = [out[9], out[3]]; [out[4], out[7]] = [out[7], out[4]];
+  return out.join('');
+}
+
 // App recommendation cards use args/player_args instead of the web feed shape.
-export async function mobileRecommendations(cursor = null) {
+export async function mobileRecommendations(cursor = null, opts = {}) {
   const idx = cursor == null ? 0 : Number(cursor);
   const data = await client.appGet('/x/v2/feed/index', {
     platform: 'android', mobi_app: 'android_hd', device: 'pad', build: 2001100,
@@ -125,48 +141,36 @@ export async function mobileRecommendations(cursor = null) {
     network: 'wifi', player_net: 1, pull: idx === 0 ? 'true' : 'false', idx,
     qn: 32, recsys_mode: 0, splash_id: '', voice_balance: 0,
     statistics: '{"appId":5,"platform":3,"version":"2.0.1","abtest":""}',
-  });
+  }, opts);
   const raw = Array.isArray(data?.items) ? data.items : [];
   const seen = new Set();
   const cards = raw.filter((item) => {
-    if (item.goto !== 'av' || item.can_play === 0 || item.ad_info || String(item.card_goto || '').includes('ad') || !item.player_args) return false;
-    const id = item.bvid || item.player_args.aid || item.args?.aid || item.param;
+    if (item.goto !== 'av' || item.can_play === 0 || item.ad_info || String(item.card_goto || '').includes('ad')) return false;
+    const id = item.bvid || item.player_args?.aid || item.args?.aid || item.param;
     if (!id || seen.has(String(id))) return false;
     seen.add(String(id)); return true;
   });
-  const items = [];
-  for (let offset = 0; offset < cards.length; offset += 4) {
-    items.push(...(await Promise.all(cards.slice(offset, offset + 4).map(async (item) => {
-      const aid = Number(item.player_args.aid || item.args?.aid || item.param);
-      let bvid = item.bvid || String(item.uri || '').match(/BV[0-9A-Za-z]{10}/)?.[0];
-      let detail = {};
-      // Older app cards expose only av IDs. Resolve them through the video info
-      // API, never through the web recommendation feed.
-      if (!bvid && Number.isSafeInteger(aid) && aid > 0) {
-        detail = await jget(`https://api.bilibili.com/x/web-interface/view?aid=${aid}`);
-        bvid = detail.bvid;
-        if (!bvid) throw new Error('App 推荐的视频信息暂时不可用，请重试');
-      }
-      if (!bvid) return null;
-      return { ...toTrack(detail), bvid, aid, cid: item.player_args.cid || detail.cid || 0,
-        tid: Number(item.args?.tid || detail.tid) || 0,
-        tname: stripEm(item.args?.tname || detail.tname),
-        title: stripEm(item.title), pic: absImg(item.cover),
-        up: item.args?.up_name || item.avatar?.text || detail.owner?.name || '',
-        mid: item.args?.up_id || item.avatar?.up_id || detail.owner?.mid || 0,
-        duration: item.player_args.duration || parseDur(item.cover_right_text) || detail.duration || 0,
-        tags: Array.isArray(item.tags) ? item.tags : [],
-        recommendationReason: stripEm(item.rcmd_reason_style?.text || item.bottom_rcmd_reason_style?.text || ''),
-      };
-    }))).filter(Boolean));
-  }
+  // Like PiliPlus, derive BV locally: one response becomes one renderable page.
+  const items = cards.map((item) => {
+    const aid = Number(item.player_args?.aid || item.args?.aid || item.param);
+    const bvid = item.bvid || String(item.uri || '').match(/BV[0-9A-Za-z]{10}/)?.[0] || aidToBvid(aid);
+    if (!bvid) return null;
+    return { bvid, aid, cid: item.player_args?.cid || 0,
+      tid: Number(item.args?.tid) || 0, tname: stripEm(item.args?.tname),
+      title: stripEm(item.title), pic: absImg(item.cover),
+      up: item.args?.up_name || item.avatar?.text || '', mid: item.args?.up_id || item.avatar?.up_id || 0,
+      duration: item.player_args?.duration || parseDur(item.cover_right_text) || 0,
+      tags: Array.isArray(item.tags) ? item.tags : [],
+      recommendationReason: stripEm(item.rcmd_reason_style?.text || item.bottom_rcmd_reason_style?.text || ''),
+    };
+  }).filter(Boolean);
   // Android HD uses the refresh/page index, as in PiliPlus's RcmdController.
   return { items, nextIdx: String(idx + 1) };
 }
 
 // Video metadata endpoints continue to use the account's web cookie jar.
-export async function relatedVideos(bvid) {
-  const data = await jget('https://api.bilibili.com/x/web-interface/archive/related?bvid=' + encodeURIComponent(bvid));
+export async function relatedVideos(bvid, opts = {}) {
+  const data = await jget('https://api.bilibili.com/x/web-interface/archive/related?bvid=' + encodeURIComponent(bvid), opts);
   const seen = new Set([bvid]);
   return (Array.isArray(data) ? data : []).filter((item) => {
     if (!item?.bvid || seen.has(item.bvid)) return false;
@@ -174,36 +178,78 @@ export async function relatedVideos(bvid) {
   }).map(toTrack);
 }
 
-export async function videoTags(bvid) {
-  const data = await jget('https://api.bilibili.com/x/web-interface/view/detail/tag?bvid=' + encodeURIComponent(bvid));
+export async function videoTags(bvid, options = {}) {
+  const data = await jget('https://api.bilibili.com/x/web-interface/view/detail/tag?bvid=' + encodeURIComponent(bvid), options);
   if (!Array.isArray(data)) throw new Error('视频标签响应异常');
   return data.map((tag) => stripEm(tag.tag_name)).filter(Boolean);
 }
 
 // Stream playable music matches as they resolve; a slow sibling must not hide them.
-export async function personalizedMusicRecommendations(freshIdx = 0, limit = 20, onBatch) {
-  const candidates = await personalizedRecommendations(freshIdx, limit);
-  const music = [];
-  for (let offset = 0; offset < candidates.length; offset += 5) {
-    const batch = candidates.slice(offset, offset + 5);
-    const failures = [];
-    await Promise.all(batch.map(async (item) => {
-      let detail;
-      try { detail = item.tid ? item : await view(item.bvid); }
-      catch (error) { failures.push(error); return; }
-      if (!isMusicPartition(detail)) return;
-      const track = { ...item,
-        aid: detail.aid || item.aid, cid: detail.cid || item.cid,
-        mid: detail.owner?.mid || item.mid, tid: detail.tid,
-        tags: detail.tags || item.tags || [], desc: String(detail.desc || item.desc || '').slice(0, 1500),
-        tname: detail.tname || '音乐',
-      };
-      music.push(track);
-      onBatch?.([track]);
-    }));
-    if (failures.length === batch.length) throw failures[0];
+export async function personalizedMusicRecommendations(freshIdx = 0, limit = 20, onBatch, opts = {}) {
+  const candidates = await personalizedRecommendations(freshIdx, limit, opts);
+  return musicRecommendations(candidates, onBatch, opts);
+}
+
+export async function musicRecommendations(candidates, onBatch, opts = {}) {
+  const music = [], unknown = [];
+  const publish = (item, detail) => {
+    if (opts.signal?.aborted || !isMusicPartition(detail)) return;
+    const track = { ...item,
+      aid: detail.aid || item.aid, cid: detail.cid || item.cid,
+      mid: detail.owner?.mid || item.mid, tid: detail.tid,
+      tags: detail.tags || item.tags || [], desc: String(detail.desc || item.desc || '').slice(0, 1500),
+      tname: detail.tname || '音乐',
+    };
+    music.push(track);
+    onBatch?.([track]);
+  };
+  // Known partitions must not wait behind unrelated, possibly failing detail requests.
+  for (const item of candidates) {
+    if (item.tid || item.tname) publish(item, item);
+    else unknown.push(item);
   }
+  const concurrency = opts.detailConcurrency || 5;
+  for (let offset = 0; offset < unknown.length; offset += concurrency) {
+    if (opts.signal?.aborted) throw new Error('推荐请求已取消');
+    const batch = unknown.slice(offset, offset + concurrency), failures = [];
+    await Promise.all(batch.map(async (item) => {
+      try {
+        const detail = await jget('https://api.bilibili.com/x/web-interface/view?bvid=' + encodeURIComponent(item.bvid), opts);
+        publish(item, detail);
+      } catch (error) { failures.push(error); }
+    }));
+    if (failures.length === batch.length) {
+      if (!music.length) throw failures[0];
+      break; // Keep confirmed music and move to the next feed page during a metadata outage.
+    }
+  }
+  if (opts.signal?.aborted) throw new Error('推荐请求已取消');
   return music;
+}
+
+// Home always uses the account's Web recommendation feed.
+export async function homeRecommendations(page = 0, limit = 20, { music = false, onBatch, onPageLoaded, signal } = {}) {
+  const opts = { signal, timeout: 6000, retry: false, detailConcurrency: 2 };
+  if (signal?.aborted) throw new Error('推荐请求已取消');
+  const items = await personalizedRecommendations(page, limit, opts);
+  if (signal?.aborted) throw new Error('推荐请求已取消');
+  onPageLoaded?.();
+  // When the feed already identifies music, keep paging those matches instead of
+  // delaying each sparse page with N extra requests for unclassified videos.
+  const confirmed = music ? items.filter(isMusicPartition) : [];
+  if (confirmed.length) { onBatch?.(confirmed); return confirmed; }
+  return music ? musicRecommendations(items, onBatch, opts) : items;
+}
+
+// Related candidates are verified independently; a music seed does not make every related video music.
+export async function homeRelatedRecommendations(bvid, { music = false, onBatch, signal } = {}) {
+  const opts = { signal, timeout: 6000, detailConcurrency: 2 };
+  if (signal?.aborted) throw new Error('推荐请求已取消');
+  const items = await relatedVideos(bvid, opts);
+  if (signal?.aborted) throw new Error('推荐请求已取消');
+  const confirmed = music ? items.filter(isMusicPartition) : [];
+  if (confirmed.length) { onBatch?.(confirmed); return confirmed; }
+  return music ? musicRecommendations(items, onBatch, opts) : items;
 }
 
 // B 站全分区视频搜索（不限定音乐分区，也不按时长排除短视频）。
@@ -401,6 +447,7 @@ export async function favDeal(aid, addIds = [], delIds = []) {
   if (r.status !== 200) throw new Error(r.status === -1 ? (r.body || '网络请求失败') : ('HTTP ' + r.status));
   const d = JSON.parse(r.body);
   if (d.code !== 0) throw new Error(d.code === -101 ? '请先登录 B 站账号' : (d.message || ('code ' + d.code)));
+  invalidateFavoriteLists();
   return true;
 }
 
@@ -521,17 +568,51 @@ export async function mixSplitDetect(bvid, cid, duration) {
 
 /* ---------- 收藏夹（移植自 renderer/api.js favFolders / favItems，无需 WBI，靠登录 Cookie） ----------
  * 未登录调用时接口返回 -101，由调用方做降级提示；与桌面端一致不做匿名兜底。 */
-// 我创建的收藏夹列表
-export async function favFolders(mid) {
+// Shared by Mine, discovery and collection actions. Keep the last successful list
+// on disk, and coalesce simultaneous focus/mount requests for the same account.
+const favoriteLists = new Map();
+const favoriteListKey = mid => `biu.favorite-folders@${mid}`;
+const favoriteEntry = mid => {
+  const scope = String(mid);
+  if (!favoriteLists.has(scope)) favoriteLists.set(scope, { folders: null, at: 0, pending: null });
+  return favoriteLists.get(scope);
+};
+export async function cachedFavFolders(mid) {
+  if (!mid) return [];
+  const entry = favoriteEntry(mid);
+  if (entry.folders) return entry.folders;
+  try {
+    const data = JSON.parse(await AsyncStorage.getItem(favoriteListKey(mid)));
+    if (Array.isArray(data)) entry.folders ||= data.filter(f => f?.id && typeof f.title === 'string');
+  } catch { /* An unavailable cache must not prevent a network refresh. */ }
+  return entry.folders || [];
+}
+function invalidateFavoriteLists() {
+  // Keep cached rows visible, but the next focus must validate counts/titles.
+  for (const entry of favoriteLists.values()) entry.at = 0;
+}
+export async function favFolders(mid, { force = false } = {}) {
   if (!mid) throw new Error('缺少用户 mid');
-  const data = await jget(`https://api.bilibili.com/x/v3/fav/folder/created/list-all?up_mid=${mid}`);
-  return (data.list || []).map((f) => ({
-    id: f.id,
-    title: f.title,
-    count: f.media_count || 0,
-    intro: f.intro || '',
-    pic: f.cover ? absImg(f.cover) : null,
-  }));
+  const entry = favoriteEntry(mid);
+  if (entry.pending) return entry.pending;
+  if (!force && entry.folders && Date.now() - entry.at < 30000) return entry.folders;
+  entry.pending = (async () => {
+    const data = await jget(`https://api.bilibili.com/x/v3/fav/folder/created/list-all?up_mid=${encodeURIComponent(mid)}`,
+      { timeout: 10000, retry: false });
+    if (!data || !(Array.isArray(data.list) || data.list === null && Number(data.count) === 0)) {
+      throw new Error('收藏夹返回数据不完整，请重试');
+    }
+    const folders = (data.list || []).map(f => ({
+      id: f.id, title: f.title, count: f.media_count || 0,
+      intro: f.intro || '', pic: f.cover ? absImg(f.cover) : null,
+    }));
+    entry.folders = folders; entry.at = Date.now();
+    // Cache persistence is best effort and never delays the visible list.
+    AsyncStorage.setItem(favoriteListKey(mid), JSON.stringify(folders)).catch(() => {});
+    return folders;
+  })();
+  try { return await entry.pending; }
+  finally { entry.pending = null; }
 }
 
 export async function favFolderInfo(mediaId) {
@@ -547,13 +628,15 @@ export async function favFolderEdit(mediaId, title, intro) {
   if (r.status !== 200) throw new Error('收藏夹保存失败：HTTP ' + r.status);
   const data = JSON.parse(r.body);
   if (data.code !== 0) throw new Error(data.message || '收藏夹保存失败');
+  invalidateFavoriteLists();
   return true;
 }
 
 // 收藏夹内容（分页），稿件映射为 track；已失效视频（attr=1）直接过滤
-export async function favItems(mediaId, page = 1, ps = 40) {
+export async function favItems(mediaId, page = 1, ps = 40, options = {}) {
   const data = await jget(
-    `https://api.bilibili.com/x/v3/fav/resource/list?media_id=${mediaId}&pn=${page}&ps=${ps}`);
+    `https://api.bilibili.com/x/v3/fav/resource/list?media_id=${mediaId}&pn=${page}&ps=${ps}`,
+    { timeout: 10000, retry: false, ...options });
   const list = (data.medias || [])
     .filter((m) => m && m.bvid && Number(m.attr) !== 1)
     .map((m) => ({

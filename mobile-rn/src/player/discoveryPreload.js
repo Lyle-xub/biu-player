@@ -9,9 +9,12 @@ const prepared = new Map();
 const keyOf = (track, quality, scope) => `${scope || ''}:${track.bvid}:${track.cid || 0}:${quality}`;
 const MAX_AGE = 10 * 60 * 1000;
 const WINDOW = 3;
+let cleanup = Promise.resolve();
+let allocation = Promise.resolve();
 
 function release(entry) {
   entry.cancelled = true;
+  if (entry.retiring) return;
   detach(entry);
   const player = entry.player; entry.player = null;
   try { player?.release(); } catch { /* Native teardown may already have released it. */ }
@@ -22,9 +25,20 @@ function detach(entry) {
   entry.subscriptions = [];
 }
 
-export function clearDiscoveryPreloads() {
-  prepared.forEach(release);
+export function clearDiscoveryPreloads({ defer = false } = {}) {
+  const entries = [...prepared.values()];
   prepared.clear();
+  if (!defer) { entries.forEach(release); return; }
+  // Invalidate now; native decoder teardown must not run inside tab blur.
+  entries.forEach(entry => { entry.cancelled = true; entry.retiring = true; });
+  if (!entries.length) return;
+  cleanup = cleanup.then(async () => {
+    await new Promise(resolve => setTimeout(resolve, 300));
+    for (const entry of entries) {
+      entry.retiring = false; release(entry);
+      await new Promise(resolve => setTimeout(resolve, 16));
+    }
+  });
 }
 
 export function takeDiscoveryPreload(track, quality, scope) {
@@ -77,8 +91,14 @@ export function preloadDiscoveryQueue(tracks, quality, scope) {
       const uri = await bili.videoUrl(track.bvid, detail.cid, quality === 1 ? undefined : quality);
       return { cid: detail.cid, dimension: detail.dimension, uri };
     })().catch(() => { fail(); return null; });
-    entry.promise.then(async (source) => {
+    entry.promise.then(source => { allocation = allocation.then(async () => {
+      // Do not allocate another set of decoders while retired ones await release.
+      await cleanup;
       if (entry.cancelled || !source) return;
+      // Even cached URLs must give the new screen a frame before creating each
+      // decoder. Serialise creation only; the native buffers still fill in parallel.
+      await new Promise(resolve => setTimeout(resolve, 32));
+      if (entry.cancelled) return;
       try {
         const player = createVideoPlayer(null);
         entry.player = player;
@@ -97,9 +117,8 @@ export function preloadDiscoveryQueue(tracks, quality, scope) {
           metadata: { title: track.title || 'Biu Player', artist: track.up || undefined, artwork: mediaUrl(track.pic) || undefined,
             biuMediaKey: `${track.bvid}:${source.cid}`, biuSegmentStart: null, biuSegmentEnd: null },
         }).catch(fail);
-        await entry.install;
         // Paused native players buffer without playing audio or taking the media session.
       } catch { fail(); }
-    });
+    }); });
   }
 }

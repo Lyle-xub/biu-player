@@ -1,13 +1,13 @@
 /* Biu Player RN · 本地歌单数据层（移植自桌面端 renderer/app.js customPlaylists：
- * 桌面存 localStorage「biu-playlists」，RN 存 AsyncStorage「biu.playlists」）。
+ * 桌面存 localStorage「biu-playlists」，RN 用文件存储「biu.playlists」并迁移旧 AsyncStorage）。
  * 结构：[{ id, title, tracks: [track...], createdAt, cover? }]。没有自定义封面时，
  * UI 按歌单 ID 生成稳定的桌面端同款默认封面，不再随第一首歌变化。
  * 内存缓存 + 订阅：usePlaylists() 钩子在任何页面都能拿到实时列表；
  * 每次变更立即持久化并通知所有订阅者。
  */
 import { useEffect, useState } from 'react';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { reconcile } from '../../../renderer/library-sync';
+import AsyncStorage from './largeStorage';
+import { backgroundCompute } from '../performance/backgroundCompute';
 
 const KEY = 'biu.playlists';
 
@@ -28,7 +28,7 @@ async function ensureLoaded() {
       let value;
       try {
         const raw = await AsyncStorage.getItem(requestedKey);
-        const parsed = raw ? JSON.parse(raw) : [];
+        const parsed = raw ? await backgroundCompute('parse', raw) : [];
         value = Array.isArray(parsed) ? parsed : [];
       } catch (e) { value = []; }
       if (generation === requestedGeneration) cache = value;
@@ -63,9 +63,13 @@ function changePlaylists(update) {
   const operation = writes.then(async () => {
     await ensureLoaded();
     if (generation !== requestedGeneration) throw new Error('账号已切换，请重新打开歌单');
-    const next = update(cache);
+    const next = await update(cache);
     if (next === cache) return cache;
-    await AsyncStorage.setItem(storageKey(), JSON.stringify(next));
+    if (generation !== requestedGeneration) throw new Error('账号已切换，请重新打开歌单');
+    const key = storageKey();
+    const raw = await backgroundCompute('stringify', next);
+    if (generation !== requestedGeneration) throw new Error('账号已切换，请重新打开歌单');
+    await AsyncStorage.setItem(key, raw);
     if (generation !== requestedGeneration) throw new Error('账号已切换，请重新打开歌单');
     cache = next;
     listeners.forEach((fn) => fn(cache));
@@ -76,8 +80,8 @@ function changePlaylists(update) {
 }
 
 export function mergeSyncedPlaylists(incoming, base) {
-  return changePlaylists((list) => reconcile(base ? { version: 1, likes: [], playlists: base } : null,
-    { version: 1, likes: [], playlists: incoming }, { version: 1, likes: [], playlists: list }).playlists);
+  return changePlaylists(async (list) => (await backgroundCompute('libraryReconcile', base ? { version: 1, likes: [], playlists: base } : null,
+    { version: 1, likes: [], playlists: incoming }, { version: 1, likes: [], playlists: list })).playlists);
 }
 
 import { trackKeyOf } from '../player/track';
@@ -88,8 +92,8 @@ export function usePlaylists() {
   const [list, setList] = useState(cache || []);
   useEffect(() => {
     let mounted = true;
-    ensureLoaded().then((v) => { if (mounted) setList([...v]); });
-    const onChange = (v) => setList([...v]);
+    ensureLoaded().then((v) => { if (mounted) setList(v); });
+    const onChange = (v) => setList(v);
     listeners.add(onChange);
     return () => { mounted = false; listeners.delete(onChange); };
   }, []);

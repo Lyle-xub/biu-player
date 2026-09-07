@@ -42,7 +42,7 @@ function build() {
     })();`;
   const script = [read('mobile-rn/src/split/bootstrap.js'), api, read('renderer/split-decode.js'),
     `function detectSegments(env, totalDur, mode) { ${detector} return result; }`,
-    wasm, panel, read('mobile-rn/src/split/runtime.js'), events, 'setupMobileSplit();'].join('\n');
+    wasm, read('mobile-rn/src/split/identify.js'), panel, read('mobile-rn/src/split/runtime.js'), events, 'setupMobileSplit();'].join('\n');
   const output = JSON.stringify(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"><style>${css}\n${read('mobile-rn/src/split/mobile.css')}</style></head><body>${html}<script>${script.replace(/<\/script/gi, '<\\/script')}</script></body></html>`);
   const target = path.join(root, 'mobile-rn/src/split/editor.generated.json');
   if (!fs.existsSync(target) || fs.readFileSync(target, 'utf8') !== output) fs.writeFileSync(target, output);

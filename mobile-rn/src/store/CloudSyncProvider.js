@@ -1,3 +1,4 @@
+import { waitForRecommendationIdle } from '../updates/networkGate';
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 import { Asset } from 'expo-asset';
@@ -10,6 +11,7 @@ import createApi from '../../../renderer/cloud-video-bili-core';
 import * as platform from '../cloud/platform';
 import { createMobileVideoRuntime } from '../cloud/runtime';
 import { syncLanCloudKey } from '../cloud/lanKeyExchange';
+import { backgroundCompute } from '../performance/backgroundCompute';
 const Context=createContext(null);
 export const useCloudSync=()=>useContext(Context);
 
@@ -36,10 +38,10 @@ export function CloudSyncProvider({children}) {
       const cover=await Asset.fromModule(require('../../assets/cloud-sync-cover.png')).downloadAsync();
       if(cancelled)return;
       const api=createApi(platform).createBiliVideoApi({request:biliFetch,uploadFetch:(url,opts)=>fetch(url,{...opts,headers:{...opts.headers,...streamHeaders()},credentials:'omit'}),csrf:cloudCsrf,coverFile:cover.localUri});
-      runner.current=createProtocol(platform).createVideoCloudSync({directory:platform.directory,api,runtime:createMobileVideoRuntime(),auth:authStatus,
+      runner.current=createProtocol({...platform,compute:backgroundCompute}).createVideoCloudSync({directory:platform.directory,api,runtime:createMobileVideoRuntime(),auth:authStatus,
         readLibrary:account=>latest.current.getSyncLibrary(account),
         writeLibrary:(account,library,base)=>latest.current.applySyncLibrary(library,base,account),
-        protect:platform.protect,unprotect:platform.unprotect,onStatus:publish});
+        protect:platform.protect,unprotect:platform.unprotect,onStatus:publish,waitForForeground:waitForRecommendationIdle});
       setReady(true);
     })().catch(e=>publish({error:e.message || '云同步初始化失败'}));
     const subscription=AppState.addEventListener('change',state=>{

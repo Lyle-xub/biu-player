@@ -8,7 +8,7 @@
       const key = scope ? `biu-recommendation-profiles@${scope}` : 'biu-recommendation-profiles';
       const ownScope = scope;
       current = root.BiuRecommendation.createManager({
-        get: (url) => { if (!root.bili?.get) throw new Error('请在桌面应用中使用画像推荐'); return root.bili.get(url); },
+        get: (url, options) => { if (!root.bili?.get) throw new Error('请在桌面应用中使用画像推荐'); return root.bili.get(url, options); },
         getLikes: () => ownScope === getScope() ? getLikes() : [],
         getPlaylists: () => ownScope === getScope() ? getPlaylists() : [],
         read: async () => {

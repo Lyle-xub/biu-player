@@ -1,5 +1,5 @@
 /* Biu Player RN · 搜索：B 站全分区视频 / UP 主，视频点击即播，UP 主进空间页 */
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator, FlatList, Image, Keyboard, StyleSheet, Text, TextInput, TouchableOpacity, View,
 } from 'react-native';
@@ -40,7 +40,7 @@ function UpRow({ up, onPress }) {
   );
 }
 
-export default function SearchScreen({ navigation }) {
+export default function SearchScreen({ navigation, route }) {
   const { playQueue, current, resolveTrackUp } = usePlayer();
   const openUp = (track) => openTrackUp(navigation, track, resolveTrackUp);
   const [keyword, setKeyword] = useState('');
@@ -54,6 +54,20 @@ export default function SearchScreen({ navigation }) {
   const [error, setError] = useState(null);
   const [searched, setSearched] = useState(false);
   const kwRef = useRef('');
+  const inputRef = useRef(null);
+  const fromHome = route?.name === 'SearchInput';
+  useEffect(() => {
+    if (!fromHome) return;
+    let finished = false;
+    const focus = () => {
+      if (finished || navigation.isFocused?.() === false) return;
+      finished = true; inputRef.current?.focus();
+    };
+    const timer = setTimeout(focus, 250);
+    const end = navigation.addListener?.('transitionEnd', event => { if (!event.data?.closing) focus(); });
+    const blur = navigation.addListener?.('blur', () => { finished = true; clearTimeout(timer); });
+    return () => { finished = true; clearTimeout(timer); end?.(); blur?.(); };
+  }, [fromHome, navigation]);
 
   const run = useCallback(async (kw, p = 1, s = seg, ord = order) => {
     if (!kw.trim()) return;
@@ -77,6 +91,7 @@ export default function SearchScreen({ navigation }) {
     }
   }, [seg, order]);
 
+
   const submit = () => { kwRef.current = keyword; run(keyword, 1); };
   const switchSeg = (s) => {
     setSeg(s);
@@ -91,6 +106,7 @@ export default function SearchScreen({ navigation }) {
         <View style={styles.inputPill}>
           <IconSearch size={15} color={colors.text2} />
           <TextInput
+            ref={inputRef}
             style={styles.input}
             placeholder={seg === 'up' ? '搜索 UP 主…' : '搜索 B 站视频…'}
             placeholderTextColor={colors.text3}
@@ -106,6 +122,10 @@ export default function SearchScreen({ navigation }) {
             </TouchableOpacity>
           ) : null}
         </View>
+        {fromHome && <TouchableOpacity accessibilityRole="button" accessibilityLabel="取消搜索"
+          hitSlop={6} style={styles.cancelButton} onPress={() => { Keyboard.dismiss(); navigation.goBack(); }}>
+          <Text style={styles.cancelText}>取消</Text>
+        </TouchableOpacity>}
       </View>
 
       {/* 分段：视频 / UP 主 */}
@@ -149,6 +169,7 @@ export default function SearchScreen({ navigation }) {
         </View>
       ) : (
         <FlatList
+        keyboardShouldPersistTaps="handled"
           data={list}
           keyExtractor={(item, i) => String(seg === 'up' ? item.mid : (item.bvid || item.aid)) + '-' + i}
           renderItem={({ item, index }) => (seg === 'up' ? (
@@ -186,13 +207,15 @@ export default function SearchScreen({ navigation }) {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: 'transparent' },
-  header: { paddingHorizontal: 14, paddingTop: 6, paddingBottom: 10 },
+  header: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 14, paddingTop: 8, paddingBottom: 6 },
   inputPill: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
     backgroundColor: colors.card,
     borderWidth: 1, borderColor: colors.cardBorder,
-    borderRadius: 999, paddingHorizontal: 14, height: 48,
+    borderRadius: 999, paddingHorizontal: 14, height: 40, flex: 1,
   },
+  cancelButton: { height: 40, justifyContent: 'center', paddingHorizontal: 2 },
+  cancelText: { color: colors.text2, fontSize: 13 },
   input: { flex: 1, color: colors.text, fontSize: 14, paddingVertical: 0 },
   clear: { color: colors.text3, fontSize: 20, lineHeight: 20 },
   segRow: {

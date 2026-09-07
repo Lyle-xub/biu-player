@@ -69,7 +69,10 @@ test('an idle mobile library still receives a newly created desktop cloud key',a
   const filename=path.join(root,'src/store/lanSync.js');
   const {code}=fromMobile('@babel/core').transformSync(fs.readFileSync(filename,'utf8'),{filename,configFile:false,babelrc:false,plugins:[fromMobile('@babel/plugin-transform-modules-commonjs')]});
   const module={exports:{}};
-  new Function('require','module','exports',code)(name=>name.startsWith('.')?require(path.resolve(path.dirname(filename),name)):fromMobile(name),module,module.exports);
+  const compute = require(require('../mobile-rn/scripts/build-compute.cjs')())();
+  new Function('require','module','exports',code)(name=>name==='../performance/backgroundCompute'
+    ? {backgroundCompute:async (...args)=>compute(...args)}
+    : name.startsWith('.')?require(path.resolve(path.dirname(filename),name)):fromMobile(name),module,module.exports);
   const {startAutoSync}=module.exports,{syncLanCloudKey}=await import('../mobile-rn/src/cloud/lanKeyExchange.js');
   const desktop=(await cloud(t)).service,phone=(await cloud(t)).service;
   let advertisement,applies=0,connected,received;

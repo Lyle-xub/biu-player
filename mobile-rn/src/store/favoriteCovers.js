@@ -1,5 +1,5 @@
 /* 收藏夹封面以账号和收藏夹 ID 固定；null 也会保存，表示首次读取时没有封面。 */
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import AsyncStorage from './largeStorage';
 import { defaultCoverSeed } from '../components/DefaultCover';
 
 const PREFIX = 'biu.favorite-covers.';

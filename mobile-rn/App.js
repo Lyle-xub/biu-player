@@ -1,13 +1,13 @@
 /* Biu Player RN · 入口：底部 tab（首页/电台/搜索/我的）+ 播放页 stack + 迷你播放条
  * 转场（native-stack 原生转场，全部跑原生驱动）：
- * - 普通页面：Android 保留完整路由至侧滑结束；iOS 使用原生侧滑
+ * - 普通页面：iOS / Android 使用原生侧滑
  * - 播放页 / 视频页（全屏媒体）：iOS = slide_from_bottom 底部升起 + 下滑手势关闭；
  *   Android = 透明原生路由 + Animated 升降，退出动画完成后再移除路由
- * - tab 切换：fade 轻淡 crossfade；tab 图标选中态轻微 scale 弹性
+ * - tab 切换直接跟随导航状态；tab 图标选中态轻微 scale 弹性
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Animated, AppState, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
+import { NavigationContainer, DefaultTheme, TabActions } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -45,8 +45,10 @@ import SettingsScreen from './src/screens/SettingsScreen';
 import ShareCardScreen from './src/screens/ShareCardScreen';
 import { AppUpdateNotice } from './src/components/AppUpdateCard';
 import LyricsActivitySync from './src/components/LyricsActivitySync';
+import { monitorEventLoop, navigationPressed, navigationCommitted } from './src/performance/diagnostics';
 
-// 等启动遮罩完成布局且 Logo 加载后再交接，避免露出空白帧。
+// Release the native splash as soon as the root is laid out. Image callbacks
+// cannot gate it: Android keeps the content's pre-draw blocked while it is up.
 SplashScreen.preventAutoHideAsync().catch(() => {});
 if (!isRunningInExpoGo()) {
   SplashScreen.setOptions({ duration: 350, fade: true });
@@ -80,17 +82,21 @@ const TAB_LABELS = { Home: '首页', Discover: '发现', Radio: '电台', Search
 function StartupGlow() {
   const opacity = useRef(new Animated.Value(1)).current;
   const [laidOut, setLaidOut] = useState(false);
-  const [imageReady, setImageReady] = useState(false);
   const [visible, setVisible] = useState(true);
   useEffect(() => {
-    if (!laidOut || !imageReady) return;
+    // A missing layout callback must not leave the native window above the app.
+    const fallback = setTimeout(() => setLaidOut(true), 1000);
+    return () => clearTimeout(fallback);
+  }, []);
+  useEffect(() => {
+    if (!laidOut) return;
     SplashScreen.hideAsync().catch(() => {});
     const animation = Animated.timing(opacity, {
-      toValue: 0, delay: 450, duration: 650, useNativeDriver: true,
+      toValue: 0, duration: 350, useNativeDriver: true,
     });
     animation.start(({ finished }) => { if (finished) setVisible(false); });
     return () => animation.stop();
-  }, [laidOut, imageReady, opacity]);
+  }, [laidOut, opacity]);
   if (!visible) return null;
   return (
     <Animated.View
@@ -113,7 +119,6 @@ function StartupGlow() {
       </View>
       <Animated.Image
         source={require('./assets/splash-icon.png')}
-        onLoadEnd={() => setImageReady(true)}
         resizeMode="contain"
         style={styles.startupLogo}
       />
@@ -170,19 +175,31 @@ function TabIcon({ name, color, focused }) {
   );
 }
 
-function TabBarBridge({ navigation, state, report }) {
-  useEffect(() => {
-    report(navigation, state.routes[state.index].name);
-  }, [navigation, report, state]);
-  return null;
-}
-
-function GlassTabBar({ active, blurTarget, navigate, names }) {
+export function GlassTabBar({ state, navigation, blurTargets }) {
+  const lastHomePressRef = useRef(null);
+  const active = state.routes[state.index];
+  useEffect(() => navigationCommitted(active.name), [active.name]);
+  const navigate = (route) => {
+    // A tap can arrive before React paints the preceding navigation. Use the
+    // navigator's current identity and let its router handle same-tab no-ops.
+    const currentState = navigation.getState?.() || state;
+    const target = currentState.routes.find(item => item.name === route.name);
+    if (!target) return;
+    const event = navigation.emit({ type: 'tabPress', target: target.key, canPreventDefault: true });
+    if (event.defaultPrevented) return;
+    navigationPressed(target.name);
+    const now = Date.now();
+    const doublePress = route.name === 'Home' && lastHomePressRef.current !== null
+      && now - lastHomePressRef.current <= 300;
+    lastHomePressRef.current = route.name === 'Home' && !doublePress ? now : null;
+    navigation.dispatch({ ...TabActions.jumpTo(target.name), target: currentState.key });
+    if (doublePress) navigation.emit({ type: 'homeDoublePress', target: target.key });
+  };
   const insets = useSafeAreaInsets();
   return (
     <View style={[styles.tabBar, { height: 49 + insets.bottom, paddingBottom: insets.bottom }]}>
-      <BlurView
-        blurTarget={blurTarget}
+      <BlurView pointerEvents="none"
+        blurTarget={blurTargets[active.name]}
         blurMethod="dimezisBlurView"
         intensity={68}
         blurReductionFactor={3}
@@ -194,8 +211,9 @@ function GlassTabBar({ active, blurTarget, navigate, names }) {
         colors={['rgba(18,22,15,0.30)', 'rgba(4,6,3,0.60)']}
         style={StyleSheet.absoluteFill}
       />
-      {names.map((name) => {
-        const focused = active === name;
+      {state.routes.map((route) => {
+        const name = route.name;
+        const focused = active.key === route.key;
         const color = focused ? colors.accent : colors.text3;
         return (
           <TouchableOpacity
@@ -205,7 +223,8 @@ function GlassTabBar({ active, blurTarget, navigate, names }) {
             accessibilityState={{ selected: focused }}
             activeOpacity={1}
             style={styles.tabButton}
-            onPress={() => navigate(name)}
+            onPress={() => navigate(route)}
+            onLongPress={() => navigation.emit({ type: 'tabLongPress', target: route.key })}
           >
             <TabIcon name={name} color={color} focused={focused} />
             <Text style={[styles.tabLabel, { color }, focused && styles.tabLabelActive]}>{TAB_LABELS[name]}</Text>
@@ -217,40 +236,27 @@ function GlassTabBar({ active, blurTarget, navigate, names }) {
 }
 
 function Tabs() {
-  const { discoveryEnabled } = usePlayer();
-  const tabNames = discoveryEnabled
-    ? ['Home', 'Discover', 'Radio', 'Search', 'Mine']
-    : ['Home', 'Radio', 'Search', 'Mine'];
-  const blurTargetRef = useRef(null);
-  const tabNavigationRef = useRef(null);
-  const lastHomePressRef = useRef(null);
-  const [activeTab, setActiveTab] = useState('Home');
-  const reportTab = useCallback((navigation, name) => {
-    tabNavigationRef.current = navigation;
-    setActiveTab(name);
-  }, []);
-  const navigateTab = useCallback((name) => {
-    const navigation = tabNavigationRef.current;
-    if (!navigation) return;
-    const now = Date.now();
-    const doublePress = name === 'Home' && lastHomePressRef.current !== null
-      && now - lastHomePressRef.current <= 300;
-    lastHomePressRef.current = name === 'Home' && !doublePress ? now : null;
-    navigation.navigate(name);
-    if (doublePress) {
-      const home = navigation.getState().routes.find((route) => route.name === 'Home');
-      if (home) navigation.emit({ type: 'homeDoublePress', target: home.key });
-    }
-  }, []);
+  const { discoveryEnabled } = usePlayer(['discoveryEnabled']);
+  const blurTargets = useRef(Object.fromEntries(Object.keys(TAB_LABELS).map((name) => [name, React.createRef()]))).current;
+  const scene = useCallback(({ route, children }) => (
+    <View style={styles.tabContent}>
+      {/* BlurTarget reparents native children on Android. It must never own
+          screen responders, GestureDetectors or video surfaces. */}
+      <BlurTargetView ref={blurTargets[route.name]} pointerEvents="none" style={StyleSheet.absoluteFill}>
+        <AmbientBackground />
+      </BlurTargetView>
+      {children}
+    </View>
+  ), [blurTargets]);
   return (
     <View style={styles.tabsWrap}>
-      <BlurTargetView ref={blurTargetRef} style={styles.tabContent}>
         <Tab.Navigator
-          tabBar={(props) => <TabBarBridge {...props} report={reportTab} />}
+          tabBar={(props) => <GlassTabBar {...props} blurTargets={blurTargets} />}
+          screenLayout={scene}
           screenOptions={{
             headerShown: false,
             sceneStyle: { backgroundColor: 'transparent' },
-            animation: 'fade', // tab 切换轻淡 crossfade（bottom-tabs v7 原生转场）
+            animation: 'none', // Returning from a stack must not resume a half-finished tab fade.
           }}
         >
           <Tab.Screen name="Home" component={HomeScreen} options={{ title: '首页' }} />
@@ -260,13 +266,6 @@ function Tabs() {
           <Tab.Screen name="Search" component={SearchScreen} options={{ title: '搜索' }} />
           <Tab.Screen name="Mine" component={MineScreen} options={{ title: '我的' }} />
         </Tab.Navigator>
-      </BlurTargetView>
-      <GlassTabBar
-        active={activeTab}
-        blurTarget={blurTargetRef}
-        navigate={navigateTab}
-        names={tabNames}
-      />
     </View>
   );
 }
@@ -298,13 +297,12 @@ function StackChrome({ children, state, closedTransition }) {
         setMiniBarReady(true);
       });
     } else {
-      // Some Android builds omit transitionEnd for animation:'none'. The custom
-      // sheet has already finished before it dispatches goBack, so this is only
-      // a safety net and never lets the bar precede an iOS slide transition.
+      // Recover chrome if native-stack omits transitionEnd. Both platforms now
+      // own media removal, so allow their native slide to finish first.
       fallbackTimer = setTimeout(() => {
         hiddenAtTransitionRef.current = null;
         setMiniBarReady(true);
-      }, Platform.OS === 'android' ? 0 : 380);
+      }, 380);
     }
     wantedLastRenderRef.current = wantsMiniBar;
     return () => {
@@ -326,7 +324,12 @@ function StackChrome({ children, state, closedTransition }) {
   return (
     <View style={styles.app}>
       <OverlayProvider>
-      <BlurTargetView ref={blurTargetRef} style={styles.app}>{children}</BlurTargetView>
+      <View style={styles.app}>
+        <BlurTargetView ref={blurTargetRef} pointerEvents="none" style={StyleSheet.absoluteFill}>
+          <AmbientBackground />
+        </BlurTargetView>
+        {children}
+      </View>
       <MiniBar visible={miniBarReady}
         blurTarget={blurTargetRef} hasBottomTabs={routeName === 'Tabs'} />
       <AppUpdateNotice />
@@ -338,6 +341,13 @@ function StackChrome({ children, state, closedTransition }) {
 
 export default function App() {
   const [closedTransition, setClosedTransition] = useState(0);
+  useEffect(() => {
+    let stop = AppState.currentState === 'background' ? () => {} : monitorEventLoop();
+    const listener = AppState.addEventListener('change', state => {
+      stop(); stop = state === 'active' ? monitorEventLoop() : () => {};
+    });
+    return () => { stop(); listener.remove(); };
+  }, []);
   return (
     <GestureHandlerRootView style={styles.app}>
     <SafeAreaProvider>
@@ -361,7 +371,7 @@ export default function App() {
             <Stack.Screen name="Tabs" component={Tabs} options={{
               presentation: 'card', animation: 'none', contentStyle: { backgroundColor: colors.bg },
             }} />
-            {/* 媒体页共用升降转场，Android 在动画完成前保留路由。 */}
+            {/* 媒体页由原生导航处理升降转场，不拦截返回。 */}
             <Stack.Screen name="Player" component={PlayerScreen} options={mediaScreenOptions} />
             <Stack.Screen name="Up" component={UpScreen} />
             <Stack.Screen name="Video" component={VideoScreen} options={mediaScreenOptions} />
@@ -372,6 +382,7 @@ export default function App() {
             <Stack.Screen name="LocalPlaylist" component={LocalPlaylistScreen} />
             <Stack.Screen name="PlaylistDetail" component={PlaylistDetailScreen} />
             <Stack.Screen name="Settings" component={SettingsScreen} />
+            <Stack.Screen name="SearchInput" component={SearchScreen} options={{ animation: 'fade', animationDuration: 180 }} />
             <Stack.Screen name="ShareCard" component={ShareCardScreen} />
           </Stack.Navigator>
         </NavigationContainer>
@@ -395,7 +406,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'stretch',
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: 'rgba(255,255,255,0.12)',
-    elevation: 10,
+    elevation: 10, zIndex: 10,
   },
   tabButton: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 2 },
   tabLabel: { fontSize: 10, letterSpacing: 1 },

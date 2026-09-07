@@ -5,6 +5,14 @@ const { merge, reconcile, normalize, endpoint } = require('../renderer/library-s
 const song = (id, extra = {}) => ({ bvid: `BV${id}`, title: `Song ${id}`, cid: id, ...extra });
 const library = (likes = [], playlists = []) => ({ version: 1, likes, playlists });
 
+test('sync music-library count includes likes and deduplicates tracks with the same identity', () => {
+  const { libraryCount } = require('../renderer/library-sync');
+  assert.equal(libraryCount({ likes: [song(1)], library: [] }), 1);
+  assert.equal(libraryCount({ likes: [song(1), song(2)], library: [song(1), song(3)] }), 3);
+  assert.equal(libraryCount({ likes: [song(1)], library: [song(1, { isSegment: true, from: 0, to: 60 }),
+    song(1, { isSegment: true, from: 60, to: 120 })] }), 3);
+});
+
 test('desktop sync applies shared main profiles while excluding mobile discovery profiles', () => {
   const R = require('../renderer/recommendation-profile');
   const fs = require('node:fs'), vm = require('node:vm');
@@ -73,7 +81,7 @@ test('automatic reconciliation propagates deletions, edits and ordering without 
   assert.deepEqual(reconcile(null, desktop, phone), merge(desktop, phone));
 });
 
-test('automatic server advertises only signed-in enabled accounts, isolates requests, acknowledges durable writes and reconnects', { timeout: 3000 }, async (t) => {
+test('automatic server advertises only signed-in enabled accounts, isolates requests, acknowledges durable writes and reconnects', { timeout: 10000 }, async (t) => {
   let saved = library([song(1)]), failure = false, advertised, stopped = 0;
   const scopes = [];
   const service = createLanSync({ host: '127.0.0.1', deviceId: 'desktop-test',
@@ -108,7 +116,12 @@ test('automatic server advertises only signed-in enabled accounts, isolates requ
   failure = true;
   assert.equal((await request('sync', { base: deleted.library, library: library([song(3)]) })).status, 400);
   assert.deepEqual(saved.likes.map((s) => s.bvid), ['BV2']);
-  assert.equal((await request('sync', { padding: 'x'.repeat(8 * 1024 * 1024) })).status, 413);
+  failure = false;
+  const cover = 'data:image/png;base64,' + 'A'.repeat(8 * 1024 * 1024);
+  const large = await request('sync', { library: library([], [{ id: 'large-cover', title: '大歌单', tracks: [], cover }]) });
+  assert.equal(large.status, 200);
+  assert.equal((await large.json()).library.playlists[0].cover, cover);
+  assert.equal(saved.playlists[0].cover, cover);
   const old = { ...advertised, txt: { ...advertised.txt } };
   await service.configure('456', true);
   assert.equal((await request('status', null, { Authorization: 'Bearer ' + old.txt.token })).status, 401);

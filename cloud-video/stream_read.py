@@ -20,7 +20,6 @@ import codec
 import fullframe as ff
 
 CHUNK=16384
-CAP=512*1024*1024
 UA='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36'
 
 
@@ -35,8 +34,12 @@ def restore(source,key,output,expected,mode='stream',rate=0,timeout=120,on_event
     worker=None
     reader=None
     process=None
-    watchdog=threading.Timer(timeout,stop.set)
-    watchdog.daemon=True
+    progress_at=[time.monotonic()]
+    def watch_progress():
+        while not stop.wait(min(timeout, 1)):
+            if time.monotonic()-progress_at[0]>timeout:
+                stop.set()
+    watchdog=threading.Thread(target=watch_progress,daemon=True)
     watchdog.start()
 
     def chunks():
@@ -53,7 +56,6 @@ def restore(source,key,output,expected,mode='stream',rate=0,timeout=120,on_event
             response=open(source,'rb')
             stats['totalBytes']=Path(source).stat().st_size
         with response:
-            codec.require(stats['totalBytes'] is None or stats['totalBytes']<=CAP,'video too large')
             body_start=time.monotonic()
             while not stop.is_set():
                 data=response.read(CHUNK)
@@ -61,7 +63,6 @@ def restore(source,key,output,expected,mode='stream',rate=0,timeout=120,on_event
                 stats.setdefault('firstByteSeconds',round(time.monotonic()-started,4))
                 stats['receivedBytes']+=len(data)
                 on_event(dict(type='download', bytes=stats['receivedBytes'], total=stats['totalBytes']))
-                codec.require(stats['receivedBytes']<=CAP,'video too large')
                 if rate:
                     delay=stats['receivedBytes']/rate-(time.monotonic()-body_start)
                     if delay>0 and stop.wait(delay):break
@@ -118,6 +119,7 @@ def restore(source,key,output,expected,mode='stream',rate=0,timeout=120,on_event
                 except queue.Empty:continue
                 if not data:break
                 frames+=1
+                progress_at[0]=time.monotonic()
                 on_event(dict(type='frame', frame=frames, mediaSeconds=frames/4))
                 stats.setdefault('firstFrameSeconds',round(time.monotonic()-started,4))
                 pixels=np.frombuffer(data,dtype=np.uint8).reshape(360,640)
@@ -147,7 +149,7 @@ def restore(source,key,output,expected,mode='stream',rate=0,timeout=120,on_event
                 raise ValueError('timeout or insufficient authenticated stream data')
     finally:
         stop.set()
-        watchdog.cancel()
+        watchdog.join(timeout=2)
         if process:
             # This disposable decoder has no output to flush after authentication.
             # SIGTERM can block flushing its unread raw-frame pipe.

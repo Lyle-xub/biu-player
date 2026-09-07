@@ -1,4 +1,5 @@
 import { File, Directory, Paths } from 'expo-file-system';
+import { writeAsStringAsync } from 'expo-file-system/legacy';
 import { requireOptionalNativeModule } from 'expo-modules-core';
 import { Buffer } from 'buffer';
 import { sha256 } from '@noble/hashes/sha2.js';
@@ -42,7 +43,11 @@ export const fs = {
   rmSync: uri => {const info=Paths.info(uri);if(info.exists)(info.isDirectory?new Directory(uri):new File(uri)).delete();},
   statSync: uri => {const node=Paths.info(uri).isDirectory?new Directory(uri):new File(uri);return {size:node.size,mtimeMs:node.info().modificationTime || 0};},
   readdirSync: uri => new Directory(uri).list().map(node=>({name:node.name,isDirectory:()=>node instanceof Directory})),
-  promises:{open:async uri=>{const handle=new File(uri).open('r');return {
+  promises:{
+    readFile: async (uri, encoding) => encoding ? new File(uri).text() : Buffer.from(await new File(uri).bytes()),
+    writeFile: (uri, data) => writeAsStringAsync(uri, typeof data === 'string' ? data : Buffer.from(data).toString('base64'),
+      { encoding: typeof data === 'string' ? 'utf8' : 'base64' }),
+    open:async uri=>{const handle=new File(uri).open('r');return {
     read:async(buffer,offset,length,position)=>{handle.offset=position;const data=handle.readBytes(length);buffer.set(data,offset);return {bytesRead:data.length};},
     close:async()=>handle.close(),
   };}},

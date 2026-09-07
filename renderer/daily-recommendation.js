@@ -4,7 +4,7 @@
   else root.BiuDaily = factory(root.BiuMusicDictionary);
 })(typeof window === 'object' ? window : this, function (dictionaryData) {
   const DAY = 86400000;
-  const SOURCE = 'ritui-search-v1';
+  const SOURCE = 'music-catalog-v3';
   const clean = (v, max = 500) => String(v || '').normalize('NFKC').replace(/<[^>]*>/g, '').trim().slice(0, max);
   const key = (v) => clean(v, 80).toLowerCase();
   const MUSIC = new Set([3, 28, 29, 30, 31, 59, 130, 193, 194, 243, 244, 265, 267]);
@@ -92,6 +92,38 @@
     && durationOf(track) >= range.min && durationOf(track) <= range.max;
   const dayKey = (at = Date.now()) => { const d = new Date(at); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
   const hash = (text) => { let h = 2166136261; for (const c of String(text)) h = Math.imul(h ^ c.charCodeAt(0), 16777619); return h >>> 0; };
+  function songInfo(value) {
+    if (!value || typeof value.title !== 'string' || !Array.isArray(value.artists)) return null;
+    const list = (v) => [...new Set((Array.isArray(v) ? v : []).filter(x => typeof x === 'string').map(x => clean(x, 100)).filter(Boolean))].slice(0, 8);
+    const out = { title: clean(value.title, 150), artists: list(value.artists), aliases: list(value.aliases), artistAliases: list(value.artistAliases) };
+    if (!out.title || !out.artists.length) return null;
+    if (['netease', 'qq'].includes(value.source) && /^[a-zA-Z0-9]+$/.test(String(value.id || ''))) {
+      out.source = value.source; out.id = String(value.id).slice(0, 60);
+    }
+    return out;
+  }
+  const songText = value => clean(value, 200).toLowerCase().replace(/&amp;/g, '&')
+    .replace(/[（(][^()（）]*(?:live|remaster|version|mix|现场|版)[^()（）]*[）)]/gi, '')
+    .replace(/[\s\p{P}\p{S}]/gu, '');
+  function songKeys(track) {
+    const song = songInfo(track?.song);
+    if (!song) return [];
+    const names = [song.title, ...song.aliases].map(songText).filter(Boolean);
+    const artists = [...song.artists, ...song.artistAliases].map(songText).filter(Boolean);
+    return [...new Set([...(song.id ? [`${song.source}:${song.id}`] : []),
+      ...names.flatMap(name => artists.map(artist => `song:${name}:${artist}`))])].slice(0, 40);
+  }
+  function recentSongs(value, now = Date.now()) {
+    const records = new Map();
+    const remember = (key, at) => {
+      if (typeof key !== 'string' || key.length > 420 || !/^(song|netease|qq):/.test(key)
+        || !Number.isFinite(at) || at > now || now - at >= 7 * DAY) return;
+      records.set(key, Math.max(records.get(key) || 0, at));
+    };
+    (Array.isArray(value.shownSongs) ? value.shownSongs : []).forEach(v => { if (v) remember(v.key, v.at); });
+    (Array.isArray(value.days) ? value.days : []).forEach(day => (Array.isArray(day?.tracks) ? day.tracks : []).forEach(t => songKeys(t).forEach(k => remember(k, day.generatedAt))));
+    return [...records].map(([key, at]) => ({ key, at })).sort((a,b) => a.at - b.at || a.key.localeCompare(b.key));
+  }
   function compact(t) {
     if (!t || !/^BV\w{1,38}$/.test(t.bvid || '') || t.isLive) return null;
     const out = { bvid: t.bvid, title: clean(t.title), up: clean(t.up || t.owner?.name, 100),
@@ -105,11 +137,29 @@
         if (t[key] != null) out[key] = clean(t[key]);
       }
     }
+    const song = songInfo(t.song);
+    if (song) out.song = song;
     if (t.recommendationReason) out.recommendationReason = clean(t.recommendationReason, 240);
     if (Array.isArray(t.matchedTags)) out.matchedTags = t.matchedTags.map((v) => clean(v, 40)).slice(0, 5);
     return out;
   }
   const unique = (items, getKey) => [...new Map(items.map((v) => [getKey(v), v])).values()];
+  function recentShown(value) {
+    // Separate exposure history survives replacing today's queue and switching
+    // profiles. Migrate old saved queues before they are replaced, including v1.
+    const shown = new Map(), now = Date.now();
+    const remember = (bvid, at) => {
+      if (typeof bvid !== 'string' || !/^BV\w+$/.test(bvid) || bvid.length > 40 || !Number.isFinite(at)
+        || at > now || now - at >= 7 * DAY) return;
+      shown.set(bvid, Math.max(shown.get(bvid) || 0, at));
+    };
+    (Array.isArray(value.shown) ? value.shown : []).forEach((v) => { if (v) remember(v.bvid, v.at); });
+    (Array.isArray(value.days) ? value.days : []).forEach((v) => {
+      const at = Number(v?.generatedAt) || new Date(v?.date + 'T00:00:00').getTime();
+      (Array.isArray(v?.tracks) ? v.tracks : []).forEach((t) => remember(t?.bvid, at));
+    });
+    return [...shown].map(([bvid, at]) => ({ bvid, at })).sort((a, b) => a.at - b.at || a.bvid.localeCompare(b.bvid));
+  }
   function normalize(value = {}) {
     // Fixed single-track eligibility; old editable ranges no longer affect selection.
     const duration = { min: 60, max: 600, at: 0 };
@@ -126,12 +176,13 @@
         generatedAt: Math.max(0, Number(v.generatedAt) || 0), updatedAt: Math.max(0, Number(v.updatedAt) || 0),
         tracks: unique((Array.isArray(v.tracks) ? v.tracks : []).map(compact).filter((t) => t && !rejected(t)), (t) => t.bvid).slice(0, 24),
         complete: !!v.complete && !(Array.isArray(v.tracks) ? v.tracks : []).some(rejected),
-        rounds: (Array.isArray(v.tracks) ? v.tracks : []).some(rejected) ? 0 : Math.max(0, Math.min(3, Number(v.rounds) || 0)), error: clean(v.error, 180),
+        rounds: (Array.isArray(v.tracks) ? v.tracks : []).some(rejected) ? 0 : Math.max(0, Math.min(100, Number(v.rounds) || 0)), error: clean(v.error, 180),
         themes: (Array.isArray(v.themes) ? v.themes : []).map((v) => clean(v, 40)).slice(0, 3) })), (v) => `${v.date}:${v.profileId}`)
       .sort((a, b) => a.date.localeCompare(b.date) || a.profileId.localeCompare(b.profileId)).slice(-28)
       .map((v) => ({ ...v, complete: v.complete && v.tracks.length >= 15 }));
     return { version: 1, duration, profileId: clean(value.profileId || 'auto', 40), profileAt: Math.max(0, Number(value.profileAt) || 0),
       ignored: rules(value.ignored), muted: rules(value.muted), blocked: rules(value.blocked), events, days,
+      shown: recentShown(value), shownSongs: recentSongs(value),
       candidates: unique((Array.isArray(value.candidates) ? value.candidates : []).map(compact).filter(Boolean), (t) => t.bvid)
         .sort((a, b) => a.at - b.at || a.bvid.localeCompare(b.bvid)).slice(-600) };
   }
@@ -142,6 +193,9 @@
         || value.duration.min < 0 || value.duration.max <= value.duration.min || value.duration.max > 7200 || !Number.isFinite(value.duration.at))
       || ['ignored', 'muted', 'blocked', 'events', 'days', 'candidates'].some((k) => !Array.isArray(value[k]))
       || value.events.length > 4000 || value.candidates.length > 600 || value.days.length > 28
+      || value.shown !== undefined && (!Array.isArray(value.shown) || value.shown.some((v) => !v || typeof v.bvid !== 'string'
+        || !/^BV\w+$/.test(v.bvid) || v.bvid.length > 40 || !Number.isFinite(v.at) || v.at < 0))
+      || value.shownSongs !== undefined && (!Array.isArray(value.shownSongs) || value.shownSongs.some(v => !v || typeof v.key !== 'string' || v.key.length > 420 || !/^(song|netease|qq):/.test(v.key) || !Number.isFinite(v.at) || v.at < 0))
       || ['ignored', 'muted', 'blocked'].some((k) => value[k].length > 200 || value[k].some((v) => !v || typeof v.name !== 'string' || v.name.length > 40 || !Number.isFinite(v.at)))
       || [...value.candidates, ...value.events.map((v) => v?.track), ...value.days.flatMap((v) => Array.isArray(v?.tracks) ? v.tracks : [null])].some((v) => !compact(v))
       || value.events.some((v) => !v || typeof v.id !== 'string' || !Number.isFinite(v.at) || !Number.isFinite(v.seconds))
@@ -158,6 +212,8 @@
       ...Object.fromEntries(['ignored', 'muted', 'blocked'].map((k) => [k, join(a[k], b[k], (v) => key(v.name), later)])),
       events: join(a.events, b.events, (v) => v.id, (x, y) => ({ ...later(x, y), seconds: Math.max(x.seconds, y.seconds) })),
       candidates: join(a.candidates, b.candidates, (v) => v.bvid, later),
+      shown: join(a.shown, b.shown, (v) => v.bvid, later),
+      shownSongs: join(a.shownSongs, b.shownSongs, v => v.key, later),
       days: join(a.days, b.days, (v) => `${v.date}:${v.profileId}`, (x, y) => {
         if (x.generatedAt !== y.generatedAt) return later(x, y, 'generatedAt');
         return later(x, y, 'updatedAt');
@@ -215,8 +271,7 @@
   }
   function select(candidates, state, interest, selected = [], limit = 24, strict = null) {
     const ignored = activeRules(state.ignored), blocked = new Set(activeRules(state.blocked));
-    const recentDays = state.days.filter((v) => Date.now() - new Date(v.date + 'T12:00:00').getTime() < 7 * DAY);
-    const previous = new Set(recentDays.flatMap((v) => v.tracks.map((t) => t.bvid)));
+    const previous = new Set(recentShown(state).map((v) => v.bvid));
     const played = new Set(state.events.filter((v) => qualified(v) && Date.now() - v.at < 7 * DAY).map((v) => v.track.bvid));
     const today = dayKey();
     const termsOf = (t) => semantic(t, ignored);
@@ -227,12 +282,12 @@
     const primary = (t) => match(t, termsOf(t), interests)[0]?.name;
     const used = new Set(selected.map((v) => v.bvid)), out = [...selected];
     let pool = unique(candidates.map(compact).filter(Boolean), (v) => v.bvid).filter((t) => MUSIC.has(t.tid) && !isCompilation(t)
-      && withinDuration(t, state.duration) && !blocked.has(t.bvid) && !used.has(t.bvid))
+      && withinDuration(t, state.duration) && !blocked.has(t.bvid) && !used.has(t.bvid) && !previous.has(t.bvid))
       .map((t) => {
         const terms = termsOf(t), hits = match(t, terms, strict?.tags || interest.tags);
         if ((strict || interest.tags.length) && !hits.length) return null;
         const base = strict ? relevance(hits) : 0.6 * relevance(match(t, terms, interest.long)) + 0.3 * relevance(match(t, terms, interest.recent));
-        return { t, terms, hits, base: base + (played.has(t.bvid) ? 0 : 0.1) - (previous.has(t.bvid) ? 0.12 : 0) - (played.has(t.bvid) ? 0.2 : 0) };
+        return { t, terms, hits, base: base + (played.has(t.bvid) ? 0 : 0.1) - (played.has(t.bvid) ? 0.2 : 0) };
       }).filter(Boolean);
     while (pool.length && out.length < limit) {
       const counts = new Map(); out.forEach((t) => { if (t.mid) counts.set(t.mid, (counts.get(t.mid) || 0) + 1); });
@@ -263,6 +318,22 @@
     }
     return out;
   }
+  function selectSongs(items, state, selected = [], limit = 24, artistLimit = 2) {
+    const videos = new Set([...state.shown.map(v => v.bvid), ...activeRules(state.blocked), ...selected.map(v => v.bvid)]);
+    const identities = new Set([...recentSongs(state).map(v => v.key), ...selected.flatMap(songKeys)]);
+    const artists = new Map();
+    selected.forEach(t => { const k = songText(t.song?.artists?.[0]); if(k) artists.set(k,(artists.get(k)||0)+1); });
+    const out = [...selected];
+    for (const item of items) {
+      const t = compact(item), keys = songKeys(t);
+      if (!t || !keys.length || videos.has(t.bvid) || keys.some(k => identities.has(k)) || !withinDuration(t,state.duration)) continue;
+      const artist = songText(t.song.artists[0]);
+      if ((artists.get(artist)||0) >= artistLimit) continue;
+      out.push(t); videos.add(t.bvid); keys.forEach(k=>identities.add(k)); artists.set(artist,(artists.get(artist)||0)+1);
+      if(out.length >= limit) break;
+    }
+    return out;
+  }
   function current(state, at = Date.now()) { return state.days.find((v) => v.date === dayKey(at) && v.profileId === state.profileId); }
   function tracker(record) {
     let session = null, last = null, saved = 0;
@@ -281,5 +352,5 @@
     };
   }
   return { extract, semantic, canonical, category, compact, normalize, validate, merge, observe, rule, feedback, qualified,
-    taste, select, current, dayKey, hash, activeRules, tracker, isCompilation, durationOf, withinDuration, SOURCE };
+    songInfo, songKeys, songText, recentSongs, selectSongs, taste, select, current, dayKey, hash, activeRules, tracker, isCompilation, durationOf, withinDuration, SOURCE };
 });

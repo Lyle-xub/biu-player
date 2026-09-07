@@ -85,35 +85,6 @@ test('fixed single-track duration boundaries and segment lengths survive legacy 
   manager.dispose(); peer.dispose(); restored.dispose();
 });
 
-test('unknown durations are verified with bounded lookups while known singles are shown immediately', async () => {
-  const pending = [];
-  const manager = R.createManager({ read: async () => null, write: async () => {}, getLikes: () => [],
-    get: (url) => {
-      const query=new URL(url);
-      if(query.pathname.includes('/search/')) {
-        assert.equal(query.searchParams.get('keyword'),'日推');
-        return Promise.resolve(response({result:query.searchParams.get('page')==='1'
-          ? [track('known'), ...Array.from({length:8},(_,i)=>({...track(`unknown${i}`),duration:0}))].map(t=>({...t,type:'video'})) : []}));
-      }
-      return new Promise(resolve=>pending.push({url,resolve}));
-    },
-  });
-  const generating = manager.generateDaily();
-  await new Promise(setImmediate);
-  assert.deepEqual(D.current(manager.getSnapshot().daily).tracks.map((t) => t.bvid), ['BVdailyknown']);
-  // Resolve the two bounded batches; only in-range verified durations can join.
-  for (let start = 0; start < 6;) {
-    const end = pending.length;
-    assert.ok(end > start && end - start <= 3);
-    for (let i = start; i < end; i++) pending[i].resolve(response({ duration: i === 0 ? 180 : i === 1 ? 700 : 0, tid: 3 }));
-    start = end;
-    await new Promise(setImmediate);
-  }
-  const entry = await generating;
-  assert.equal(pending.length, 6);
-  assert.deepEqual(new Set(entry.tracks.map((t) => t.bvid)), new Set(['BVdailyknown', 'BVdailyunknown0']));
-  manager.dispose();
-});
 
 test('exposure cannot create a taste; actual listening qualifies and a seek does not count as listening', (t) => {
   t.mock.timers.enable({ apis: ['Date'], now: 1780000000000 });
@@ -134,71 +105,25 @@ test('exposure cannot create a taste; actual listening qualifies and a seek does
   assert.equal(D.feedback(learned, events.at(-1)).events.length, 1, 'checkpoints update the same session');
 });
 
-test('daily generation streams stable prefixes, fixes the day, persists across restart and merges across devices', async () => {
-  let disk, baseCalls = 0, searchCalls = 0;
-  const seed = R.normalize({ auto: { evidence: [{ bvid: 'BVseed', source: 'likes', owner: 'seed', at: Date.now(), tags: ['钢琴'] }] } });
-  seed.daily=D.normalize({candidates:[track('cached')],days:[{date:D.dayKey(),profileId:'auto',complete:true,tracks:[track('legacy')]}]});
-  const pending = [], prefixes = [];
-  const options = { read: async () => disk || seed, write: async (v) => { disk = structuredClone(v); }, getLikes: () => [],
-    getDailyBase: async () => { baseCalls++; return Array.from({ length: 8 }, (_, i) => track(i)); },
-    get: (url) => {searchCalls++;return new Promise((resolve) => pending.push({ resolve, url }));},
-  };
-  const manager = R.createManager(options);
-  manager.subscribe(() => { const entry = D.current(manager.getSnapshot().daily); if (entry?.source===D.SOURCE && entry.tracks.length) prefixes.push(entry.tracks.map((v) => v.bvid)); });
-  const generating = manager.generateDaily();
-  await new Promise(setImmediate);
-  assert.equal(D.current(manager.getSnapshot().daily).tracks.length, 0, 'old daily queues and feed candidates cannot bypass the 日推 search');
-  assert.equal(baseCalls,0);
-  assert.deepEqual(pending.map(v=>new URL(v.url).searchParams.get('keyword')),['日推','日推','日推']);
-  assert.deepEqual(pending.map(v=>new URL(v.url).searchParams.get('order')),['pubdate','pubdate',null]);
-  assert.equal(pending.length, 3);
-  const batch = (offset) => ({ result: Array.from({ length: 8 }, (_, i) => ({ ...track(offset + i), type: 'video', typeid: 3, tag: '钢琴' })) });
-  pending[1].resolve(response(batch(0))); await new Promise(setImmediate);
-  assert.equal(D.current(manager.getSnapshot().daily).tracks.length, 8, 'a completed search page appears before the remaining requests finish');
-  pending[0].resolve(response(batch(8))); pending[2].resolve(response(batch(16)));
-  const entry = await generating;
-  assert.equal(entry.tracks.length, 24); assert.equal(entry.complete, true);
-  prefixes.forEach((prefix) => assert.deepEqual(entry.tracks.slice(0, prefix.length).map((v) => v.bvid), prefix));
-  await manager.generateDaily(); assert.equal(searchCalls, 3); assert.equal(baseCalls,0);
-  manager.dispose();
-  const restored = R.createManager(options); await restored.generateDaily(); assert.equal(searchCalls, 3); assert.equal(baseCalls,0);
-  const peer = R.createManager({ ...options, read: async () => null });
-  await peer.applySync(await restored.exportSync());
-  assert.deepEqual(D.current(peer.getSnapshot().daily).tracks, entry.tracks);
-  await peer.dailyAction({ type: 'ignored', name: '钢琴' });
-  assert.equal(peer.getSnapshot().auto.tags.length, 0);
-  assert.equal(D.current(peer.getSnapshot().daily).tracks.length, 24, 'profile edits do not replace the current daily queue');
-  await peer.dailyAction({ type: 'blocked', name: entry.tracks[0].bvid });
-  assert.equal(D.current(peer.getSnapshot().daily).tracks.length, 23);
-  const merged = R.reconcile(undefined, await restored.exportSync(), await peer.exportSync());
-  assert.ok(merged.daily.ignored.some((v) => v.name === '钢琴' && v.active));
-  assert.deepEqual(R.reconcile(merged, merged, merged), merged);
-  restored.dispose(); peer.dispose();
+test('seven-day exposure exclusion survives queue replacement and sync, and expires at exactly seven days', t => {
+  const now = Date.now(), day = 86400000;
+  t.mock.method(Date, 'now', () => now);
+  const interest = { tags: [], long: [], recent: [] };
+  const old = D.normalize({ days: [{ date: D.dayKey(now), profileId: 'other-profile', generatedAt: now - day,
+    tracks: [track('seen')] }] });
+  const refreshed = D.normalize({ ...old, days: [{ date: D.dayKey(now), profileId: 'auto', generatedAt: now,
+    tracks: [track('new')] }] });
+  const remote = D.normalize({ shown: [{ bvid: track('remote').bvid, at: now - 6 * day },
+    { bvid: track('expired').bvid, at: now - 7 * day }] });
+  const synced = D.validate(JSON.parse(JSON.stringify(D.merge(refreshed, remote))));
+  const input = ['seen', 'new', 'remote', 'expired', 'fresh'].map(id => track(id));
+  assert.deepEqual(new Set(D.select(input, synced, interest).map(v => v.bvid)), new Set(['BVdailyexpired', 'BVdailyfresh']));
+  const continued = D.select(input, synced, interest, [track('new')]);
+  assert.equal(continued[0].bvid, 'BVdailynew', 'continuing the current queue keeps its already displayed prefix');
+  assert.deepEqual(D.merge(refreshed, remote).shown, D.merge(remote, refreshed).shown);
 });
 
-test('daily strict selection rejects unrelated partitions and videos; failed searches preserve partial results with a bounded retry', async () => {
-  let disk, calls = 0, blocked = true;
-  const custom = R.normalize({ profiles: [{ id: 'piano', name: '钢琴', tags: ['钢琴'] }], daily: { profileId: 'piano' } });
-  const manager = R.createManager({ read: async () => disk || custom, write: async (v) => { disk = v; }, getLikes: () => [],
-    getDailyBase: async () => { throw new Error('strict daily must not request platform fallback'); },
-    get: async () => {
-      calls++;
-      if (blocked) return { status: 412, body: '' };
-      return response({ result: [{ ...track('short'), type: 'video', typeid: 3, tag: '钢琴', duration: 90 },
-        { ...track('wrong'), title: '旅游', type: 'video', typeid: 3, tag: '旅游' },
-        { ...track('partition'), type: 'video', typeid: 1, tag: '钢琴' }] });
-    },
-  });
-  const failed = await manager.generateDaily(); assert.match(failed.error, /限制/); assert.equal(calls, 3);
-  await manager.generateDaily(); assert.equal(calls, 3, 'no automatic retry storm');
-  blocked = false;
-  const result = await manager.generateDaily(true);
-  assert.deepEqual(result.tracks.map((v) => v.bvid), ['BVdailyshort']);
-  assert.equal(result.complete, false); assert.match(result.error, /只找到 1 首/);
-  assert.equal(calls, 18, 'fewer than 15 matches searches at most five rounds of three pages');
-  manager.dispose();
-  assert.throws(() => D.validate({ ...D.normalize(), candidates: [{ bvid: 'bad' }] }), /同步数据/);
-});
+
 
 
 test('daily diversity survives early single-tag batches; explicit single-tag profiles stay strict', async () => {
@@ -215,18 +140,121 @@ test('daily diversity survives early single-tag batches; explicit single-tag pro
   assert.equal(out.filter((t) => t.matchedTags.includes('阿门')).length, 4);
   for (const name of names.slice(1)) assert.ok(out.filter((t) => t.matchedTags[0] === name).length <= 8);
   assert.equal(D.select(batch('阿门'), state, interest, [], 24, { tags: [tags[0]] }).length, 24);
-  const urls = [];
-  const manager = R.createManager({ read: async () => R.normalize({ profiles: [{ id: 'mix', name: '混合', tags: [{ name: '阿门', weight: 100 }, { name: '钢琴', weight: 2 }, { name: '爵士', weight: 1 }] }], daily: { profileId: 'mix' } }),
-    write: async () => {}, getLikes: () => [], get: async (url) => { urls.push(new URL(url)); return response({ result: [] }); } });
-  await manager.generateDaily();
-  assert.equal(urls.length, 15);
-  assert.ok(urls.every(url=>url.searchParams.get('keyword')==='日推'));
-  assert.deepEqual(urls.map(url=>[url.searchParams.get('order') || 'default',Number(url.searchParams.get('page'))]),[
-    ['pubdate',1],['pubdate',2],['default',1],
-    ['pubdate',3],['pubdate',4],['default',2],
-    ['pubdate',5],['pubdate',6],['default',3],
-    ['pubdate',7],['pubdate',8],['default',4],
-    ['pubdate',9],['pubdate',10],['default',5],
-  ]);
+});
+
+const M = require('../renderer/daily-music-source');
+const immediateSlots = t => { const timeout = global.setTimeout; t.mock.method(global, 'setTimeout', (fn, ms, ...args) => timeout(fn, ms === 350 ? 0 : ms, ...args)); };
+const catalogProfile = () => R.normalize({ profiles:[{id:'piano',name:'钢琴',tags:['钢琴']}],daily:{profileId:'piano'} });
+function catalogGet(url) {
+  const u=new URL(url),q=u.searchParams;
+  if(u.pathname==='/api/playlist/list') return {status:200,body:JSON.stringify({code:200,playlists:Array.from({length:3},(_,i)=>({id:Number(q.get('offset'))+i+1,name:'钢琴歌单'}))})};
+  if(u.pathname==='/api/playlist/detail') return {status:200,body:JSON.stringify({code:200,result:{tracks:Array.from({length:60},(_,i)=>{
+    const id=Number(q.get('id'))*100+i;return {id,name:`作品${id}`,duration:180000,artists:[{name:`歌手${id}`,id}]};
+  })}})};
+  if(u.pathname.includes('/search/type')) {
+    const id=q.get('keyword').match(/作品(\d+)/)?.[1];
+    assert.ok(id);assert.equal(q.get('order'),'totalrank');
+    return response({result:[{bvid:`BVcover${id}`,title:`作品${id} 歌手${id} 钢琴谱`,duration:'03:00',typeid:3},
+      {bvid:`BVcatalog${id}`,title:`作品${id} 歌手${id}`,duration:'03:00',typeid:3}]});
+  }
+  throw Error('unexpected '+u.pathname);
+}
+
+test('catalog matching uses source aliases, rejects scores and mismatched recordings, and does not confuse short artist names',()=>{
+  const s={title:'이름에게',artists:['IU'],aliases:['致姓名'],artistAliases:[],duration:289};
+  assert.ok(M.matchScore(s,{title:'IU 致姓名',duration:290})>0);
+  assert.equal(M.matchScore(s,{title:'IU 致姓名 Bass Tab 贝斯谱',duration:289}),0);
+  assert.equal(M.matchScore(s,{title:'IU 致姓名 架子鼓动态谱',duration:289}),0);
+  assert.equal(M.matchScore(s,{title:'【鏡音レン】IU 致姓名',duration:289}),0);
+  for(const extra of ['谱乐园','ニコカラ','ベースカバー','花絮']) assert.equal(M.matchScore(s,{title:`IU 致姓名 ${extra}`,duration:289}),0);
+  assert.equal(M.matchScore(s,{title:'premium 致姓名',duration:289}),0);
+  assert.equal(M.matchScore(s,{title:'IU 致姓名 live',duration:289}),0);
+  assert.equal(M.matchScore(s,{title:'IU 致姓名',duration:20}),0);
+  assert.ok(M.matchScore({title:'満ちてゆく',artists:['藤井風'],aliases:[],artistAliases:['藤井风','Fujii Kaze'],duration:311},
+    {title:'満ちてゆく - 藤井风',duration:312})>0);
+  assert.equal(M.plans({tags:[{name:'Cosplay',weight:100},{name:'日语',weight:50}]}).length,1);
+});
+
+test('catalog songs retain seven-day identities through queue replacement, platform IDs, profile changes, and sync', t=>{
+  const now=Date.now(),day=86400000;t.mock.method(Date,'now',()=>now);
+  const s={source:'netease',id:'123',title:'名称',artists:['歌手'],aliases:['Name'],artistAliases:['Singer']};
+  const a={...track('a'),song:s}, b={...track('b'),song:{source:'qq',id:'qq123',title:'Name',artists:['Singer']}};
+  const old=D.normalize({days:[{date:D.dayKey(),profileId:'piano',generatedAt:now-6*day,tracks:[a]}]});
+  const replaced=D.normalize({...old,days:[]});
+  const synced=D.validate(JSON.parse(JSON.stringify(D.merge(replaced,D.normalize()))));
+  assert.equal(D.selectSongs([b],synced).length,0,'another source and another upload of the song remain excluded');
+  assert.deepEqual(D.merge(replaced,D.normalize()).shownSongs,D.merge(D.normalize(),replaced).shownSongs);
+  const expired=D.normalize({...synced,shownSongs:synced.shownSongs.map(v=>({...v,at:now-7*day})),shown:[]});
+  assert.equal(D.selectSongs([b],expired).length,1);
+  assert.throws(()=>D.validate({...D.normalize(),shownSongs:[{key:'invalid',at:now}]}),/同步数据/);
+});
+
+test('catalog generation streams a stable queue of at least fifteen, persists it, and never repeats songs on force/restart/sync',async t=>{
+  immediateSlots(t);
+  let disk=catalogProfile(),calls=0,inflight=0,peak=0;
+  const prefixes=[];
+  const options={read:async()=>disk,write:async v=>{disk=structuredClone(v);},getLikes:()=>[],get:async url=>{
+    calls++;inflight++;peak=Math.max(peak,inflight);await new Promise(setImmediate);inflight--;return catalogGet(url);
+  }};
+  const manager=R.createManager(options);
+  manager.subscribe(()=>{const e=D.current(manager.getSnapshot().daily);if(e?.tracks.length)prefixes.push(e.tracks.map(t=>t.bvid));});
+  const first=await manager.generateDaily();
+  assert.equal(first.complete,true);assert.equal(first.tracks.length,24);assert.ok(peak<=3);
+  prefixes.forEach(prefix=>assert.deepEqual(first.tracks.slice(0,prefix.length).map(t=>t.bvid),prefix));
+  assert.ok(prefixes.some(p=>p.length>0&&p.length<15),'partial batches appear immediately');
+  const before=calls;await manager.generateDaily();assert.equal(calls,before,'today reads from persistent cache');
+  const firstKeys=new Set(first.tracks.flatMap(D.songKeys));
+  const second=await manager.generateDaily(true);
+  assert.ok(second.tracks.length>=15);assert.ok(second.tracks.every(t=>D.songKeys(t).every(k=>!firstKeys.has(k))));
   manager.dispose();
+  const restored=R.createManager(options);const beforeRestore=calls;await restored.generateDaily();assert.equal(calls,beforeRestore);
+  const peer=R.createManager({...options,read:async()=>null,write:async()=>{}});
+  await peer.applySync(await restored.exportSync());
+  assert.deepEqual(peer.getSnapshot().daily.shownSongs,restored.getSnapshot().daily.shownSongs);
+  const third=await peer.generateDaily(true);
+  const seen=new Set([...first.tracks,...second.tracks].flatMap(D.songKeys));
+  assert.ok(third.tracks.length>=15);assert.ok(third.tracks.every(t=>D.songKeys(t).every(k=>!seen.has(k))));
+  restored.dispose();peer.dispose();
+});
+
+test('catalog outages retain partial results, remain retryable, and never count fewer than fifteen as complete',async t=>{
+  immediateSlots(t);
+  let disk=catalogProfile(),calls=0,blocked=false;
+  const manager=R.createManager({read:async()=>disk,write:async v=>{disk=v;},getLikes:()=>[],get:async url=>{
+    calls++;if(blocked)return {status:412,body:''};
+    if(url.includes('/search/type')){const result=catalogGet(url);if(++videos===3)blocked=true;return result;}
+    return catalogGet(url);
+  }});
+  let videos=0;
+  const first=await manager.generateDaily();assert.equal(first.tracks.length,3);assert.equal(first.complete,false);assert.match(first.error,/412/);
+  const before=calls;await manager.generateDaily();assert.equal(calls,before,'no immediate automatic retry storm');
+  blocked=false;const second=await manager.generateDaily(true);assert.ok(second.tracks.length>=15);
+  assert.ok(second.tracks.every(t=>!first.tracks.some(old=>old.bvid===t.bvid)));manager.dispose();
+});
+
+test('seven successive daily queues each contain fifteen or more distinct songs across restarts',async t=>{
+  immediateSlots(t);
+  let now=Date.now(),disk=catalogProfile();t.mock.method(Date,'now',()=>now);
+  const seen=new Set();
+  for(let day=0;day<7;day++){
+    const manager=R.createManager({read:async()=>disk,write:async v=>{disk=v;},getLikes:()=>[],get:async url=>catalogGet(url)});
+    const entry=await manager.generateDaily();
+    assert.ok(entry.tracks.length>=15,`day ${day+1}: ${entry.error}`);
+    for(const track of entry.tracks){
+      const keys=D.songKeys(track);assert.ok(keys.every(k=>!seen.has(k)));keys.forEach(k=>seen.add(k));
+    }
+    manager.dispose();now+=86400000;
+  }
+});
+
+test('changing daily profile does not wait for a pending catalog request or allow its late result to overwrite selection',async()=>{
+  let finish;
+  const manager=R.createManager({read:async()=>catalogProfile(),write:async()=>{},getLikes:()=>[],
+    get:()=>new Promise(resolve=>{finish=resolve;})});
+  const generating=manager.generateDaily();await new Promise(setImmediate);
+  assert.equal(typeof finish,'function');
+  await manager.dailyAction({type:'profile',id:'auto'});
+  assert.equal(manager.getSnapshot().daily.profileId,'auto');
+  finish({status:200,body:JSON.stringify({code:200,playlists:[]})});
+  await generating;assert.equal(manager.getSnapshot().daily.profileId,'auto');manager.dispose();
 });

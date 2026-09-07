@@ -3,7 +3,7 @@
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  ActivityIndicator, ScrollView, StyleSheet, Text, TouchableOpacity, View,
+  ActivityIndicator, FlatList, StyleSheet, Text, TouchableOpacity, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors } from '../theme';
@@ -30,46 +30,50 @@ export default function PlaylistDetailScreen({ navigation, route }) {
   const [error, setError] = useState(null);
   const pageRef = useRef(1);
   const scrollRef = useRef(null);
+  const requestRef = useRef(null), generation = useRef(0);
 
   const load = useCallback(async (more = false) => {
     if (!mediaId) { setError('缺少收藏夹参数'); setLoading(false); return; }
+    if (more && requestRef.current) return;
+    requestRef.current?.abort();
+    const controller = new AbortController(); requestRef.current = controller;
+    const id = ++generation.current;
+    const valid = () => id === generation.current && !controller.signal.aborted;
     if (more) setLoadingMore(true); else setLoading(true);
     setError(null);
     try {
       const page = more ? pageRef.current + 1 : 1;
-      const r = await bili.favItems(mediaId, page);
+      const r = await bili.favItems(mediaId, page, 40, { signal: controller.signal });
+      if (!valid()) return;
       pageRef.current = page;
-      setTotal(r.total);
-      setHasMore(r.hasMore);
-      setTracks((prev) => (more ? [...prev, ...r.list] : r.list));
+      setTotal(r.total); setHasMore(r.hasMore);
+      setTracks(prev => more ? [...new Map([...prev, ...r.list].map(t => [t.bvid, t])).values()] : r.list);
     } catch (e) {
-      console.warn('[PlaylistDetail] 收藏夹内容加载失败：', String(e.message || e));
-      setError(String(e.message || e));
-      if (!more) setTracks([]);
+      if (valid()) setError(String(e.message || e));
     } finally {
-      setLoading(false);
-      setLoadingMore(false);
+      if (requestRef.current === controller) requestRef.current = null;
+      if (valid()) { setLoading(false); setLoadingMore(false); }
     }
-  }, [mediaId]);
+  }, [mediaId, account?.mid, account?.isLogin]);
 
-  useEffect(() => { load(false); }, [load]);
+  useEffect(() => {
+    pageRef.current = 1; setTracks([]); setHasMore(false); setTotal(0);
+    setFolder({ id: mediaId, title, desc: intro || '' });
+    load(false);
+    return () => { generation.current++; requestRef.current?.abort(); requestRef.current = null; };
+  }, [load]);
 
   const openEditor = async () => {
     if (editLoading) return;
     setEditLoading(true); setEditError('');
     try {
       setFolder(await bili.favFolderInfo(mediaId)); setEditor(true);
-      scrollRef.current?.scrollTo({ y: 0, animated: true });
+      scrollRef.current?.scrollToOffset({ offset: 0, animated: true });
     }
     catch (e) { setEditError(e.message || '收藏夹资料加载失败'); }
     finally { setEditLoading(false); }
   };
 
-  const onScroll = ({ nativeEvent }) => {
-    const { contentOffset, contentSize, layoutMeasurement } = nativeEvent;
-    if (!hasMore || loadingMore || loading) return;
-    if (contentOffset.y + layoutMeasurement.height > contentSize.height - 240) load(true);
-  };
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -86,45 +90,39 @@ export default function PlaylistDetailScreen({ navigation, route }) {
         </TouchableOpacity> : null}
       </View>
       {editError ? <Text style={styles.editError}>{editError}</Text> : null}
-      <ScrollView
+      <FlatList
         ref={scrollRef}
         keyboardShouldPersistTaps="handled"
         contentContainerStyle={styles.content}
-        onScroll={onScroll}
-        scrollEventThrottle={200}
-      >
+        data={tracks}
+        keyExtractor={track => track.bvid}
+        initialNumToRender={12} maxToRenderPerBatch={6} windowSize={5}
+        onEndReached={() => { if (hasMore && !loading && !error) load(true); }}
+        onEndReachedThreshold={0.5}
+        renderItem={({ item: t, index: i }) => <TrackRow
+          track={t} active={!!current && current.bvid === t.bvid}
+          onPress={() => playQueue(tracks, i)}
+          onPressUp={canOpenTrackUp(t) ? () => openUp(t) : undefined}
+        />}
+        ListHeaderComponent={<>
         {editor ? <PlaylistEditor visible playlist={folder} onClose={() => setEditor(false)}
           onSave={async (changes) => {
             await bili.favFolderEdit(mediaId, changes.title, changes.desc);
             setFolder((previous) => ({ ...previous, ...changes }));
           }} /> : folder.desc ? <Text style={styles.description}>{folder.desc}</Text> : null}
-        {loading ? (
-          <ActivityIndicator color={colors.accent} style={{ marginTop: 64 }} />
-        ) : error ? (
-          <View style={styles.emptyBox}>
-            <Text style={styles.empty}>{error}</Text>
-            <TouchableOpacity style={styles.actionBtn} onPress={() => load(false)}>
-              <Text style={styles.actionText}>重试</Text>
-            </TouchableOpacity>
-          </View>
-        ) : !tracks.length ? (
-          <View style={styles.emptyBox}>
+        </>}
+        ListEmptyComponent={loading ? <ActivityIndicator color={colors.accent} style={{ marginTop: 64 }} />
+          : !error ? <View style={styles.emptyBox}>
             <IconPlaylist size={30} color={colors.text3} />
             <Text style={styles.empty}>这个收藏夹是空的</Text>
-          </View>
-        ) : (
-          tracks.map((t, i) => (
-            <TrackRow
-              key={t.bvid || t.aid || i}
-              track={t}
-              active={!!current && current.bvid === t.bvid}
-              onPress={() => playQueue(tracks, i)}
-              onPressUp={canOpenTrackUp(t) ? () => openUp(t) : undefined}
-            />
-          ))
-        )}
-        {loadingMore ? <ActivityIndicator color={colors.accent} style={{ marginVertical: 16 }} /> : null}
-      </ScrollView>
+          </View> : null}
+        ListFooterComponent={error ? <View style={styles.emptyBox}>
+          <Text style={styles.empty}>{error}</Text>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel="重试" style={styles.actionBtn} onPress={() => load(tracks.length > 0)}>
+            <Text style={styles.actionText}>重试</Text>
+          </TouchableOpacity>
+        </View> : loadingMore ? <ActivityIndicator color={colors.accent} style={{ marginVertical: 16 }} /> : null}
+      />
     </SafeAreaView>
   );
 }

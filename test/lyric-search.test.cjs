@@ -21,6 +21,7 @@ function loadApi(platform, get) {
   const module = { exports: {} };
   new Function('require', 'module', 'exports', code)((name) => {
     if (name === './client') return { get };
+    if (name === '@react-native-async-storage/async-storage') return { getItem: async () => null, setItem: async () => {} };
     if (name === './mediaUrl') return { mediaUrl: value => value };
 
     if (name === '../../../renderer/subtitles') return require('../renderer/subtitles');

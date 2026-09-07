@@ -17,12 +17,39 @@ function backend(){
     runtime:{ensure:async()=>{},run:async(req,signal,event)=>{if(signal.aborted)throw Error('aborted');if(req.operation==='encode'){const id=crypto.randomBytes(16).toString('hex');data.set(id,req.library);return {snapshotId:id};}fs.mkdirSync(path.dirname(req.output),{recursive:true});fs.writeFileSync(req.output,JSON.stringify(data.get(req.snapshotId)));event({type:'symbol',symbols:7,needed:7});return {passed:true};}}
   };
 }
-function device(t,b,initial=lib([1]),syncDiscovery=true) {
+function device(t,b,initial=lib([1]),syncDiscovery=true,waitForForeground=()=>{}) {
   const directory=fs.mkdtempSync(path.join(os.tmpdir(),'biu-cloud-'));let library=normalize(initial),account='123';
-  const service=createVideoCloudSync({syncDiscovery,directory,api:b.api,runtime:b.runtime,auth:async()=>({isLogin:true,mid:account}),readLibrary:()=>library,writeLibrary:(_,value)=>{library=value;},protect:s=>'protected:'+s,unprotect:s=>s.slice(10)});
+  const service=createVideoCloudSync({syncDiscovery,waitForForeground,directory,api:b.api,runtime:b.runtime,auth:async()=>({isLogin:true,mid:account}),readLibrary:()=>library,writeLibrary:(_,value)=>{library=value;},protect:s=>'protected:'+s,unprotect:s=>s.slice(10)});
   t.after(()=>{service.stop();fs.rmSync(directory,{recursive:true,force:true});});
   return {service,directory,get library(){return library;},set library(v){library=normalize(v);},set account(v){account=v;}};
 }
+test('worker read failures preserve cloud configuration and allow retry without claiming corruption', async t => {
+  const b = backend(), a = device(t, b);
+  await a.service.setAccount('123');
+  await a.service.configure({ enabled: true });
+  a.service.stop();
+  const file = path.join(a.directory, '123/state.json'), original = fs.readFileSync(file, 'utf8');
+  let fail = true;
+  const { createVideoCloudSync } = require('../renderer/video-cloud-sync-core')({ fs, path, crypto, Buffer,
+    compute: async (operation, value) => { assert.equal(operation, 'parse');
+      if (fail) throw TypeError('undefined is not a function'); return JSON.parse(value); },
+  });
+  const service = createVideoCloudSync({ directory: a.directory });
+  t.after(() => service.stop());
+  await assert.rejects(service.setAccount('123'), /配置读取失败/);
+  assert.equal(service.status().error.includes('配置损坏'), false);
+  assert.equal(fs.readFileSync(file, 'utf8'), original);
+  fail = false;
+  await service.setAccount('123'); service.stop();
+  assert.equal(service.status().hasKey, true);
+  assert.equal(fs.readFileSync(file, 'utf8'), original);
+  await service.setAccount('');
+  for (const raw of ['{broken', 'null', '{}']) {
+    fs.writeFileSync(file, raw);
+    await assert.rejects(service.setAccount('123'), /配置损坏/);
+    assert.equal(fs.readFileSync(file, 'utf8'), raw);
+  }
+});
 test('default off; intervals persist; import shares one BV, next writes edit and retain two parts',async t=>{
   const b=backend(),a=device(t,b);await a.service.setAccount('123');assert.equal(a.service.status().enabled,false);
   await a.service.configure({enabled:true,intervalHours:24});await a.service.run();assert.equal(b.count,1);
@@ -118,6 +145,26 @@ test('missing known archive never creates another submission',async t=>{
   const b=backend(),a=device(t,b);await a.service.setAccount('123');await a.service.configure({enabled:true});await a.service.run();
   b.api.list=async()=>[];a.library=lib([1,2]);await assert.rejects(a.service.run(),/不会另建/);assert.equal(b.count,1);
 });
+test('large cloud videos upload in bounded chunks and close the file on interruption', async () => {
+  const total=600*1024*1024, chunkSize=65536, reads=[];
+  let closed=false, sent=0;
+  const {createBiliVideoApi}=require('../renderer/cloud-video-bili-core')({fs:{
+    statSync:()=>({size:total}),promises:{open:async()=>({
+      read:async(buffer,offset,length,position)=>{reads.push({length,position});return {bytesRead:length};},
+      close:async()=>{closed=true;},
+    })},
+  },path,crypto,Buffer});
+  const api=createBiliVideoApi({request:async url=>{
+    assert.equal(new URL(url).searchParams.get('size'),String(total));
+    return Response.json({chunk_size:chunkSize,auth:'test-only',endpoint:'//upos.bilivideo.com',upos_uri:'upos://bucket/large.mp4'});
+  },uploadFetch:async(url,options)=>{
+    if(options.method==='POST')return Response.json({upload_id:'test'});
+    assert.equal(options.body.length,chunkSize);sent++;
+    return Response.json({});
+  }});
+  await assert.rejects(api.submit({file:'large.mp4',emit:()=>{throw Error('test interruption');}}),/test interruption/);
+  assert.equal(sent,1);assert.deepEqual(reads,[{length:chunkSize,position:0}]);assert.equal(closed,true);
+});
 test('disable aborts an active encoder before publishing and persists disabled state',async t=>{
   const b=backend(),a=device(t,b);await a.service.setAccount('123');await a.service.configure({enabled:true});
   let started;const ready=new Promise(r=>started=r);
@@ -147,4 +194,51 @@ test('background pause aborts current work without disabling the account or rest
   b.runtime.run=original;t.mock.timers.tick(24*3600000);await Promise.resolve();await Promise.resolve();
   assert.equal(a.service.status().busy,false);assert.equal(a.service.status().enabled,true);assert.equal(b.count,0);
   a.service.resume();await a.service.run();assert.equal(b.count,1);
+});
+
+
+test('cloud sync yields before network and encoding while the foreground feed loads', async t => {
+  let resume, blocked = true, reads = 0;
+  const pending = new Promise(resolve => { resume = resolve; });
+  const b = backend(), list = b.api.list;
+  b.api.list = async (...args) => { reads++; return list(...args); };
+  const a = device(t, b, lib([1]), true, () => blocked ? pending : Promise.resolve());
+  await a.service.setAccount('123'); await a.service.configure({ enabled: true });
+  const sync = a.service.run();
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(reads, 0); assert.equal(b.count, 0);
+  blocked = false; resume(); await sync;
+  assert.ok(reads > 0); assert.equal(b.count, 1); assert.equal(a.service.status().busy, false);
+});
+
+test('cloud state and decoded snapshots use async I/O and high-rate progress does not flood subscribers', async t => {
+  const b = backend(), directory = fs.mkdtempSync(path.join(os.tmpdir(), 'biu-cloud-async-'));
+  const notices = [], writes = [], reads = [];
+  const asyncFs = { ...fs, readFileSync: () => assert.fail('cloud reads must be async'), writeFileSync: () => assert.fail('cloud writes must be async'),
+    promises: { ...fs.promises,
+      readFile: (...args) => { reads.push(args[0]); return fs.promises.readFile(...args); },
+      writeFile: (...args) => { writes.push(args[0]); return fs.promises.writeFile(...args); },
+    } };
+  const run = b.runtime.run;
+  b.runtime.run = async (request, signal, emit) => {
+    if (request.operation === 'encode') {
+      for (let frames = 0; frames <= 10000; frames++) emit({ type: 'encode', frames, total: 10000 });
+    }
+    return run(request, signal, emit);
+  };
+  const service = require('../renderer/video-cloud-sync-core')({ fs: asyncFs, path, crypto, Buffer }).createVideoCloudSync({
+    directory, api: b.api, runtime: b.runtime, auth: async () => ({ isLogin: true, mid: '123' }),
+    readLibrary: () => lib([1]), writeLibrary: () => {}, protect: s => s, unprotect: s => s,
+    onStatus: value => notices.push(value), now: () => 100000,
+  });
+  t.after(() => { service.stop(); fs.rmSync(directory, { recursive: true, force: true }); });
+  await service.setAccount('123'); await service.configure({ enabled: true }); await service.run();
+  assert.ok(writes.some(file => file.endsWith('state.json.tmp')));
+  assert.ok(reads.some(file => file.includes('decoded-')));
+  const encode = notices.filter(value => value.progress.type === 'encode');
+  assert.equal(encode.length, 2, 'first and final frame publish; intervening packets in the same interval coalesce');
+  assert.equal(encode.at(-1).progress.frames, 10000);
+  assert.equal(service.status().busy, false);
+  await service.setAccount(''); await service.setAccount('123');
+  assert.ok(reads.some(file => file.endsWith('state.json')));
+  assert.equal(service.status().enabled, true, 'atomic async state survives reload');
 });
