@@ -12,6 +12,8 @@ const SORTS = [
   { key: 'artist-desc', label: 'UP 主', direction: '逆序' },
 ];
 
+const compareChinese = new Intl.Collator('zh-CN').compare;
+
 export function useCollectionView(tracks) {
   const [query, setQuery] = useState('');
   const [sort, setSort] = useState('added-desc');
@@ -28,8 +30,8 @@ export function useCollectionView(tracks) {
       return sign * (b.index - a.index);
     });
     next = next.map(({ track }) => track);
-    if (field === 'title') next = [...next].sort((a, b) => sign * String(a.title || '').localeCompare(String(b.title || ''), 'zh-CN'));
-    else if (field === 'artist') next = [...next].sort((a, b) => sign * String(a.up || '').localeCompare(String(b.up || ''), 'zh-CN'));
+    if (field === 'title') next = [...next].sort((a, b) => sign * compareChinese(String(a.title || ''), String(b.title || '')));
+    else if (field === 'artist') next = [...next].sort((a, b) => sign * compareChinese(String(a.up || ''), String(b.up || '')));
     return next;
   }, [query, sort, tracks]);
   return { query, setQuery, sort, setSort, visibleTracks };

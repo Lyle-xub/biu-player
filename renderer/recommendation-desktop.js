@@ -54,7 +54,7 @@
         const instance = manager();
         // manager may have mounted the editor while changing accounts.
         unmount?.(); unmount = root.BiuRecommendationEditor(element, instance);
-        instance.refresh().catch(() => {});
+        instance.ready().catch(() => {});
         return () => { if (host === element) { unmount?.(); unmount = null; host = null; } };
       },
       async recommend(page, exclude = [], onBatch) {

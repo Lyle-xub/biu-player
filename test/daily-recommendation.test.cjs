@@ -258,3 +258,70 @@ test('changing daily profile does not wait for a pending catalog request or allo
   finish({status:200,body:JSON.stringify({code:200,playlists:[]})});
   await generating;assert.equal(manager.getSnapshot().daily.profileId,'auto');manager.dispose();
 });
+
+
+test('daily generation survives repeated unchanged and learned-profile syncs between three-song batches', async t => {
+  immediateSlots(t);
+  let disk = catalogProfile(), manager, syncs = 0, begins = 0, finishes = 0;
+  manager = R.createManager({ read: async () => disk, write: async value => { disk = value; }, getLikes: () => [],
+    beginDaily: () => { begins++; return () => { finishes++; }; },
+    get: async url => {
+      if (url.includes('/search/type')) {
+        const base = await manager.exportSync(), incoming = structuredClone(base);
+        if (++syncs % 2 === 0) { incoming.auto.updatedAt = Date.now(); incoming.auto.tags = [{name:'爵士',weight:80}]; }
+        await manager.applySync(incoming, base);
+      }
+      return catalogGet(url);
+    },
+  });
+  t.after(() => manager.dispose());
+  const result = await manager.generateDaily();
+  assert.ok(syncs >= 15);
+  assert.ok(result.tracks.length >= 15, result.error);
+  assert.equal(result.complete, true);
+  assert.equal(begins, 1); assert.equal(finishes, 1);
+  await manager.generateDaily();
+  assert.equal(begins, 1, 'cached queues do not reserve foreground work');
+});
+
+test('syncing a changed daily filter cancels old results and releases foreground priority', async () => {
+  let finish, released = 0;
+  const manager = R.createManager({read:async()=>catalogProfile(),write:async()=>{},getLikes:()=>[],
+    beginDaily: () => () => { released++; }, get:()=>new Promise(resolve=>{finish=resolve;})});
+  const generating = manager.generateDaily(); await new Promise(setImmediate);
+  const before = await manager.exportSync(), incoming = structuredClone(before);
+  incoming.profiles[0].tags = [{name:'爵士',weight:100}];
+  await manager.applySync(incoming, before);
+  finish({status:200,body:JSON.stringify({code:200,playlists:[]})});
+  await generating;
+  assert.equal(manager.getSnapshot().profiles[0].tags[0].name, '爵士');
+  assert.equal(D.current(manager.getSnapshot().daily).tracks.length, 0);
+  assert.equal(released, 1);
+  manager.dispose();
+});
+
+
+test('streamed daily progress persists exposure without recomputing the complete profile after each batch', async t => {
+  immediateSlots(t);
+  let disk = catalogProfile(), normalizations = 0, progress = 0;
+  const manager = R.createManager({read:async()=>disk,write:async v=>{disk=v;},getLikes:()=>[],get:async url=>catalogGet(url),
+    compute: async (operation, ...args) => {
+      switch (operation) {
+        case 'profileNormalize': normalizations++; return R.normalize(args[0]);
+        case 'dailyNormalize': progress++; return D.normalize(args[0]);
+        case 'dailyTaste': return D.taste(...args);
+        case 'dailySourceDecode': return M.decode(...args);
+        case 'dailySelectSongs': return D.selectSongs(...args);
+        default: throw Error(operation);
+      }
+    },
+  });
+  t.after(()=>manager.dispose());
+  const result = await manager.generateDaily();
+  assert.ok(result.tracks.length >= 15);
+  assert.ok(progress > 3, 'partial queues still persist as songs arrive');
+  assert.equal(normalizations, 2, 'one initial read and one final learned-profile refresh');
+  assert.equal(disk.daily.shown.length, result.tracks.length);
+  assert.equal(disk.daily.shownSongs.length, new Set(result.tracks.flatMap(D.songKeys)).size);
+  assert.deepEqual(disk, R.normalize(disk), 'the final sync snapshot remains fully normalized');
+});

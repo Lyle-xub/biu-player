@@ -80,8 +80,8 @@ function changePlaylists(update) {
 }
 
 export function mergeSyncedPlaylists(incoming, base) {
-  return changePlaylists(async (list) => (await backgroundCompute('libraryReconcile', base ? { version: 1, likes: [], playlists: base } : null,
-    { version: 1, likes: [], playlists: incoming }, { version: 1, likes: [], playlists: list })).playlists);
+  return changePlaylists(async (list) => (await backgroundCompute('libraryChanges', base ? { version: 1, likes: [], playlists: base } : null,
+    { version: 1, likes: [], playlists: incoming }, { version: 1, likes: [], playlists: list })).playlists?.value || list);
 }
 
 import { trackKeyOf } from '../player/track';

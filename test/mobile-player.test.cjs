@@ -17,6 +17,7 @@ function loader(mocks = {}) {
     '@react-native-async-storage/async-storage': { getItem: async () => null, setItem: async () => {} },
     'biu-lyric-monet': {},
     'src/screens/discoveryQueue': { DISCOVERY_TARGET: 24, DISCOVERY_LOW_WATER: 12, readDiscoveryQueue: async () => [], writeDiscoveryQueue: async () => {} },
+    'expo-blur': { BlurTargetView: 'BlurTargetView', BlurView: 'BlurView' },
     'expo-crypto': { getRandomBytes: (count) => new Uint8Array(require('node:crypto').randomBytes(count)) },
     'src/components/QrCode': (props) => React.createElement('QrCode', props),
     'expo-secure-store': { getItemAsync: async () => null, setItemAsync: async () => {}, deleteItemAsync: async () => {} },
@@ -57,6 +58,7 @@ function loader(mocks = {}) {
     });
     const req = (name) => {
       if (name in mocks) return mocks[name];
+      if (name === 'react-native') return rn;
       if (name.startsWith('.')) {
         const target = path.resolve(path.dirname(file), name);
         const relative = path.relative(root, target).replaceAll('\\', '/');
@@ -1946,6 +1948,17 @@ test('player publishes system media metadata, seeks within segments and advances
   await act(async () => tree.unmount());
 });
 
+test('Android media session publishes one standard previous/next pair without duplicate custom actions', () => {
+  const patch = fs.readFileSync(path.join(root, 'patches/expo-video+57.0.3.patch'), 'utf8');
+  const additions = patch.split('\n').filter(line => line.startsWith('+') && !line.startsWith('+++')).join('\n');
+  assert.doesNotMatch(additions, /BIU_NEXT_TRACK|BIU_PREVIOUS_TRACK|setCustomLayout/);
+  for (const command of ['PREVIOUS', 'PREVIOUS_MEDIA_ITEM', 'NEXT', 'NEXT_MEDIA_ITEM']) {
+    assert.ok(additions.includes(`Player.COMMAND_SEEK_TO_${command}`), `standard ${command} remains available`);
+  }
+  assert.match(additions, /override fun seekToPrevious\(\) = videoPlayer.emitRemotePrevious\(\)/);
+  assert.match(additions, /override fun seekToNext\(\) = videoPlayer.emitRemoteNext\(\)/);
+});
+
 test('iOS transport has one application owner and keeps targets across item changes', () => {
   const native = fs.readFileSync(path.join(root, 'node_modules/expo-video/ios/NowPlayingManager.swift'), 'utf8');
   const view = fs.readFileSync(path.join(root, 'node_modules/expo-video/ios/VideoView.swift'), 'utf8');
@@ -2053,6 +2066,44 @@ test('background profile updates do not rerender narrow navigation and library s
   } finally { await act(async () => tree.unmount()); }
 });
 
+test('repeated sync preserves collection identities and never reloads playing media', async () => {
+  const writes = [], mediaCalls = [];
+  const player = { playing: true, status: 'readyToPlay',
+    pause() { mediaCalls.push('pause'); }, play() { mediaCalls.push('play'); },
+    replaceAsync() { mediaCalls.push('replace'); } };
+  const load = loader({
+    'expo-video': { useVideoPlayer: () => player },
+    expo: { useEvent: (_, name) => name === 'playingChange' ? { isPlaying: true } : { status: 'readyToPlay' }, useEventListener() {} },
+    'src/api/client': {}, 'src/api/bili': {},
+    '@react-native-async-storage/async-storage': { getItem: async () => null, setItem: async (key) => writes.push(key) },
+  });
+  const { PlayerProvider, usePlayer } = load('src/player/PlayerContext.js');
+  const playlists = load('src/store/playlists.js');
+  let state, tree;
+  function Probe() { state = usePlayer(); return null; }
+  await act(async () => { tree = create(React.createElement(PlayerProvider, null, React.createElement(Probe))); });
+  try {
+    const seed = { version: 1, likes: [{ bvid: 'BVliked' }], library: [{ bvid: 'BVsaved' }],
+      playlists: [{ id: 'test', title: '测试', tracks: [{ bvid: 'BVlist' }] }] };
+    await act(async () => state.applySyncLibrary(seed));
+    const before = { likes: state.likes, tracks: state.libraryTracks, lists: await playlists.getPlaylists() };
+    writes.length = 0; mediaCalls.length = 0;
+    await act(async () => state.applySyncLibrary(seed, seed));
+    assert.equal(state.likes, before.likes);
+    assert.equal(state.libraryTracks, before.tracks);
+    assert.equal(await playlists.getPlaylists(), before.lists);
+    assert.deepEqual(writes.filter(key => /^biu\.(likes|library|playlists)/.test(key)), []);
+    assert.deepEqual(mediaCalls, []);
+    assert.equal(state.isLiked({ bvid: 'BVliked' }), true);
+    assert.equal(state.isInLibrary({ bvid: 'BVsaved' }), true);
+    const empty = { version: 1, likes: [], library: [], playlists: [] };
+    await act(async () => state.applySyncLibrary(empty, seed));
+    assert.equal(state.likes.length, 0);
+    assert.equal(state.libraryTracks.length, 0);
+    assert.equal((await playlists.getPlaylists()).length, 0, 'remote deletion still applies');
+  } finally { await act(async () => tree.unmount()); }
+});
+
 test('local likes rebase on a sync commit that arrives during worker serialization', async () => {
   const held = deferred(), started = deferred();
   let hold = true, state, tree;
@@ -2084,6 +2135,8 @@ test('background argument transfer never freezes live state or reuses stale seri
   const load = loader({ 'react-native-worklets': {
     createWorkletRuntime: options => { runtimes++; assert.equal(options.name, 'biu-data'); return {}; },
     runOnRuntimeAsync: async (_runtime, worklet, ...args) => {
+      assert.ok(args[1].every(value => value === undefined || typeof value === 'string'),
+        'large state crosses the runtime boundary as strings, never recursive shareable objects');
       const freeze = value => { if (!value || typeof value !== 'object' || Object.isFrozen(value)) return;
         Object.freeze(value); Object.values(value).forEach(freeze); };
       args.forEach(freeze);
@@ -2534,8 +2587,8 @@ test('Monet uses static hardware glyph masks and one native clock across words, 
   const clock = animationCalls.at(-1);
   assert.equal(clock.config.useNativeDriver, true);
   assert.equal(clock.config.isInteraction, false);
-  assert.equal(clock.config.toValue, 3601);
-  assert.equal(clock.config.duration, 3600000, 'the native clock runs continuously instead of restarting at each sample');
+  assert.equal(clock.config.toValue, 31);
+  assert.equal(clock.config.duration, 30000, 'each native timing allocates at most 1,801 frame values, not an hour of frames');
   clock.value.setValue(1.28); // Native frame between React updates.
   const moving = animatedAt(front(masks[0]));
   const timingsBeforeSample = animationCalls.length;
@@ -2550,8 +2603,113 @@ test('Monet uses static hardware glyph masks and one native clock across words, 
   assert.equal(animationCalls.length, background, 'native interpolation stops when the app is hidden');
   await act(async () => appStateListeners.forEach((fn) => fn('active')));
   assert.equal(animationCalls.length, background + 1);
+  const resumed = animationCalls.at(-1);
+  await act(async () => resumed.finish());
+  assert.equal(animationCalls.at(-1).config.toValue, resumed.config.toValue + 30, 'clock renews without waiting for another playback tick');
+  const lastClock = animationCalls.at(-1);
   await act(async () => tree.unmount());
+  const stopped = animationCalls.length;
+  await act(async () => lastClock.finish());
+  assert.equal(animationCalls.length, stopped, 'late native completion cannot resurrect an unmounted clock');
   assert.equal(appStateListeners.size, 0);
+});
+
+test('background track changes create no lyric animation graph and resume only the latest song on iOS and Android', async () => {
+  for (const platform of ['ios', 'android']) for (const effect of ['simple', 'monet']) {
+    let interpolations = 0;
+    class TrackedValue extends Value {
+      interpolate(config) { interpolations++; return super.interpolate(config); }
+    }
+    const Lyrics = loader({ ...lyricMocks, 'react-native': { ...rn, Platform: { OS: platform },
+      Animated: { ...rn.Animated, Value: TrackedValue } } })('src/components/LyricsRail.js').default;
+    const linesFor = song => Array.from({ length: 60 }, (_, i) => ({ from: i * 4, to: (i + 1) * 4, text: `${song} 第 ${i} 行歌词` }));
+    let lines = linesFor('A'), tree, visible = true;
+    const render = (position = 10) => React.createElement(Lyrics, { key: lines[0].text, lines, effect, visible,
+      position, activeIndex: Math.floor(position / 4), playing: true, width: 390, height: 500 });
+    await act(async () => { tree = create(render()); });
+    await act(async () => { rn.AppState.currentState = 'background'; appStateListeners.forEach(fn => fn('background')); });
+    const backgroundTimings = animationCalls.length, backgroundNodes = interpolations;
+    for (let song = 0; song < 20; song++) {
+      lines = linesFor(`song-${song}`);
+      await act(async () => tree.update(render(song * 4)));
+    }
+    assert.equal(tree.toJSON(), null);
+    assert.equal(animationCalls.length, backgroundTimings, `${platform}/${effect}: no hidden row transitions`);
+    assert.equal(interpolations, backgroundNodes, `${platform}/${effect}: no hidden glyph interpolation nodes`);
+    await act(async () => { rn.AppState.currentState = 'active'; appStateListeners.forEach(fn => fn('active')); });
+    const renderedLines = tree.root.findAll(n => n.props.line?.text).map(n => n.props.line.text);
+    assert.ok(renderedLines.length > 0);
+    assert.ok(renderedLines.every(text => text.startsWith('song-19')));
+    assert.equal(animationCalls.at(-1).config.toValue, 76 + 30);
+    await act(async () => { visible = false; tree.update(render()); });
+    const hiddenTimings = animationCalls.length;
+    await act(async () => { lines = linesFor('offscreen'); tree.update(render(20)); });
+    assert.equal(tree.toJSON(), null, 'an unfocused page releases the rail even while the app is active');
+    assert.equal(animationCalls.length, hiddenTimings);
+    await act(async () => tree.unmount());
+    assert.equal(appStateListeners.size, 0);
+  }
+});
+
+test('player lyric results belong to the current song and late requests cannot restore old lyrics', async () => {
+  const requests = new Map();
+  let current = { bvid: 'A', cid: 1, title: 'A' }, focused = true;
+  const playerState = { lyricSettings: {}, isLiked: () => false, seekTo() {}, playing: true };
+  const load = loader({ ...lyricMocks,
+    '@react-navigation/native': { useIsFocused: () => focused },
+    'react-native-safe-area-context': safeArea,
+    'src/player/useMediaTransition': { default: () => ({}), __esModule: true },
+    'src/player/PlayerContext': { usePlayer: () => ({ ...playerState, current }), usePlaybackProgress: () => ({ position: 10, duration: 100 }) },
+    'src/player/loadLyrics': { loadTrackLyrics: track => { const request = deferred(); requests.set(track.bvid, request); return request.promise; } },
+    'src/player/trackSource': { useTrackSource: track => track },
+    'src/components/icons': iconMock,
+    ...Object.fromEntries(['VideoPane', 'VideoActionBar', 'LivePlayerBody', 'PlaylistPicker', 'BottomSheet',
+      'PlaybackQueue', 'RemoteImage', 'ProgressScrubber', 'LyricsRail'].map(name => [`src/components/${name}`, name])),
+  });
+  const Player = load('src/screens/PlayerScreen.js').default;
+  let tree;
+  const render = () => React.createElement(Player, { navigation: { setParams() {} }, route: { params: { showLyrics: true } } });
+  const lyricsA = [{ from: 0, to: 60, text: 'A lyric' }];
+  await act(async () => { tree = create(render()); });
+  await act(async () => requests.get('A').resolve(lyricsA));
+  assert.equal(tree.root.findByType('LyricsRail').props.lines, lyricsA);
+  await act(async () => { current = { ...current, bvid: 'B', title: 'B' }; tree.update(render()); });
+  assert.equal(tree.root.findAllByType('LyricsRail').length, 0, 'a new track never receives the previous lyric graph');
+  await act(async () => { current = { ...current, bvid: 'C', title: 'C' }; tree.update(render()); });
+  await act(async () => requests.get('B').resolve([{ from: 0, to: 60, text: 'late B lyric' }]));
+  assert.equal(tree.root.findAllByType('LyricsRail').length, 0);
+  await act(async () => requests.get('C').reject(new Error('lyrics offline')));
+  assert.ok(tree.root.findAllByType('Text').some(n => n.props.children === '纯音乐 / 暂无歌词'), 'a failed request is handled without crashing');
+  await act(async () => { current = { ...current, bvid: 'D', title: 'D' }; tree.update(render()); });
+  const lyricsD = [{ from: 0, to: 60, text: 'D lyric' }];
+  await act(async () => requests.get('D').resolve(lyricsD));
+  assert.equal(tree.root.findByType('LyricsRail').props.lines, lyricsD);
+  assert.equal(tree.root.findByType('LyricsRail').props.visible, true);
+  await act(async () => { focused = false; tree.update(render()); });
+  assert.equal(tree.root.findByType('LyricsRail').props.visible, false);
+  await act(async () => tree.unmount());
+});
+
+test('scrubber reuses native interpolation nodes and suspends background animations', async () => {
+  let interpolations = 0;
+  class TrackedValue extends Value {
+    interpolate(config) { interpolations++; return super.interpolate(config); }
+  }
+  const Scrubber = loader({ 'react-native': { ...rn, Animated: { ...rn.Animated, Value: TrackedValue } } })('src/components/ProgressScrubber.js').default;
+  let tree;
+  const render = position => React.createElement(Scrubber, { position, duration: 300, playing: true, seekRevision: 0, onSeek() {} });
+  await act(async () => { tree = create(render(0)); });
+  const nodes = interpolations;
+  for (let i = 1; i < 40; i++) await act(async () => tree.update(render(i / 4)));
+  assert.equal(interpolations, nodes, 'progress ticks reuse the same graph');
+  await act(async () => appStateListeners.forEach(fn => fn('background')));
+  const hiddenTimings = animationCalls.length;
+  for (let i = 40; i < 80; i++) await act(async () => tree.update(render(i / 4)));
+  assert.equal(animationCalls.length, hiddenTimings);
+  assert.equal(interpolations, nodes);
+  await act(async () => appStateListeners.forEach(fn => fn('active')));
+  assert.ok(animationCalls.length > hiddenTimings);
+  await act(async () => tree.unmount());
 });
 
 test('default lyrics fill left to right across wrapped rows with native timing, enlargement and neighbouring blur', async () => {
@@ -2634,14 +2792,15 @@ test('settings default to simple lyrics, apply immediately, persist across resta
   });
   const { PlayerProvider, usePlayer, usePlaybackProgress } = load('src/player/PlayerContext.js');
   const Settings = load('src/screens/SettingsScreen.js').default;
-  let context, progress, tree, slowRenders = 0, progressRenders = 0;
+  let context, progress, backgroundProgress, tree, slowRenders = 0, progressRenders = 0;
   const navigation = {};
   function ProgressProbe() { progressRenders += 1; progress = usePlaybackProgress(); return null; }
+  function SystemProgressProbe() { backgroundProgress = usePlaybackProgress({ background: true }); return null; }
   function Probe() {
     slowRenders += 1;
     context = usePlayer();
     return React.createElement(React.Fragment, null,
-      React.createElement(ProgressProbe), React.createElement(Settings, { navigation }));
+      React.createElement(ProgressProbe), React.createElement(SystemProgressProbe), React.createElement(Settings, { navigation }));
   }
   const mount = async () => act(async () => { tree = create(React.createElement(PlayerProvider, null, React.createElement(Probe))); });
   await mount();
@@ -2658,6 +2817,15 @@ test('settings default to simple lyrics, apply immediately, persist across resta
   assert.equal(slowRenders, initialSlowRenders, 'playback ticks do not publish the main player context');
   assert.ok(progressRenders > initialProgressRenders, 'the dedicated progress context publishes playback ticks');
   assert.equal(settingsRenders, initialRenders, '250 ms playback ticks do not rebuild the settings list');
+  await act(async () => appStateListeners.forEach(fn => fn('background')));
+  const hiddenRenders = progressRenders;
+  for (let i = 9; i <= 80; i++) await act(async () => events.timeUpdate({ currentTime: i / 4 }));
+  assert.equal(progressRenders, hiddenRenders, 'hidden player views receive no playback ticks');
+  assert.equal(progress.position, 2);
+  assert.equal(context.position, 20, 'background audio and queue logic keep their live position');
+  assert.equal(backgroundProgress.position, 20, 'lock-screen lyrics still receive background progress');
+  await act(async () => appStateListeners.forEach(fn => fn('active')));
+  assert.equal(progress.position, 20, 'returning to foreground publishes the latest sample immediately');
   assert.equal(context.quality, 1, 'legacy lossless choice migrates to automatic video quality');
   assert.equal(touch(tree, '自动').props.accessibilityState.checked, true);
   assert.equal(tree.root.findAllByType('Text').some((n) => n.props.children === '在线音质'), false);
@@ -2770,7 +2938,7 @@ test('mobile LAN requests allow larger transfers, distinguish timeouts and never
   const peer={id:'desktop-test',token:'test-token',addresses:['192.168.1.2:4000']};
   let complete,options,calls=0;
   global.fetch=(_url,opts)=>{calls++;options=opts;return new Promise((resolve,reject)=>{
-    complete=()=>resolve({ok:true,json:async()=>({version:2,account:'123',deviceId:peer.id})});
+    complete=()=>resolve({ok:true,text:async()=>JSON.stringify({version:2,account:'123',deviceId:peer.id})});
     opts.signal.addEventListener('abort',()=>reject(Error('fetch failed')),{once:true});
   });};
   const timeout=assert.rejects(lanRequest(peer,'123','status'),/连接设备超时/);
@@ -2780,7 +2948,7 @@ test('mobile LAN requests allow larger transfers, distinguish timeouts and never
   t.mock.timers.tick(5000);assert.equal(options.signal.aborted,false);
   assert.equal(options.credentials,'omit');complete();await transfer;
   peer.addresses.push('192.168.1.3:4000');calls=0;
-  global.fetch=async()=>{calls++;return {ok:false,json:async()=>({error:'两端登录账号不同'})};};
+  global.fetch=async()=>{calls++;return {ok:false,text:async()=>JSON.stringify({error:'两端登录账号不同'})};};
   await assert.rejects(lanRequest(peer,'123','sync',{}),/账号不同/);
   assert.equal(calls,1);
 });
@@ -2805,6 +2973,33 @@ test('mobile LAN discovery keeps one continuous DNSSD browse while no desktop is
   stop();
   assert.equal(stops, 1);
   assert.equal(removed, 1);
+});
+
+test('large LAN transfers preserve Unicode and wait for each bounded socket write', async (t) => {
+  const net = require('node:net'), writes = [];
+  let pending = 0;
+  const tcp = { createServer: accept => net.createServer(socket => {
+    const write = socket.write.bind(socket);
+    socket.write = (data, encoding, done) => {
+      assert.equal(pending, 0, 'do not flood the native bridge before the previous block completes');
+      pending++;
+      const length = Buffer.byteLength(data, encoding); writes.push(length);
+      assert.ok(length <= 64 * 1024);
+      return write(data, encoding, error => { pending--; done(error); });
+    };
+    accept(socket);
+  }) };
+  const load = loader(), { startLanReceiver } = load('src/store/lanSyncServer.js');
+  const { lanRequest } = load('src/store/lanSync.js');
+  const library = { version: 1, likes: Array.from({ length: 5000 }, (_, i) => ({ bvid: 'BVlarge' + i, title: '音乐🎵'.repeat(15) })), playlists: [] };
+  const receiver = startLanReceiver({ tcp, scope: '123', deviceId: 'phone-large-test',
+    getLibrary: async () => library, applyLibrary: async () => assert.fail('unchanged library must not be applied') });
+  t.after(() => receiver.stop());
+  const { port, token } = await receiver.ready;
+  const response = await lanRequest({ id: 'phone-large-test', token, addresses: ['127.0.0.1:' + port] }, '123', 'sync',
+    { clientId: 'phone-other-test', library });
+  assert.deepEqual(response.library.likes, library.likes);
+  assert.ok(writes.length > 10, 'large libraries are sent in multiple small blocks');
 });
 
 test('phone LAN receiver syncs two independent recent profiles, retains same-named custom IDs, and propagates edits/deletions', async (t) => {
@@ -3041,7 +3236,7 @@ test('automatic mobile sync runs outside settings, survives reconnect, persists 
     expo: { useEvent: (_, name) => name === 'playingChange' ? { isPlaying: false } : { status: 'idle' }, useEventListener() {} },
     '@react-native-async-storage/async-storage': {
       getItem: async (key) => disk.get(key) ?? null,
-      setItem: async (key, value) => { if (failStorage && key === 'biu.playlists@123') throw new Error('手机存储空间不足'); disk.set(key, value); },
+      setItem: async (key, value) => { if (failStorage && key === 'biu.likes@123') throw new Error('手机存储空间不足'); disk.set(key, value); },
     },
     'src/api/bili': {}, 'src/api/client': { authStatus: async () => ({ isLogin: true, mid: 123 }) },
   });
@@ -3408,7 +3603,8 @@ test('discovery screen starts swipes on the UI thread, retains failed drops, and
         withSpring: animation, withTiming: animation },
       'expo-video': { VideoView: 'VideoView' }, 'expo-image': { Image: { prefetch: async () => {} } },
       'expo-linear-gradient': { LinearGradient: 'Gradient' },
-      'src/screens/DiscoveryWheel': { __esModule: true, default: 'Wheel' },
+      'src/screens/DiscoveryWheel': { __esModule: true, default: 'Wheel', DiscoveryWheelHaze: 'WheelHaze' },
+      'src/components/Overlay': 'Overlay',
       'src/components/RemoteImage': { __esModule: true, default: 'CoverImage', optimizedImageUri: (uri) => uri },
       'src/updates/networkGate': { yieldToInput: async () => {} },
       'src/player/discoveryPreload': {
@@ -3445,6 +3641,8 @@ test('discovery screen starts swipes on the UI thread, retains failed drops, and
     const detector = () => tree.root.findAllByType('GestureDetector')[0].props.gesture;
     const card = () => tree.root.findAllByType('MotionView').find((node) => node.props.testID === 'discovery-card');
     const cardTransform = () => card().props.style.flat().find((style) => style.transform)?.transform;
+    const cardStack = () => tree.root.findAllByType('MotionView').find((node) => node.props.testID === 'discovery-card-layer')
+      .props.style.flat().find((style) => 'zIndex' in style).zIndex;
     const rest = [{ translateX: 0 }, { translateY: 0 }, { rotate: '0deg' }, { scale: 1 }];
     const wheel = () => tree.root.findByType('Wheel').props;
     assert.equal(tree.root.findAllByType('Wheel').length, 0, 'closed wheel mounts no duplicated folders or covers');
@@ -3536,17 +3734,21 @@ test('discovery screen starts swipes on the UI thread, retains failed drops, and
     const wheelRotation = wheel().rotation;
     await act(async () => frame({ timeSincePreviousFrame: 16.667 }));
     assert.ok(Number.isFinite(wheel().rotation.value) && wheel().rotation.value > before, 'onUpdate needs only translationY; release keeps coasting');
+    const dragSurface = tree.root.findByType('VideoView');
     await act(async () => { pan.onStart(); pan.onUpdate(event(40, 0)); pan.onUpdate(event(40, -200, 380, 120)); });
     // The test renderer samples worklets on render; native Reanimated observes
     // shared values directly without requiring a React update.
     await act(async () => refresh((v) => v + 1));
     assert.equal(cardTransform()[0].translateX, 40, 'after handoff the card still follows its own drag');
+    assert.equal(cardStack(), 3, 'dragged card is above the frosted layer and folders');
+    assert.equal(tree.root.findByType('VideoView'), dragSurface, 'raising the card never remounts its video surface');
     await act(async () => { for (let i = 0; i < 60; i++) frame({ timeSincePreviousFrame: 16.667 }); });
     assert.ok(Number.isFinite(wheel().rotation.value));
     await act(async () => pan.onEnd(event(40, -200, 20, 120)));
     assert.equal(context.current.bvid, fixtures[0].bvid, 'leaving wheel cancels the locked drag instead of skipping the card');
     assert.equal(saves.length, 0);
     assert.equal(frameControl.active, false, 'cancelling the drag stops the frame loop');
+    assert.equal(cardStack(), 0, 'the resting card returns below the wheel backdrop');
     assert.equal(tree.root.findAllByType('Wheel').length, 0);
     await act(async () => { wheelRotation.value = -120; pan.onStart(); pan.onUpdate(event(120, 0, 338, 260)); });
     deferJS = true;
@@ -3580,7 +3782,7 @@ test('discovery screen starts swipes on the UI thread, retains failed drops, and
     assert.equal(card(), autoCard);
     assert.equal(tree.root.findByType('VideoView'), autoSurface);
     assertUncoveredVideo();
-    assert.match(card().props.accessibilityLabel, /Card 2/);
+    assert.match(tree.root.findByProps({ testID: 'discovery-card-gesture-region' }).props.accessibilityLabel, /Card 2/);
     await change({ videoSource: null, buffering: true });
     await change({ videoSource: { key: fixtures[2].bvid, revision: 7 }, buffering: false });
     assert.ok(tree.root.findByType('VideoView') === autoSurface, 'automatic repeat keeps the same surface even when its source revision changes');
@@ -4095,15 +4297,16 @@ test('discovery folders display cover collages and names on their animated front
   let coverRenders = 0;
   let reactToRotation;
   function Cover(props) { coverRenders++; return React.createElement('Cover', props); }
-  const Wheel = loader({
+  const { default: Wheel, DiscoveryWheelHaze } = loader({
     'react-native': rn,
     'react-native-reanimated': { __esModule: true, default: { View: 'AnimatedView' },
       useAnimatedStyle: (fn) => fn(), useDerivedValue: (fn) => ({ value: fn() }), withTiming: (value) => value,
       useAnimatedReaction: (prepare, react) => { reactToRotation = () => react(prepare(), null); }, runOnJS: (fn) => fn },
+    'expo-linear-gradient': { LinearGradient: 'MaskGradient' },
     '@react-native-masked-view/masked-view': { __esModule: true, default: 'MaskedView' },
-    'react-native-svg': { __esModule: true, default: 'Svg', Defs: 'Defs', LinearGradient: 'Gradient', RadialGradient: 'RadialGradient', Rect: 'Rect', Path: 'Path', Stop: 'Stop' },
+    'react-native-svg': { __esModule: true, default: 'Svg', Circle: 'Circle', Defs: 'Defs', LinearGradient: 'Gradient', RadialGradient: 'RadialGradient', Rect: 'Rect', Path: 'Path', Pattern: 'Pattern', Stop: 'Stop' },
     'src/components/RemoteImage': { __esModule: true, default: Cover },
-  })('src/screens/DiscoveryWheel.js').default;
+  })('src/screens/DiscoveryWheel.js');
   let tree;
   const props = { targets: [{ key: 'folder', title: '旅行收藏', subtitle: '4 个视频', covers: ['a', 'b', 'c', 'd', 'a'] }],
     height: 520, rotation: { value: 0 }, hover: { value: 0 }, visibility: { value: 1 } };
@@ -4130,6 +4333,23 @@ test('discovery folders display cover collages and names on their animated front
   assert.ok(tree.root.findAllByType('Text').some((node) => node.props.children === '收藏 100'));
   assert.ok(tree.root.findAllByProps({ testID: 'discovery-folder-front' }).length <= 11);
   await act(async () => tree.unmount());
+  const frost = { blurTarget: { current: null }, bounds: { top: -88, bottom: -190 }, width: 390,
+    height: 520, count: 5, visibility: { value: 1 }, open: true };
+  await act(async () => { tree = create(React.createElement(DiscoveryWheelHaze, frost)); });
+  const mask = tree.root.findByType('MaskedView');
+  let maskTree;
+  await act(async () => { maskTree = create(mask.props.maskElement); });
+  const radial = maskTree.root.findByType('RadialGradient');
+  const { radius } = loader()('src/screens/discoveryGesture.js').wheelGeometry(frost.count, frost.height);
+  assert.equal(radial.props.cx, 280 + radius - 52, 'frost and folder ring have the same offscreen center');
+  assert.equal(radial.props.cy, 520 / 2 + 88, 'frost stays centered on the wheel despite the page-sized overlay');
+  assert.equal(280 - (radial.props.cx - radial.props.r), (52 + 145) / 2, 'frost extends half as far inward from the screen edge');
+  assert.equal(radial.findAllByType('Stop').at(-1).props.stopOpacity, '0', 'the outer arc fades to transparent');
+  assert.equal(tree.root.findAllByType('BlurView').length, 1, 'the glass treatment reuses one live blur');
+  assert.equal(tree.root.findByType('BlurView').props.tint, 'systemThinMaterialLight');
+  await act(async () => tree.update(React.createElement(DiscoveryWheelHaze, { ...frost, open: false })));
+  assert.equal(tree.root.findByType('BlurView').props.intensity, 0, 'prewarmed glass does not compute hidden blur');
+  await act(async () => { tree.unmount(); maskTree.unmount(); });
 });
 
 test('discovery matches verified tags regardless of partition, title or missing partition names', async () => {
@@ -4569,7 +4789,8 @@ test('discovery builds a 24-card verified buffer and continues beyond empty page
       useFrameCallback: () => React.useRef({ setActive() {} }).current,
       cancelAnimation() {}, runOnJS: (fn) => fn, runOnUI: (fn) => fn, withSpring: (v) => v, withTiming: (v) => v },
     'expo-video': { VideoView: 'VideoView' }, 'expo-linear-gradient': { LinearGradient: 'Gradient' },
-    'src/screens/DiscoveryWheel': 'Wheel', 'src/components/RemoteImage': () => null,
+    'src/screens/DiscoveryWheel': { __esModule: true, default: 'Wheel', DiscoveryWheelHaze: 'WheelHaze' }, 'src/components/RemoteImage': () => null,
+    'src/components/Overlay': 'Overlay',
     'src/components/BottomSheet': () => null, 'src/components/icons': iconMock,
     'src/updates/networkGate': { yieldToInput: async () => {} },
     'src/player/discoveryPreload': { clearDiscoveryPreloads() {}, preloadDiscoveryQueue() {} },
@@ -4617,8 +4838,33 @@ test('discovery builds a 24-card verified buffer and continues beyond empty page
   assert.equal(tree.root.findAllByType('Wheel').length, 0);
   await act(async () => t.mock.timers.tick(350));
   const preparedWheel = tree.root.findByType('Wheel');
+  const blurTarget = tree.root.findByType('BlurTargetView');
+  const haze = tree.root.findByType('WheelHaze');
+  const wheelOverlay = tree.root.findByType('Overlay');
+  assert.equal(wheelOverlay.props.active, false, 'the wheel visual portal must not acquire navigation input');
+  assert.equal(wheelOverlay.findByType('WheelHaze'), haze, 'frost clears the navigation chrome through the portal');
+  assert.equal(wheelOverlay.findByType('Wheel'), preparedWheel, 'folders share the portal and remain above the glass');
+  assert.equal(haze.props.blurTarget, blurTarget.props.ref, 'blur samples the fixed page-sized target');
+  const samplingBounds = Object.assign({}, ...blurTarget.props.style);
+  assert.ok(samplingBounds.top < 0 && samplingBounds.bottom < 0, 'sampling extends past both stage boundaries');
+  assert.equal(haze.props.bounds.top, samplingBounds.top, 'blur and sampling share the extended top boundary');
+  assert.equal(haze.props.bounds.bottom, samplingBounds.bottom, 'blur and sampling share the extended bottom boundary');
+  const cardRegion = tree.root.findByProps({ testID: 'discovery-blur-card-region' });
+  const cardRegionBounds = Object.assign({}, ...cardRegion.props.style);
+  assert.equal(cardRegionBounds.top + samplingBounds.top, 0, 'expanding sampling preserves the card origin');
+  assert.equal(cardRegionBounds.bottom + samplingBounds.bottom, 0, 'expanding sampling preserves the card height');
+  assert.equal(blurTarget.findAllByType('WheelHaze').length, 0, 'blur must not sample its own overlay');
+  assert.equal(blurTarget.findAllByType('GestureDetector').length, 0, 'native sampling never owns a gesture handler');
+  const cardFrame = tree.root.findAllByType('AnimatedView').find(n => n.props.testID === 'discovery-card');
+  assert.ok(wheelOverlay.findAllByType('AnimatedView').includes(cardFrame), 'card and frost share a portal so native stacking can raise the card');
+  assert.equal(tree.root.findByProps({ testID: 'discovery-card-gesture-region' }).findAllByType('BlurTargetView').length, 0,
+    'input stays in the page when the visual card moves to the portal');
+  assert.equal(cardFrame.findAllByType('WheelHaze').length, 0, 'wheel blur must not shrink or move with the card');
+  assert.ok(!Object.hasOwn(samplingBounds, 'transform'), 'the sampling coordinates stay fixed while dragging');
+  assert.equal(haze.props.open, false, 'idle preparation leaves native blur disabled');
   assert.equal(preparedWheel.props.open, false, 'the bounded window is prepared while the card is idle');
   await click(tree, '打开收藏轮盘');
+  assert.equal(tree.root.findByType('WheelHaze').props.open, true);
   assert.equal(tree.root.findByType('Wheel'), preparedWheel, 'right-drag opening needs no cold mount');
   await click(tree, '关闭收藏轮盘');
   assert.equal(tree.root.findByType('Wheel'), preparedWheel);

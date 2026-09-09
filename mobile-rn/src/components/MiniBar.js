@@ -1,5 +1,5 @@
 /* Biu Player RN · 迷你播放条：悬浮在底部 tab 栏上方，有 current 才显示 */
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Animated, Easing, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
@@ -41,7 +41,7 @@ function GlassBackground({ blurTarget }) {
 export default function MiniBar({ blurTarget, hasBottomTabs = true, visible = true }) {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation();
-  const { current, isLive, playing, buffering, togglePlay, next } = usePlayer();
+  const { current, isLive, playing, buffering, togglePlay, next } = usePlayer(['current', 'isLive', 'playing', 'buffering', 'togglePlay', 'next']);
   const { position, duration } = usePlaybackProgress();
   const [queueOpen, setQueueOpen] = useState(false);
   const lift = useRef(new Animated.Value(hasBottomTabs ? 1 : 0)).current;
@@ -67,18 +67,19 @@ export default function MiniBar({ blurTarget, hasBottomTabs = true, visible = tr
     animation.start();
     return () => animation.stop();
   }, [reveal, visible]);
+  const translateY = useMemo(() => lift.interpolate({ inputRange: [0, 1], outputRange: [0, -49] }), [lift]);
+  const revealY = useMemo(() => reveal.interpolate({ inputRange: [0, 1], outputRange: [16, 0] }), [reveal]);
   if (!current) return null;
 
   const progress = !isLive && Number.isFinite(duration) && duration > 0 && Number.isFinite(position)
     ? Math.max(0, Math.min(1, position / duration)) : 0;
-  const translateY = lift.interpolate({ inputRange: [0, 1], outputRange: [0, -49] });
 
   return (
     <>
       <Animated.View pointerEvents={visible ? 'auto' : 'none'} style={[styles.bar, {
         bottom: insets.bottom + 8,
         opacity: reveal,
-        transform: [{ translateY }, { translateY: reveal.interpolate({ inputRange: [0, 1], outputRange: [16, 0] }) }],
+        transform: [{ translateY }, { translateY: revealY }],
       }]}>
         <GlassBackground blurTarget={blurTarget} />
         <TouchableOpacity style={styles.openPlayer} activeOpacity={0.9}

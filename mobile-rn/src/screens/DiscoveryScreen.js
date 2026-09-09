@@ -4,6 +4,7 @@ import { useIsFocused } from '@react-navigation/native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, { cancelAnimation, runOnJS, runOnUI, useAnimatedStyle, useFrameCallback, useSharedValue, withSpring, withTiming } from 'react-native-reanimated';
 import { VideoView } from 'expo-video';
+import { BlurTargetView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { activeProfile } from '../../../renderer/recommendation-profile';
@@ -14,9 +15,10 @@ import { addToPlaylist, usePlaylists } from '../store/playlists';
 import * as bili from '../api/bili';
 import RemoteImage from '../components/RemoteImage';
 import BottomSheet from '../components/BottomSheet';
+import Overlay from '../components/Overlay';
 import { IconCheck, IconChevronDown, IconPlaylist, IconProfileSwitch } from '../components/icons';
 import { colors, fmtDur } from '../theme';
-import DiscoveryWheel from './DiscoveryWheel';
+import DiscoveryWheel, { DiscoveryWheelHaze } from './DiscoveryWheel';
 import { buildRelatedRun, filterDiscoveryCandidates, yieldDiscoveryWork } from './discoveryFeed';
 import { createDiscoveryExclusions } from './discoveryExclusions';
 import { readDiscoveryFolders, writeDiscoveryFolders, folderCoverEntry, folderCoverFresh } from './discoveryFolders';
@@ -89,6 +91,11 @@ export default function DiscoveryScreen({ navigation }) {
     playing, buffering, playError, queueSource, playQueue, syncDiscoveryQueue, resume, videoSource, quality, automaticVideoTransition } = context;
   const focused = useIsFocused();
   const insets = useSafeAreaInsets();
+  const pagePaddingBottom = 127 + insets.bottom;
+  const wheelBlurBounds = useMemo(() => ({
+    top: -(s.header.height + insets.top),
+    bottom: -(s.footer.height + pagePaddingBottom),
+  }), [insets.top, pagePaddingBottom]);
   const playlists = usePlaylists();
   const [tracks, setTracks] = useState([]);
   const [index, setIndex] = useState(0);
@@ -103,6 +110,7 @@ export default function DiscoveryScreen({ navigation }) {
   const [folderError, setFolderError] = useState('');
   const [folderRetry, setFolderRetry] = useState(0);
   const [wheelOpen, setWheelOpen] = useState(false);
+  const wheelBlurTarget = useRef(null);
   const [wheelReady, setWheelReady] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileSaving, setProfileSaving] = useState(false);
@@ -669,6 +677,11 @@ export default function DiscoveryScreen({ navigation }) {
       if (Math.abs(velocity.value) < 0.6) { velocity.value = 0; rotation.value = withSpring(Math.round(rotation.value / step) * step, SPRING); }
     }).onFinalize((_event, success) => { if (!success) velocity.value = 0; }), []);
 
+  const cardLayerStyle = useAnimatedStyle(() => ({
+    // Keep the card raised through release/drop and the spring back to rest.
+    zIndex: dragging.value || scale.value < 0.99 ? 3 : 0,
+  }));
+
   const backStyle = useAnimatedStyle(() => ({ transform: [
     { scale: 0.94 + clamp((Math.abs(x.value) + Math.abs(y.value)) / 400, 0, 1) * 0.06 },
   ], opacity: 0.45 }));
@@ -817,7 +830,7 @@ export default function DiscoveryScreen({ navigation }) {
   const currentMatches = cardKey === playingKey;
   const continuous = automaticVideoTransition && queueSource === 'discovery';
   const followingAutoplay = continuous && playback.current.requested === cardKey && !playback.current.pending;
-  return <SafeAreaView style={[s.safe, { paddingBottom: 127 + insets.bottom }]} edges={['top']}>
+  return <SafeAreaView style={[s.safe, { paddingBottom: pagePaddingBottom }]} edges={['top']}>
     <View style={s.header}>
       <View><Text style={s.eyebrow}>CARD DISCOVERY</Text><Text style={s.heading}>发现卡片</Text></View>
       <TouchableOpacity testID="discovery-profile-toggle" accessibilityRole="button" accessibilityLabel="切换画像"
@@ -830,10 +843,8 @@ export default function DiscoveryScreen({ navigation }) {
     </View>
     <View ref={stage} collapsable={false} style={s.stage} onLayout={measureStage}>
       {track ? <>
-        {tracks[index + 1] ? <Animated.View pointerEvents="none" style={[s.cardBounds, s.back, backStyle]} /> : null}
         <GestureDetector gesture={gesture}>
-          <DiscoveryCardFrame key={cardGeneration} cardKey={cardKey} motionKey={motionKey} x={x} y={y} scale={scale}
-            testID="discovery-card" collapsable={false}
+          <View testID="discovery-card-gesture-region" collapsable={false} style={StyleSheet.absoluteFill}
             accessible accessibilityLabel={`${track.title}。上滑下一张，下滑不喜欢并移除相关视频，左滑推荐20个相关视频，右拖收藏，长按喜欢，点击播放详情。`}
             accessibilityActions={[{ name: 'increment', label: '下一张' }, { name: 'decrement', label: '不喜欢并移除相关视频' },
               { name: 'related', label: '接下来推荐20个相关视频' }]}
@@ -842,16 +853,36 @@ export default function DiscoveryScreen({ navigation }) {
               if (event.nativeEvent.actionName === 'related') { actions.current.related(cardKey); return; }
               const next = event.nativeEvent.actionName === 'increment';
               actions.current.finish(0, next ? -80 : 80, 0, 0, false, -1, 0);
-            }}>
-            <View pointerEvents="none" style={s.cardContent}>
-              <DiscoveryCard track={track} player={player} visible={active && (currentMatches || followingAutoplay)} videoSource={videoSource}
-                continuous={continuous}
-                buffering={!currentMatches || buffering} error={currentMatches ? playError : null} playing={currentMatches && playing} />
-            </View>
-          </DiscoveryCardFrame>
+            }} />
         </GestureDetector>
-        {active && (wheelReady || wheelOpen) && <DiscoveryWheel targets={targets} height={layout.height} rotation={rotation} hover={hover}
-          visibility={visibility} open={wheelOpen} backdrop={track.pic} />}
+        {/* Keep one video surface in a visual-only portal. Only its native stacking
+            order changes during a drag; input and accessibility stay in the page. */}
+        <Overlay active={false}>
+          <View testID="discovery-wheel-overlay" pointerEvents="none"
+            style={[StyleSheet.absoluteFill, { top: -wheelBlurBounds.top, bottom: -wheelBlurBounds.bottom }]}>
+            {tracks[index + 1] ? <Animated.View pointerEvents="none" style={[s.cardBounds, s.back, backStyle]} /> : null}
+            <Animated.View testID="discovery-card-layer" pointerEvents="none"
+              style={[StyleSheet.absoluteFill, cardLayerStyle]}>
+              <BlurTargetView ref={wheelBlurTarget} pointerEvents="none" collapsable={false} style={[StyleSheet.absoluteFill, wheelBlurBounds]}>
+                <View testID="discovery-blur-card-region" pointerEvents="none" collapsable={false}
+                  style={[StyleSheet.absoluteFill, { top: -wheelBlurBounds.top, bottom: -wheelBlurBounds.bottom }]}>
+                  <DiscoveryCardFrame key={cardGeneration} cardKey={cardKey} motionKey={motionKey} x={x} y={y} scale={scale}
+                    testID="discovery-card" collapsable={false}>
+                    <View pointerEvents="none" style={s.cardContent}>
+                      <DiscoveryCard track={track} player={player} visible={active && (currentMatches || followingAutoplay)} videoSource={videoSource}
+                        continuous={continuous}
+                        buffering={!currentMatches || buffering} error={currentMatches ? playError : null} playing={currentMatches && playing} />
+                    </View>
+                  </DiscoveryCardFrame>
+                </View>
+              </BlurTargetView>
+            </Animated.View>
+            {active && (wheelReady || wheelOpen) && <DiscoveryWheelHaze blurTarget={wheelBlurTarget} bounds={wheelBlurBounds} width={layout.width}
+              height={layout.height} count={targets.length} visibility={visibility} open={wheelOpen} />}
+            {active && (wheelReady || wheelOpen) && <DiscoveryWheel targets={targets} height={layout.height} rotation={rotation} hover={hover}
+              visibility={visibility} open={wheelOpen} />}
+          </View>
+        </Overlay>
         <GestureDetector gesture={wheelGesture}>
           <Animated.View testID="discovery-wheel-touch" collapsable={false} pointerEvents={wheelOpen ? 'auto' : 'none'} style={s.wheelTouch}
             accessible accessibilityRole="adjustable" accessibilityLabel="收藏轮盘，上下拖动选择，松手惯性滑行"
@@ -948,7 +979,7 @@ const s = StyleSheet.create({
   metaText: { color: '#c5cbd0', fontSize: 10, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8, backgroundColor: 'rgba(255,255,255,0.1)' },
   videoError: { ...StyleSheet.absoluteFillObject, justifyContent: 'center', alignItems: 'center', padding: 28 },
   errorText: { color: colors.text2, fontSize: 13, lineHeight: 21, textAlign: 'center' },
-  wheelTouch: { position: 'absolute', right: 0, top: 0, bottom: 0, width: 216 },
+  wheelTouch: { zIndex: 3, position: 'absolute', right: 0, top: 0, bottom: 0, width: 216 },
   footer: { height: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 17, gap: 8 },
   footerCopy: { flex: 1, gap: 5 },
   hints: { color: colors.text2, fontSize: 10 },

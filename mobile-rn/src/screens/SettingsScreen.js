@@ -31,7 +31,10 @@ export default function SettingsScreen({ navigation }) {
     dynamicIslandLyricsEnabled, setDynamicIslandLyricsEnabled,
     recommendMode, setRecommendMode,
     discoveryEnabled, setDiscoveryEnabled, discoveryRecommendMode, setDiscoveryRecommendMode,
-  } = usePlayer();
+  } = usePlayer(['quality', 'setQuality', 'lyricEffect', 'setLyricEffect',
+    'desktopLyricsEnabled', 'setDesktopLyricsEnabled', 'lockScreenLyricsEnabled', 'setLockScreenLyricsEnabled',
+    'dynamicIslandLyricsEnabled', 'setDynamicIslandLyricsEnabled', 'recommendMode', 'setRecommendMode',
+    'discoveryEnabled', 'setDiscoveryEnabled', 'discoveryRecommendMode', 'setDiscoveryRecommendMode']);
 
   return <SettingsContent navigation={navigation} {...{
     quality, setQuality, lyricEffect, setLyricEffect,

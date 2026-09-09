@@ -1,5 +1,5 @@
 import { File, Directory, Paths } from 'expo-file-system';
-import { writeAsStringAsync } from 'expo-file-system/legacy';
+import { readAsStringAsync, writeAsStringAsync } from 'expo-file-system/legacy';
 import { requireOptionalNativeModule } from 'expo-modules-core';
 import { Buffer } from 'buffer';
 import { sha256 } from '@noble/hashes/sha2.js';
@@ -47,10 +47,31 @@ export const fs = {
     readFile: async (uri, encoding) => encoding ? new File(uri).text() : Buffer.from(await new File(uri).bytes()),
     writeFile: (uri, data) => writeAsStringAsync(uri, typeof data === 'string' ? data : Buffer.from(data).toString('base64'),
       { encoding: typeof data === 'string' ? 'utf8' : 'base64' }),
-    open:async uri=>{const handle=new File(uri).open('r');return {
-    read:async(buffer,offset,length,position)=>{handle.offset=position;const data=handle.readBytes(length);buffer.set(data,offset);return {bytesRead:data.length};},
-    close:async()=>handle.close(),
-  };}},
+    open: async uri => {
+      let closed = false;
+      return {
+        async read(buffer, offset, length, position) {
+          if (closed) throw Error('文件已关闭');
+          let bytesRead = 0;
+          // UPOS blocks can be 32 MiB. Yield to native I/O for each small part;
+          // an async wrapper around FileHandle.readBytes still blocks the JS thread.
+          while (bytesRead < length) {
+            if (closed) throw Error('文件已关闭');
+            const count = Math.min(64 * 1024, length - bytesRead);
+            const encoded = await readAsStringAsync(uri, {
+              encoding: 'base64', position: position + bytesRead, length: count,
+            });
+            const data = Buffer.from(encoded, 'base64');
+            buffer.set(data, offset + bytesRead);
+            bytesRead += data.length;
+            if (data.length < count) break;
+          }
+          return { bytesRead };
+        },
+        async close() { closed = true; },
+      };
+    },
+  },
 };
 export const directory=path.join(Paths.document.uri,'video-cloud');
 // The JSON state stores only a reference; actual keys stay in Keychain / Android Keystore.

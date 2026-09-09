@@ -3,6 +3,10 @@
   if (typeof module === 'object' && module.exports) module.exports = factory(require('./daily-recommendation'), require('./daily-music-source'));
   else root.BiuRecommendation = factory(root.BiuDaily, root.BiuDailyMusic);
 })(typeof window === 'object' ? window : this, function (D, M) {
+  // Hermes delegates localeCompare to Android ICU. Reuse its native collator
+  // instead of allocating one per comparison during large sync/profile sorts.
+  const compareText = typeof Intl !== 'undefined' && Intl.Collator
+    ? new Intl.Collator().compare : (a, b) => a.localeCompare(b);
   const MUSIC = new Set([3, 28, 29, 30, 31, 59, 130, 193, 194, 243, 244, 265, 267]);
   const DAILY_MIN_TRACKS = 15;
   const DAILY_MAX_ROUNDS = 10;
@@ -40,7 +44,7 @@
         at: Math.min(old.at, next.at),
         ...(labels ? { tags: labels } : { retryAt: Math.max(old.retryAt || 0, next.retryAt || 0) }) });
     }
-    return [...byVideo.values()].sort((a, b) => a.at - b.at || a.bvid.localeCompare(b.bvid));
+    return [...byVideo.values()].sort((a, b) => a.at - b.at || compareText(a.bvid, b.bvid));
   }
   function accumulated(evidence, previous = {}) {
     const successful = evidence.filter((v) => Array.isArray(v.tags));
@@ -55,7 +59,7 @@
       sources: Object.fromEntries(Object.keys(SOURCE_WEIGHT).map((source) => [source, successful.filter((v) => v.source === source).length])),
     };
   }
-  function normalize(value) {
+  function normalize(value, learn = true) {
     const profiles = [], ids = new Set(['auto']);
     for (const p of Array.isArray(value?.profiles) ? value.profiles.slice(0, 20) : []) {
       const id = clean(p?.id), name = clean(p?.name);
@@ -76,7 +80,7 @@
     }
     const daily = D.normalize(value?.daily);
     if (!ids.has(daily.profileId)) daily.profileId = 'auto';
-    if (auto.evidence) auto.tags = D.taste(auto.evidence, daily).tags;
+    if (auto.evidence && learn) auto.tags = D.taste(auto.evidence, daily).tags;
     else auto.tags = auto.tags.filter((v) => !['noise', 'format'].includes(D.category(v.name)) && !D.activeRules(daily.ignored).includes(v.name));
     return { version: 1, enabled: value?.enabled !== false, activeId: ids.has(value?.activeId) ? value.activeId : 'auto', auto, profiles, daily };
   }
@@ -109,7 +113,7 @@
       throw new Error('画像累计分析记录无效');
     }
     D.validate(value.daily);
-    return normalize(value);
+    return normalize(value, false);
   }
   function reconcile(base, local, remote) {
     local = syncState(local); remote = syncState(remote); base = syncState(base);
@@ -128,15 +132,17 @@
     });
     if (profiles.length > 20) throw new Error('合并后超过 20 份推荐画像，请先删除不需要的画像');
     const initial = local.profiles.length || local.auto.updatedAt || !local.enabled ? local : remote;
-    const result = { ...initial, profiles, auto: remote.auto.updatedAt > local.auto.updatedAt ? remote.auto : local.auto };
+    const remoteNewer = remote.auto.updatedAt > local.auto.updatedAt || (remote.auto.updatedAt === local.auto.updatedAt
+      && JSON.stringify(remote.auto.tags) > JSON.stringify(local.auto.tags));
+    const result = { ...initial, profiles, auto: remoteNewer ? remote.auto : local.auto };
     if (local.auto.evidence || remote.auto.evidence) {
-      result.auto = accumulated(mergeEvidence(local.auto.evidence || [], remote.auto.evidence || []), result.auto);
+      result.auto = { ...result.auto, evidence: mergeEvidence(local.auto.evidence || [], remote.auto.evidence || []) };
     }
     for (const field of ['enabled', 'activeId']) {
       if (base) result[field] = same(base[field], remote[field]) ? local[field] : remote[field];
     }
     result.daily = D.merge(local.daily, remote.daily);
-    return normalize(result);
+    return normalize(result, false);
   }
   function recentLikes(likes) {
     const seen = new Set();
@@ -208,7 +214,7 @@
     if (tagCache.size > 200) tagCache.delete(tagCache.keys().next().value);
     return result;
   }
-  async function build(recent, get, previous, force) {
+  function prepareBuild(recent, previous, force) {
     // Old versions retained video IDs in the fingerprint, but not their tags: backfill those once.
     const legacy = previous.evidence ? [] : String(previous.fingerprint || '').split(',').flatMap((entry) => {
       const [source, bvid] = entry.split(':');
@@ -221,15 +227,23 @@
     const pending = evidence.filter((v) => !Array.isArray(v.tags) && (force || !v.retryAt || v.retryAt <= Date.now()));
     // Bound work per turn, not the number of videos retained. Continue the queue in the background.
     const batch = pending.slice(0, 12);
-    const results = await mapLimit(batch, async (video) => {
-      try { return { ...video, tags: (await videoTags(get, video.bvid)).map((t) => t.name) }; } catch { return null; }
-    });
+    return { evidence, batch };
+  }
+  function finishBuild(evidence, batch, results, previous, hasRecent) {
     const successful = results.filter(Boolean);
     const failed = results.flatMap((v, i) => v ? [] : [{ ...batch[i], retryAt: Date.now() + 60000 }]);
     return { ...accumulated(mergeEvidence(evidence, successful, failed), previous),
       failures: results.filter((v) => !v).length, fingerprint: '',
-      updatedAt: successful.length || recent.length ? Date.now() : previous.updatedAt,
+      updatedAt: successful.length || hasRecent ? Date.now() : previous.updatedAt,
     };
+  }
+  async function build(recent, get, previous, force, compute) {
+    const { evidence, batch } = compute ? await compute('profileBuildPrepare', recent, previous, force) : prepareBuild(recent, previous, force);
+    const results = await mapLimit(batch, async (video) => {
+      try { return { ...video, tags: (await videoTags(get, video.bvid)).map((t) => t.name) }; } catch { return null; }
+    });
+    return compute ? compute('profileBuildFinish', evidence, batch, results, previous, !!recent.length)
+      : finishBuild(evidence, batch, results, previous, !!recent.length);
   }
   // Weighted round robin: strong interests recur more often; weaker ones still get discovery slots.
   function queries(profile, page = 0, batchSize) {
@@ -365,28 +379,46 @@
     });
     return out;
   }
-  function createManager({ read, write, get, getLikes, getPlaylists = () => [], compute }) {
+  function createManager({ read, write, get, getLikes, getPlaylists = () => [], compute, beginDaily = () => () => {} }) {
     let snapshot = { ...normalize(null), ready: false, busy: false, error: '', revision: 0 };
     let initial, building, dailyBuilding, dailyEpoch = 0, writes = Promise.resolve(), edits = Promise.resolve();
     let refreshTimer, disposed = false, syncValue;
     let observed = [], observing = false;
-    const normalizeAsync = compute ? value => compute('profileNormalize', value) : async value => normalize(value);
+    const scheduleLearning = () => {
+      if (disposed || refreshTimer) return;
+      refreshTimer = setTimeout(() => {
+        refreshTimer = null;
+        if (dailyBuilding) scheduleLearning();
+        else refresh().catch(() => {}).finally(scheduleLearning);
+      }, 15 * 60 * 1000);
+      refreshTimer.unref?.();
+    };
+    const normalizeAsync = (value, learn = false) => compute ? compute('profileNormalize', value, learn) : Promise.resolve(normalize(value, learn));
     const selectSongs = (...args) => compute ? compute('dailySelectSongs', ...args) : Promise.resolve(D.selectSongs(...args));
     // Account-local search cursors survive pull-to-refresh; never sync browsing history.
     const strictFeeds = new Map(), dailyCache = new Map();
     const listeners = new Set();
     const emit = (patch) => { snapshot = { ...snapshot, ...patch }; listeners.forEach((fn) => fn()); };
     const ready = () => initial || (initial = Promise.resolve().then(read).then(normalizeAsync).then((value) => {
-      syncValue = value; emit({ ...value, ready: true, error: '' });
+      syncValue = value; emit({ ...value, ready: true, error: '' }); scheduleLearning();
     })
       .catch((error) => { initial = null; emit({ error: '画像读取失败，请重试' }); throw error; }));
-    const commit = (next, refresh) => {
+    // Syncing exposure history or learned interests must not cancel a running
+    // daily queue. Only an explicit selection/filter change invalidates it.
+    const dailySelection = (state) => JSON.stringify([state.daily.profileId,
+      state.profiles.find(p => p.id === state.daily.profileId)?.tags,
+      ...['ignored', 'muted', 'blocked'].map(key => D.activeRules(state.daily[key]))]);
+    const commit = (next, refresh, normalizedInput = false) => {
       let normalized, resetFeed;
       const task = writes.catch(() => {}).then(async () => {
-        normalized = await normalizeAsync(typeof next === 'function' ? await next(snapshot) : next);
+        const value = typeof next === 'function' ? await next(snapshot) : next;
+        if (!value) return; // An unchanged sync must not rewrite/publish the profile.
+        normalized = normalizedInput ? value : await normalizeAsync(value);
         resetFeed = typeof refresh === 'function' ? refresh(snapshot, normalized) : refresh;
         return write(normalized);
       }).then(() => {
+        if (!normalized) return;
+        if (dailySelection(snapshot) !== dailySelection(normalized)) dailyEpoch++;
         syncValue = normalized;
         emit({ ...normalized, error: '', revision: snapshot.revision + (resetFeed ? 1 : 0) });
       });
@@ -396,8 +428,7 @@
       await ready();
       if (disposed) return;
       if (building) return building;
-      clearTimeout(refreshTimer);
-      let canContinue = true;
+      clearTimeout(refreshTimer); refreshTimer = null;
       building = Promise.resolve().then(getPlaylists).then(async (playlists) => {
         const source = recentSamples(getLikes(), playlists, []);
         const knownSource = new Set(source.map((v) => v.track.bvid));
@@ -408,23 +439,21 @@
         const changed = source.some((s) => !known.has(s.track.bvid)
           || SOURCE_WEIGHT[s.source] > SOURCE_WEIGHT[known.get(s.track.bvid).source]);
         if (!force && !changed && snapshot.auto.evidence
-          && !snapshot.auto.evidence.some((v) => !v.tags && (!v.retryAt || v.retryAt <= Date.now()))) return;
+          && !snapshot.auto.evidence.some((v) => !v.tags && (!v.retryAt || v.retryAt <= Date.now()))) {
+          await commit(current => normalizeAsync(current, true), false, true);
+          return;
+        }
         emit({ busy: true, error: '' });
-        const auto = await build(source, get, snapshot.auto, force);
+        const auto = await build(source, get, snapshot.auto, force, compute);
         if (disposed) return;
-        await commit((current) => ({ ...current, auto }),
-          (current) => force && current.enabled && current.activeId === 'auto');
+        await commit((current) => normalizeAsync({ ...current, auto }, true),
+          (current) => force && current.enabled && current.activeId === 'auto', true);
         if (auto.failures) emit({ error: '部分视频标签暂未获取，已保留累计画像，可稍后重试' });
       })
-        .catch((error) => { canContinue = false; emit({ error: error.message }); })
+        .catch((error) => { emit({ error: error.message }); })
         .finally(() => {
           building = null; emit({ busy: false });
-          if (!disposed && snapshot.enabled && canContinue && snapshot.auto.pending) {
-            const pending = (snapshot.auto.evidence || []).filter((v) => !v.tags);
-            const nextAttempt = pending.reduce((min, v) => Math.min(min, v.retryAt || 0), Infinity);
-            refreshTimer = setTimeout(() => refresh(), Math.max(4000, nextAttempt - Date.now()));
-            refreshTimer.unref?.();
-          }
+          scheduleLearning();
         });
       return building;
     }
@@ -461,14 +490,13 @@
       const cached = D.current(snapshot.daily);
       const old = cached?.source === D.SOURCE ? cached : null;
       if (!force && old && (old.complete || old.error && Date.now() - old.updatedAt < 60000)) return old;
+      const finishDaily = beginDaily();
       dailyBuilding = (async () => {
         emit({ dailyBusy: true, dailyError: '' });
         const profileId = snapshot.profiles.some(p => p.id === snapshot.daily.profileId) ? snapshot.daily.profileId : 'auto';
         const strict = profileId === 'auto' ? null : snapshot.profiles.find(p => p.id === profileId);
-        const interest = compute ? await compute('dailyTaste', snapshot.auto.evidence || [], snapshot.daily)
-          : D.taste(snapshot.auto.evidence || [], snapshot.daily);
         const ignored = new Set(D.activeRules(snapshot.daily.ignored).map(D.canonical));
-        const searchProfile = { tags: (strict?.tags || interest.tags).filter(t => !ignored.has(D.canonical(t.name))) };
+        const searchProfile = { tags: (strict?.tags || snapshot.auto.tags).filter(t => !ignored.has(D.canonical(t.name))) };
         const epoch = dailyEpoch, deadline = Date.now() + 90000;
         const stopped = () => disposed || epoch !== dailyEpoch || snapshot.daily.profileId !== profileId;
         const source = M.create({ get, cache: dailyCache, profile: searchProfile, state: () => snapshot.daily, stopped: () => stopped() || Date.now() >= deadline,
@@ -477,19 +505,22 @@
           date: D.dayKey(), profileId, source: D.SOURCE, profileName: strict?.name || '自动画像', generatedAt: Date.now(), updatedAt: Date.now(),
           tracks: [], complete: false, rounds: 0, error: '', themes: searchProfile.tags.slice(0, 3).map((v) => v.name),
         };
-        const save = async () => {
+        const save = async (final = false) => {
           if (stopped()) return;
           entry.updatedAt = Date.now();
           const saved = { ...entry, tracks: [...entry.tracks] };
-          await commit(s => {
+          await commit(async s => {
+            if (stopped()) return null;
             const seen = new Set(s.daily.shown.map(v=>v.bvid));
             const fresh = saved.tracks.filter(t=>!seen.has(t.bvid));
-            return { ...s, daily: { ...s.daily, profileId,
+            const daily = { ...s.daily, profileId,
               shown: [...s.daily.shown,...fresh.map(t=>({bvid:t.bvid,at:saved.updatedAt}))],
               shownSongs: [...s.daily.shownSongs,...fresh.flatMap(t=>D.songKeys(t).map(key=>({key,at:saved.updatedAt})))],
               candidates: [...s.daily.candidates, ...saved.tracks],
-              days: [...s.daily.days.filter(v=>v.date!==saved.date||v.profileId!==profileId),saved] } };
-          }, false);
+              days: [...s.daily.days.filter(v=>v.date!==saved.date||v.profileId!==profileId),saved] };
+            // Progress changes only daily data; learned weights change on the timer.
+            return { ...syncValue, daily: final ? daily : compute ? await compute('dailyNormalize', daily) : D.normalize(daily) };
+          }, false, !final);
         };
         try {
           entry.error = '';
@@ -530,9 +561,9 @@
           entry.complete = entry.tracks.length >= DAILY_MIN_TRACKS;
           entry.error = entry.complete ? '' : error.message || '暂时无法获取推荐，请稍后重试';
         }
-        await save();
+        await save(true);
         return entry;
-      })().catch((e) => { emit({ dailyError: e.message }); }).finally(() => { dailyBuilding = null; emit({ dailyBusy: false }); });
+      })().catch((e) => { emit({ dailyError: e.message }); }).finally(() => { dailyBuilding = null; emit({ dailyBusy: false }); finishDaily(); });
       return dailyBuilding;
     }
     return { ready, refresh, edit: (action) => enqueue(() => edit(action)),
@@ -551,9 +582,8 @@
       async recordListening(event) {
         await ready();
         if (disposed || !D.compact(event.track)) return;
-        await commit((s) => compute ? compute('profileListening', s, event)
-          : { ...s, daily: D.feedback(s.daily, event) }, false);
-        if (D.qualified(event)) refresh().catch(() => {});
+        await commit(() => compute ? compute('profileListening', syncValue, event)
+          : { ...syncValue, daily: D.feedback(syncValue.daily, event) }, false, true);
       },
       observeFeed(items) {
         observed.push(...(items || []));
@@ -563,8 +593,8 @@
           ready().then(async () => {
             while (!disposed && observed.length) {
               const batch = observed; observed = [];
-              await commit((s) => compute ? compute('profileObserve', s, batch)
-                : { ...s, daily: D.observe(s.daily, batch) }, false);
+              await commit(() => compute ? compute('profileObserve', syncValue, batch)
+                : { ...syncValue, daily: D.observe(syncValue.daily, batch) }, false, true);
             }
           }).catch(() => {}).finally(() => {
             observing = false;
@@ -573,10 +603,10 @@
         };
         flush();
       },
-      dispose() { disposed = true; clearTimeout(refreshTimer); listeners.clear(); },
+      dispose() { disposed = true; clearTimeout(refreshTimer); refreshTimer = null; listeners.clear(); },
       setActive(active) {
-        disposed = !active; clearTimeout(refreshTimer);
-        if (active) refresh().catch(() => {});
+        disposed = !active; clearTimeout(refreshTimer); refreshTimer = null;
+        if (active) ready().then(scheduleLearning).catch(() => {});
       },
       async exportSync() {
         await ready(); await edits.catch(() => {}); await writes.catch(() => {});
@@ -588,25 +618,22 @@
         if (incoming === undefined) return Promise.resolve();
         return enqueue(async () => {
           await ready();
-          dailyEpoch++; // Profile/menu actions never wait for catalog or video requests.
           if (building) await building;
-          await writes.catch(() => {});
-          if (compute) {
-            const next = await compute('profileReconcile', base, incoming, snapshot);
-            if (next) await commit(next, feedChanged);
-          } else {
-            incoming = syncState(incoming); base = syncState(base);
-            const next = reconcile(base, incoming, normalize(snapshot));
-            if (JSON.stringify(next) !== JSON.stringify(normalize(snapshot))) await commit(next, feedChanged);
-          }
-          if (!disposed && snapshot.enabled && snapshot.auto.pending) refresh();
+          // Reconcile inside the serialized write, against the latest partial
+          // queue; a slow worker result must not overwrite songs saved meanwhile.
+          await commit(async (current) => {
+            if (compute) return compute('profileReconcile', base, incoming, current);
+            const previous = normalize(current, false);
+            const next = reconcile(base, incoming, previous);
+            return JSON.stringify(next) === JSON.stringify(previous) ? null : next;
+          }, feedChanged, true);
+
         });
       },
       getSnapshot: () => snapshot, subscribe: (fn) => { listeners.add(fn); return () => listeners.delete(fn); },
       async recommend(options) {
         await ready();
         if (!snapshot.enabled) return [];
-        if (snapshot.activeId === 'auto') await refresh();
         const profile = activeProfile(snapshot), strict = isStrict(snapshot);
         const exclude = [...(options?.exclude || []), ...(getLikes() || []).filter((t) => t?.bvid).map((t) => t.bvid)];
         let page = options?.page || 0, feed;
@@ -652,5 +679,5 @@
     }));
   }
   const tagsText = (labels) => tags(labels).map((tag) => `${tag.name}:${tag.weight}`).join('\n');
-  return { parseTagsText, tagsText, tags, normalize, syncState, reconcile, infer, recentLikes, recentSamples, activeProfile, isStrict, queries, rank, blend, createManager };
+  return { prepareBuild, finishBuild, parseTagsText, tagsText, tags, normalize, syncState, reconcile, infer, recentLikes, recentSamples, activeProfile, isStrict, queries, rank, blend, createManager };
 });

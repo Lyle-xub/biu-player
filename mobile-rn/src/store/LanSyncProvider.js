@@ -13,7 +13,7 @@ const LanSyncContext = createContext(null);
 export const useLanSync = () => useContext(LanSyncContext);
 
 export function LanSyncProvider({ children }) {
-  const { account, libraryReady, getSyncLibrary, applySyncLibrary } = usePlayer();
+  const { account, libraryReady, getSyncLibrary, applySyncLibrary } = usePlayer(['account', 'libraryReady', 'getSyncLibrary', 'applySyncLibrary']);
   const syncLanKey = useCloudSync()?.syncLanKey;
   const [enabled, setEnabledState] = useState(true);
   const [ready, setReady] = useState(false);

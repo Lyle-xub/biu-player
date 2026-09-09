@@ -15,8 +15,8 @@ export default function LyricsActivitySync() {
   const {
     current, queue, index, playing, buffering, mediaDeferred, lyricSettings, seekRevision,
     desktopLyricsEnabled, lockScreenLyricsEnabled, dynamicIslandLyricsEnabled,
-  } = usePlayer();
-  const { position } = usePlaybackProgress();
+  } = usePlayer(['current', 'queue', 'index', 'playing', 'buffering', 'mediaDeferred', 'lyricSettings', 'seekRevision', 'desktopLyricsEnabled', 'lockScreenLyricsEnabled', 'dynamicIslandLyricsEnabled']);
+  const { position } = usePlaybackProgress({ background: true });
   const [lyricResult, setLyricResult] = useState({ key: null, lines: [] });
   const [activityRendererReady, setActivityRendererReady] = useState(!supported);
   const [coverColor, setCoverColor] = useState(defaultCoverColor);

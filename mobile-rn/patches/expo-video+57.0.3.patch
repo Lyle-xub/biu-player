@@ -1,58 +1,21 @@
 diff --git a/node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/ExpoVideoPlaybackService.kt b/node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/ExpoVideoPlaybackService.kt
-index 54c0ad0..b02c104 100644
+index 54c0ad0..0aa61fa 100644
 --- a/node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/ExpoVideoPlaybackService.kt
 +++ b/node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/ExpoVideoPlaybackService.kt
-@@ -45,6 +45,8 @@ class ExpoVideoPlaybackService : MediaSessionService() {
- 
-   private val commandSeekForward = SessionCommand(SEEK_FORWARD_COMMAND, Bundle.EMPTY)
-   private val commandSeekBackward = SessionCommand(SEEK_BACKWARD_COMMAND, Bundle.EMPTY)
-+  private val commandNextTrack = SessionCommand(NEXT_TRACK_COMMAND, Bundle.EMPTY)
-+  private val commandPreviousTrack = SessionCommand(PREVIOUS_TRACK_COMMAND, Bundle.EMPTY)
-   private val seekForwardButton = CommandButton.Builder()
-     .setDisplayName("rewind")
-     .setSessionCommand(commandSeekForward)
-@@ -57,6 +59,18 @@ class ExpoVideoPlaybackService : MediaSessionService() {
-     .setIconResId(R.drawable.seek_backwards_10s)
-     .build()
- 
-+  private val nextTrackButton = CommandButton.Builder()
-+    .setDisplayName("next")
-+    .setSessionCommand(commandNextTrack)
-+    .setIconResId(androidx.media3.session.R.drawable.media3_icon_next)
-+    .build()
-+
-+  private val previousTrackButton = CommandButton.Builder()
-+    .setDisplayName("previous")
-+    .setSessionCommand(commandPreviousTrack)
-+    .setIconResId(androidx.media3.session.R.drawable.media3_icon_previous)
-+    .build()
-+
-   fun setShowNotification(showNotification: Boolean, player: ExoPlayer) {
-     appContext.mainQueue.launch {
-       val sessionExtras = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-@@ -79,10 +93,10 @@ class ExpoVideoPlaybackService : MediaSessionService() {
+@@ -79,10 +79,11 @@ class ExpoVideoPlaybackService : MediaSessionService() {
          return@launch
        }
  
 -      val mediaSession = MediaSession.Builder(this@ExpoVideoPlaybackService, player)
 +      val mediaSession = MediaSession.Builder(this@ExpoVideoPlaybackService, RemoteCommandPlayer(videoPlayer))
          .setId("ExpoVideoPlaybackService_${player.hashCode()}")
--        .setCallback(VideoMediaSessionCallback())
+         .setCallback(VideoMediaSessionCallback())
 -        .setCustomLayout(ImmutableList.of(seekBackwardButton, seekForwardButton))
-+        .setCallback(VideoMediaSessionCallback(videoPlayer))
-+        .setCustomLayout(ImmutableList.of(previousTrackButton, nextTrackButton))
++        // Standard Player commands already supply previous/next on every Android version.
++        // Custom session buttons duplicate them in Android 13+ system controls.
          .build()
  
        // Replace the basic media session with a session connected to our playback service.
-@@ -242,6 +256,8 @@ class ExpoVideoPlaybackService : MediaSessionService() {
-   companion object {
-     const val SEEK_FORWARD_COMMAND = "SEEK_FORWARD"
-     const val SEEK_BACKWARD_COMMAND = "SEEK_REWIND"
-+    const val NEXT_TRACK_COMMAND = "BIU_NEXT_TRACK"
-+    const val PREVIOUS_TRACK_COMMAND = "BIU_PREVIOUS_TRACK"
-     const val CHANNEL_ID = "PlaybackService"
-     const val SESSION_SHOW_NOTIFICATION = "showNotification"
-     const val SEEK_INTERVAL_MS = 10000L
 diff --git a/node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/RemoteCommandPlayer.kt b/node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/RemoteCommandPlayer.kt
 new file mode 100644
 index 0000000..59f3816
@@ -96,10 +59,10 @@ index 0000000..59f3816
 +  override fun seekToNextMediaItem() = videoPlayer.emitRemoteNext()
 +}
 diff --git a/node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/VideoMediaSessionCallback.kt b/node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/VideoMediaSessionCallback.kt
-index 1ca90e0..81ef541 100644
+index 1ca90e0..1a5a33d 100644
 --- a/node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/VideoMediaSessionCallback.kt
 +++ b/node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/VideoMediaSessionCallback.kt
-@@ -6,11 +6,12 @@ import androidx.media3.session.MediaSession
+@@ -6,6 +6,7 @@ import androidx.media3.session.MediaSession
  import androidx.media3.session.SessionCommand
  import androidx.media3.session.SessionResult
  import com.google.common.util.concurrent.ListenableFuture
@@ -107,13 +70,7 @@ index 1ca90e0..81ef541 100644
  import androidx.annotation.OptIn
  import androidx.media3.common.util.UnstableApi
  
- @OptIn(UnstableApi::class)
--class VideoMediaSessionCallback : MediaSession.Callback {
-+class VideoMediaSessionCallback(private val videoPlayer: expo.modules.video.player.VideoPlayer) : MediaSession.Callback {
-   override fun onConnect(
-     session: MediaSession,
-     controller: MediaSession.ControllerInfo
-@@ -23,12 +24,18 @@ class VideoMediaSessionCallback : MediaSession.Callback {
+@@ -23,6 +24,10 @@ class VideoMediaSessionCallback : MediaSession.Callback {
            MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS.buildUpon()
              .add(Player.COMMAND_SEEK_FORWARD)
              .add(Player.COMMAND_SEEK_BACK)
@@ -124,20 +81,10 @@ index 1ca90e0..81ef541 100644
              .build()
          )
          .setAvailableSessionCommands(
-           MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS.buildUpon()
-             .add(SessionCommand(ExpoVideoPlaybackService.SEEK_BACKWARD_COMMAND, Bundle.EMPTY))
-             .add(SessionCommand(ExpoVideoPlaybackService.SEEK_FORWARD_COMMAND, Bundle.EMPTY))
-+            .add(SessionCommand(ExpoVideoPlaybackService.NEXT_TRACK_COMMAND, Bundle.EMPTY))
-+            .add(SessionCommand(ExpoVideoPlaybackService.PREVIOUS_TRACK_COMMAND, Bundle.EMPTY))
-             .build()
-         )
-         .build()
-@@ -41,7 +48,10 @@ class VideoMediaSessionCallback : MediaSession.Callback {
+@@ -41,7 +46,8 @@ class VideoMediaSessionCallback : MediaSession.Callback {
      when (customCommand.customAction) {
        ExpoVideoPlaybackService.SEEK_FORWARD_COMMAND -> session.player.seekTo(session.player.currentPosition + ExpoVideoPlaybackService.SEEK_INTERVAL_MS)
        ExpoVideoPlaybackService.SEEK_BACKWARD_COMMAND -> session.player.seekTo(session.player.currentPosition - ExpoVideoPlaybackService.SEEK_INTERVAL_MS)
-+      ExpoVideoPlaybackService.NEXT_TRACK_COMMAND -> videoPlayer.emitRemoteNext()
-+      ExpoVideoPlaybackService.PREVIOUS_TRACK_COMMAND -> videoPlayer.emitRemotePrevious()
 +      else -> return super.onCustomCommand(session, controller, customCommand, args)
      }
 -    return super.onCustomCommand(session, controller, customCommand, args)

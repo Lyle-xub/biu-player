@@ -3,6 +3,10 @@
   if (typeof module === 'object' && module.exports) module.exports = factory(require('./music-dictionary'));
   else root.BiuDaily = factory(root.BiuMusicDictionary);
 })(typeof window === 'object' ? window : this, function (dictionaryData) {
+  // Hermes delegates localeCompare to Android ICU. Reuse its native collator
+  // instead of allocating one per comparison during large sync/profile sorts.
+  const compareText = typeof Intl !== 'undefined' && Intl.Collator
+    ? new Intl.Collator().compare : (a, b) => a.localeCompare(b);
   const DAY = 86400000;
   const SOURCE = 'music-catalog-v3';
   const clean = (v, max = 500) => String(v || '').normalize('NFKC').replace(/<[^>]*>/g, '').trim().slice(0, max);
@@ -122,7 +126,7 @@
     };
     (Array.isArray(value.shownSongs) ? value.shownSongs : []).forEach(v => { if (v) remember(v.key, v.at); });
     (Array.isArray(value.days) ? value.days : []).forEach(day => (Array.isArray(day?.tracks) ? day.tracks : []).forEach(t => songKeys(t).forEach(k => remember(k, day.generatedAt))));
-    return [...records].map(([key, at]) => ({ key, at })).sort((a,b) => a.at - b.at || a.key.localeCompare(b.key));
+    return [...records].map(([key, at]) => ({ key, at })).sort((a,b) => a.at - b.at || compareText(a.key, b.key));
   }
   function compact(t) {
     if (!t || !/^BV\w{1,38}$/.test(t.bvid || '') || t.isLive) return null;
@@ -158,7 +162,7 @@
       const at = Number(v?.generatedAt) || new Date(v?.date + 'T00:00:00').getTime();
       (Array.isArray(v?.tracks) ? v.tracks : []).forEach((t) => remember(t?.bvid, at));
     });
-    return [...shown].map(([bvid, at]) => ({ bvid, at })).sort((a, b) => a.at - b.at || a.bvid.localeCompare(b.bvid));
+    return [...shown].map(([bvid, at]) => ({ bvid, at })).sort((a, b) => a.at - b.at || compareText(a.bvid, b.bvid));
   }
   function normalize(value = {}) {
     // Fixed single-track eligibility; old editable ranges no longer affect selection.
@@ -169,7 +173,7 @@
     const events = unique((Array.isArray(value.events) ? value.events : []).filter((v) => v && typeof v.id === 'string' && compact(v.track))
       .map((v) => ({ id: clean(v.id, 100), track: compact(v.track), at: Math.max(0, Number(v.at) || 0),
         seconds: Math.max(0, Math.min(14400, Number(v.seconds) || 0)), manual: !!v.manual, search: !!v.search })), (v) => v.id)
-      .sort((a, b) => a.at - b.at || a.id.localeCompare(b.id)).slice(-4000);
+      .sort((a, b) => a.at - b.at || compareText(a.id, b.id)).slice(-4000);
     const days = unique((Array.isArray(value.days) ? value.days : []).filter((v) => v && /^\d{4}-\d{2}-\d{2}$/.test(v.date) && typeof v.profileId === 'string')
       .map((v) => ({ date: v.date, profileId: clean(v.profileId, 40), profileName: clean(v.profileName, 40),
         source: v.source === SOURCE ? SOURCE : '',
@@ -178,13 +182,13 @@
         complete: !!v.complete && !(Array.isArray(v.tracks) ? v.tracks : []).some(rejected),
         rounds: (Array.isArray(v.tracks) ? v.tracks : []).some(rejected) ? 0 : Math.max(0, Math.min(100, Number(v.rounds) || 0)), error: clean(v.error, 180),
         themes: (Array.isArray(v.themes) ? v.themes : []).map((v) => clean(v, 40)).slice(0, 3) })), (v) => `${v.date}:${v.profileId}`)
-      .sort((a, b) => a.date.localeCompare(b.date) || a.profileId.localeCompare(b.profileId)).slice(-28)
+      .sort((a, b) => compareText(a.date, b.date) || compareText(a.profileId, b.profileId)).slice(-28)
       .map((v) => ({ ...v, complete: v.complete && v.tracks.length >= 15 }));
     return { version: 1, duration, profileId: clean(value.profileId || 'auto', 40), profileAt: Math.max(0, Number(value.profileAt) || 0),
       ignored: rules(value.ignored), muted: rules(value.muted), blocked: rules(value.blocked), events, days,
       shown: recentShown(value), shownSongs: recentSongs(value),
       candidates: unique((Array.isArray(value.candidates) ? value.candidates : []).map(compact).filter(Boolean), (t) => t.bvid)
-        .sort((a, b) => a.at - b.at || a.bvid.localeCompare(b.bvid)).slice(-600) };
+        .sort((a, b) => a.at - b.at || compareText(a.bvid, b.bvid)).slice(-600) };
   }
   function validate(value) {
     if (value === undefined) return normalize();
@@ -264,7 +268,7 @@
         if (age <= 14) recent.set(t.name, (recent.get(t.name) || 0) + score * 0.5 ** (age / 7));
       });
     });
-    const scaled = (map) => { const max = Math.max(1, ...map.values()); return [...map].map(([name, weight]) => ({ name, weight: weight / max * 100 })).sort((a, b) => b.weight - a.weight || a.name.localeCompare(b.name)).slice(0, 30); };
+    const scaled = (map) => { const max = Math.max(1, ...map.values()); return [...map].map(([name, weight]) => ({ name, weight: weight / max * 100 })).sort((a, b) => b.weight - a.weight || compareText(a.name, b.name)).slice(0, 30); };
     const l = scaled(long), r = scaled(recent), merged = new Map(l.map((v) => [v.name, v.weight * 0.6]));
     r.forEach((v) => merged.set(v.name, (merged.get(v.name) || 0) + v.weight * 0.4));
     return { long: l, recent: r, tags: scaled(merged).slice(0, 20).map((v) => ({ ...v, weight: Math.max(1, Math.round(v.weight)) })) };

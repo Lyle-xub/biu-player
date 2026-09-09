@@ -2,7 +2,7 @@
   "expo": {
     "name": "Biu Player",
     "slug": "biu-player-mobile",
-    "version": "1.0.8",
+    "version": "1.0.9",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -10,7 +10,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.biuplayer.mobile",
-      "buildNumber": "24",
+      "buildNumber": "26",
       "appleTeamId": "GXVN75MDQN"
     },
     "android": {
@@ -20,7 +20,7 @@
         "foregroundImage": "./assets/android-icon-foreground.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "versionCode": 9,
+      "versionCode": 11,
       "blockedPermissions": [
         "android.permission.RECORD_AUDIO"
       ]

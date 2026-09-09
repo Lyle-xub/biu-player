@@ -45,7 +45,7 @@ export default function PlayerScreen({ navigation, route }) {
     togglePlay, next, prev, seekTo, isLiked, toggleLike,
     isInLibrary = () => false, toggleLibrary = () => {},
     player: mediaPlayer, lyricSettings, lyricEffect, seekRevision, resolveTrackUp,
-  } = usePlayer();
+  } = usePlayer(['current', 'isLive', 'playing', 'buffering', 'playError', 'togglePlay', 'next', 'prev', 'seekTo', 'isLiked', 'toggleLike', 'isInLibrary', 'toggleLibrary', 'player', 'lyricSettings', 'lyricEffect', 'seekRevision', 'resolveTrackUp']);
   const { position, duration } = usePlaybackProgress();
   const openUp = (track) => openTrackUp(navigation, track, resolveTrackUp);
   const { width: winW, height: winH } = useWindowDimensions();
@@ -66,7 +66,7 @@ export default function PlayerScreen({ navigation, route }) {
   const [mediaMode, setMediaMode] = useState('lyrics'); // lyrics | video（顶部分段开关，纯显隐）
   const [sheet, setSheet] = useState(null); // menu | queue | playlist
 
-  const [lyrics, setLyrics] = useState(null); // null=加载中 []=无词
+  const [lyricResult, setLyricResult] = useState(null); // null=加载中 []=无词
   const [railSize, setRailSize] = useState({ width: 0, height: 0 });
 
   const liked = isLiked(current);
@@ -80,6 +80,9 @@ export default function PlayerScreen({ navigation, route }) {
   const coverSize = Math.min(winW * 0.86, winH * 0.44);
   const curKey = trackKeyOf(current);
   const lyricSetting = lyricSettings[curKey];
+  // Never mount a new song's animation graph with the previous song's lyrics.
+  const lyrics = lyricResult?.key === curKey && lyricResult?.cid === current?.cid
+    && lyricResult?.manualLines === lyricSetting?.lines ? lyricResult.lines : null;
   const lyricOffset = lyricSetting?.offset || 0;
   const lyricPosition = position + lyricOffset;
   const showLyrics = () => { setMediaMode('lyrics'); setMode('lyrics'); };
@@ -103,9 +106,17 @@ export default function PlayerScreen({ navigation, route }) {
     animation.start();
     return () => animation.stop();
   }, [mediaMode, modeAnim]);
-  const lyricSlide = modeAnim.interpolate({ inputRange: [0, 1], outputRange: [0, -winW] });
-  const videoSlide = modeAnim.interpolate({ inputRange: [0, 1], outputRange: [winW, 0] });
-  const segSlide = modeAnim.interpolate({ inputRange: [0, 1], outputRange: [0, segW] });
+  const [lyricSlide, videoSlide] = useMemo(() => [
+    modeAnim.interpolate({ inputRange: [0, 1], outputRange: [0, -winW] }),
+    modeAnim.interpolate({ inputRange: [0, 1], outputRange: [winW, 0] }),
+  ], [modeAnim, winW]);
+  const segSlide = useMemo(() => modeAnim.interpolate({ inputRange: [0, 1], outputRange: [0, segW] }), [modeAnim, segW]);
+  const revealStyles = useMemo(() => ({
+    coverOpacity: reveal.interpolate({ inputRange: [0, 1], outputRange: [1, 0] }),
+    coverY: reveal.interpolate({ inputRange: [0, 1], outputRange: [0, -18] }),
+    coverScale: reveal.interpolate({ inputRange: [0, 1], outputRange: [1, 0.97] }),
+    lyricY: reveal.interpolate({ inputRange: [0, 1], outputRange: [22, 0] }),
+  }), [reveal]);
 
   // 分段开关：纯 UI 显隐（player 始终活跃，声音画面同一条流）
   const switchMedia = (m) => { if (m !== mediaMode) setMediaMode(m); };
@@ -115,14 +126,12 @@ export default function PlayerScreen({ navigation, route }) {
 
   // 切歌拉歌词：清洗 ♪ 包裹 → 间隔 >3s 插间奏行（照抄桌面 attachLyricInterludes）
   useEffect(() => {
-    setLyrics(null);
-    if (!current || current.isLive) { setLyrics([]); return; }
     let cancelled = false;
-    (async () => {
-      const lines = await loadTrackLyrics(current, lyricSetting);
-      if (cancelled) return;
-      setLyrics(lines);
-    })();
+    const publish = lines => {
+      if (!cancelled) setLyricResult({ key: curKey, cid: current?.cid, manualLines: lyricSetting?.lines, lines });
+    };
+    if (!current || current.isLive) publish([]);
+    else loadTrackLyrics(current, lyricSetting).then(publish).catch(() => publish([]));
     return () => { cancelled = true; };
   }, [curKey, current?.cid, lyricSetting?.lines]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -252,9 +261,9 @@ export default function PlayerScreen({ navigation, route }) {
                       accessibilityElementsHidden={mode !== 'cover'}
                       importantForAccessibility={mode === 'cover' ? 'auto' : 'no-hide-descendants'}
                       style={[StyleSheet.absoluteFill, styles.coverBody, {
-                        opacity: reveal.interpolate({ inputRange: [0, 1], outputRange: [1, 0] }),
-                        transform: [{ translateY: reveal.interpolate({ inputRange: [0, 1], outputRange: [0, -18] }) },
-                          { scale: reveal.interpolate({ inputRange: [0, 1], outputRange: [1, 0.97] }) }],
+                        opacity: revealStyles.coverOpacity,
+                        transform: [{ translateY: revealStyles.coverY },
+                          { scale: revealStyles.coverScale }],
                       }]}>
 
                       <View>
@@ -295,7 +304,7 @@ export default function PlayerScreen({ navigation, route }) {
                       importantForAccessibility={mode === 'lyrics' ? 'auto' : 'no-hide-descendants'}
                       style={[StyleSheet.absoluteFill, styles.lyricBody, {
                         opacity: reveal,
-                        transform: [{ translateY: reveal.interpolate({ inputRange: [0, 1], outputRange: [22, 0] }) }],
+                        transform: [{ translateY: revealStyles.lyricY }],
                       }]}>
 
                       {/* 顶行：小封面 + 标题/UP + 我喜欢 + … */}
@@ -334,6 +343,7 @@ export default function PlayerScreen({ navigation, route }) {
                         {lyrics && lyrics.length ? (
                           <LyricsRail
                             key={curKey}
+                            visible={focused && mediaMode === 'lyrics' && mode === 'lyrics'}
                             effect={lyricEffect}
                             clockRevision={`${curKey}:${seekRevision}:${lyricOffset}`}
                             lines={lyrics}

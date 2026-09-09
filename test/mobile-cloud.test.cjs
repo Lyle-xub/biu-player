@@ -15,10 +15,11 @@ test('mobile envelope roundtrips and requires the intended snapshot',async()=>{
  assert.deepEqual(unseal(payload,key,snapshotId),fixture.library);
  assert.throws(()=>unseal(payload,key,'0'.repeat(32)));
 });
-test('mobile crypto and Buffer share signed descriptors with desktop; keys stay outside JSON state',()=>{
+test('mobile crypto and Buffer share signed descriptors with desktop; keys stay outside JSON state',async()=>{
  const fs=require('node:fs'),path=require('node:path'),root=path.resolve(__dirname,'../mobile-rn');
  const fromMobile=name=>require(require.resolve(name,{paths:[root]}));
  const babel=fromMobile('@babel/core'),secrets=new Map(),nativeWrites=[];
+ const uploadBytes=require('node:crypto').randomBytes(200003),reads=[];
  // Use Expo's real URI utilities; only the native filesystem boundary is mocked.
  function loadPathUtility(name) {
   const filename=path.join(root,'node_modules/expo-file-system/src/pathUtilities',name+'.ts');
@@ -34,7 +35,13 @@ test('mobile crypto and Buffer share signed descriptors with desktop; keys stay 
    // java.io.File(URI) rejects an authority, as FileSystem.info does on Android.
    assert.equal(new URL(uri).host,'');require('node:url').fileURLToPath(uri);return {exists:false};
   }},File:class{},Directory:class{}},
-  'expo-file-system/legacy': {writeAsStringAsync: async () => {}},
+  'expo-file-system/legacy': {writeAsStringAsync: async () => {}, readAsStringAsync: async (uri, options) => {
+   assert.equal(options.encoding, 'base64');
+   assert.ok(options.length <= 64 * 1024, 'upload reads must yield between bounded native I/O calls');
+   await new Promise(resolve => setImmediate(resolve));
+   reads.push(options);
+   return uploadBytes.subarray(options.position, options.position + options.length).toString('base64');
+  }},
   'expo-modules-core':{requireOptionalNativeModule:()=>({
    randomHex:size=>require('node:crypto').randomBytes(size).toString('hex'),
    writeTextFile:(uri,value)=>nativeWrites.push({uri,value,type:'text'}),
@@ -64,6 +71,15 @@ test('mobile crypto and Buffer share signed descriptors with desktop; keys stay 
  assert.equal(signed,desktop.descriptor(meta,key));assert.deepEqual(api.parseDescriptor(signed,key),meta);
  const reference=mobile.protect(fixture.key);assert.notEqual(reference,fixture.key);assert.equal(mobile.unprotect(reference),fixture.key);
  assert.throws(()=>mobile.unprotect('arbitrary-key'));
+ const handle=await mobile.fs.promises.open('file:///tmp/upload.mp4');
+ const output=mobile.Buffer.alloc(300005, 99);
+ const read=await handle.read(output, 2, 300000, 3);
+ assert.equal(read.bytesRead, uploadBytes.length - 3);
+ assert.deepEqual(Buffer.from(output.subarray(2, 2 + read.bytesRead)), uploadBytes.subarray(3));
+ assert.equal(output[1], 99); assert.equal(output[2 + read.bytesRead], 99);
+ assert.equal(reads.length, 4);
+ await handle.close();
+ await assert.rejects(handle.read(output, 0, 1, 0), /文件已关闭/);
 });
 test('mobile cloud removes library quotas while retaining authenticated roundtrips above 512KB compressed and 8MB JSON', async () => {
  const {seal,unseal}=await import('../mobile-rn/src/cloud/envelope.js');

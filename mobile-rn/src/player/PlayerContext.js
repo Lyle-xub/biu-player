@@ -28,6 +28,7 @@ import { PLAYBACK_QUALITIES, normalizePlaybackQuality } from './playbackQuality'
 import { getPlaylists, mergeSyncedPlaylists, setPlaylistScope } from '../store/playlists';
 import { accountKey, adoptGuestLibrary, readAccountValue } from '../store/accountStorage';
 import { backgroundCompute } from '../performance/backgroundCompute';
+import useAppForeground from '../performance/useAppForeground';
 
 import useRecommendationProfile from '../store/useRecommendationProfile';
 import { tracker } from '../../../renderer/daily-recommendation';
@@ -51,6 +52,7 @@ export const RECOMMEND_MODES = ['music', 'all'];
 
 const PlayerContext = createContext(null);
 const PlaybackProgressContext = createContext({ position: 0, duration: 0 });
+const BackgroundPlaybackProgressContext = createContext({ position: 0, duration: 0 });
 
 export function PlayerProvider({ children }) {
   const basePlayer = useVideoPlayer(null, (p) => {
@@ -611,10 +613,8 @@ export function PlayerProvider({ children }) {
     persist(DISCOVERY_MODE_KEY, mode);
   }, [persist]);
 
-  const isLiked = useCallback(
-    (t) => !!t && likes.some((x) => trackKeyOf(x) === trackKeyOf(t)),
-    [likes],
-  );
+  const likedKeys = useMemo(() => new Set(likes.map(trackKeyOf)), [likes]);
+  const isLiked = useCallback((t) => !!t && likedKeys.has(trackKeyOf(t)), [likedKeys]);
   const changeCollections = useCallback((update) => {
     const scope = accountScope.current, epoch = libraryEpoch.current;
     const operation = collectionWrites.current.catch(() => {}).then(async () => {
@@ -652,9 +652,10 @@ export function PlayerProvider({ children }) {
     });
   }, [changeCollections]);
 
+  const savedKeys = useMemo(() => new Set(savedLibrary.map(trackKeyOf)), [savedLibrary]);
   const isInLibrary = useCallback(
-    (t) => !!t && [...likes, ...savedLibrary].some((x) => trackKeyOf(x) === trackKeyOf(t)),
-    [likes, savedLibrary],
+    (t) => !!t && (likedKeys.has(trackKeyOf(t)) || savedKeys.has(trackKeyOf(t))),
+    [likedKeys, savedKeys],
   );
   const toggleLibrary = useCallback((t) => {
     if (!t) return;
@@ -800,19 +801,17 @@ export function PlayerProvider({ children }) {
         check();
         const before = likesRef.current;
         const beforeLibrary = savedLibraryRef.current;
-        const merged = await backgroundCompute('libraryReconcile',
+        const changes = await backgroundCompute('libraryChanges',
           base ? { version: 1, likes: base.likes, library: base.library, playlists: [] } : null,
           { version: 1, likes: data.likes, library: data.library, playlists: [] },
           { version: 1, likes: before, library: beforeLibrary, playlists: [] },
         );
-        const next = merged.likes;
-        const nextLibrary = merged.library;
-        const likesRaw = await backgroundCompute('stringify', next);
-        const libraryRaw = await backgroundCompute('stringify', nextLibrary);
+        const next = changes.likes?.value || before;
+        const nextLibrary = changes.library?.value || beforeLibrary;
         check();
         if (likesRef.current !== before || savedLibraryRef.current !== beforeLibrary) continue;
-        await AsyncStorage.setItem(accountKey(LIKES_KEY, scope), likesRaw);
-        await AsyncStorage.setItem(accountKey(MUSIC_LIBRARY_KEY, scope), libraryRaw);
+        if (changes.likes) await AsyncStorage.setItem(accountKey(LIKES_KEY, scope), changes.likes.raw);
+        if (changes.library) await AsyncStorage.setItem(accountKey(MUSIC_LIBRARY_KEY, scope), changes.library.raw);
         check();
         if (likesRef.current !== before || savedLibraryRef.current !== beforeLibrary) continue;
         likesRef.current = next;
@@ -958,6 +957,9 @@ export function PlayerProvider({ children }) {
   const progressValue = useMemo(() => ({ position, duration }), [position, duration]);
   const progressRef = useRef(progressValue);
   progressRef.current = progressValue;
+  const foreground = useAppForeground();
+  const visibleProgress = useRef(progressValue);
+  if (foreground) visibleProgress.current = progressValue;
 
   const value = useMemo(() => ({
     queue, index, queueSource, current, isLive, playMode, setPlayMode,
@@ -1018,7 +1020,9 @@ export function PlayerProvider({ children }) {
   }
   useLayoutEffect(() => store.current.publish(value), [value]);
   return <PlayerContext.Provider value={store.current}>
-    <PlaybackProgressContext.Provider value={progressValue}>{children}</PlaybackProgressContext.Provider>
+    <BackgroundPlaybackProgressContext.Provider value={progressValue}>
+      <PlaybackProgressContext.Provider value={visibleProgress.current}>{children}</PlaybackProgressContext.Provider>
+    </BackgroundPlaybackProgressContext.Provider>
   </PlayerContext.Provider>;
 }
 
@@ -1037,4 +1041,7 @@ export function usePlayer(fields) {
   };
   return useSyncExternalStore(store.subscribe, getSnapshot, getSnapshot);
 }
-export const usePlaybackProgress = () => useContext(PlaybackProgressContext);
+// Only system lyric services need ticks while the UI is suspended. Audio/queue
+// progression and usePlayer's imperative position getter always remain live.
+export const usePlaybackProgress = ({ background = false } = {}) =>
+  useContext(background ? BackgroundPlaybackProgressContext : PlaybackProgressContext);

@@ -2,13 +2,14 @@
  * Reference: chthollyphile/folia-major MonetWordSweep + monetLyricsModel.
  * One native clock drives static glyph masks; simple mode uses one fill per wrapped text row.
  */
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
-  Animated, AppState, Easing, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View,
+  Animated, Easing, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View,
 } from 'react-native';
 import MaskedView from '@react-native-masked-view/masked-view';
 import { LinearGradient } from 'expo-linear-gradient';
 import MonetGlowView from 'biu-lyric-monet';
+import useAppForeground from '../performance/useAppForeground';
 import { buildLineTokens, splitLyricGraphemes, sweepFrames, glowFrames, shouldResetLyricClock } from '../player/lyricMotion';
 export { buildLineTokens, attachLyricInterludes } from '../player/lyricMotion';
 
@@ -24,7 +25,9 @@ const INACTIVE_COLOR = 'rgba(255,255,255,0.72)'; // 非活跃行灰白（再乘 
 /* folia-major MonetWordSweep 光晕常量（glowShadow 的紧光与宽光双层） */
 const GLOW_RADIUS_ONE = 0.28;
 const GLOW_RADIUS_TWO = 0.65;
-const CLOCK_RUNWAY_SECONDS = 60 * 60;
+// TimingAnimation materializes 60 frame values per second before crossing to native.
+// Renew a bounded clock instead of allocating 216,001 frames for an hour on every seek.
+const CLOCK_RUNWAY_SECONDS = 30;
 
 /* folia 光带前沿：edgeSoftness = clamp(font×0.45, 6, 16)px 柔边（resolveMonetSweepEdgeSoftness） */
 const sweepEdge = (font) => clamp(font * 0.45, 6, 16);
@@ -74,12 +77,7 @@ function useLyricClock(position, playing, revision) {
   const previous = useRef(null);
   const animation = useRef(null);
   const clockRunning = useRef(false);
-  const [foreground, setForeground] = useState(AppState.currentState !== 'background' && AppState.currentState !== 'inactive');
-  useEffect(() => {
-    const listener = AppState.addEventListener('change', (state) => setForeground(state === 'active'));
-    return () => listener.remove();
-  }, []);
-  const running = playing && foreground;
+  const running = playing;
   useLayoutEffect(() => {
     const sample = { pos: position, ts: performance.now(), playing: running, revision };
     const reset = shouldResetLyricClock(previous.current, sample);
@@ -97,20 +95,23 @@ function useLyricClock(position, playing, revision) {
       animation.current?.stop();
       time.stopAnimation();
       time.setValue(position);
-      animation.current = Animated.timing(time, {
-        toValue: position + CLOCK_RUNWAY_SECONDS,
-        duration: CLOCK_RUNWAY_SECONDS * 1000,
-        easing: Easing.linear,
-        useNativeDriver: true,
-        isInteraction: false,
-      });
       clockRunning.current = true;
-      animation.current.start(({ finished } = {}) => {
-        if (finished) clockRunning.current = false;
-      });
+      const startClock = from => {
+        const next = from + CLOCK_RUNWAY_SECONDS;
+        const segment = Animated.timing(time, {
+          toValue: next, duration: CLOCK_RUNWAY_SECONDS * 1000,
+          easing: Easing.linear, useNativeDriver: true, isInteraction: false,
+        });
+        animation.current = segment;
+        segment.start(({ finished } = {}) => {
+          if (finished && clockRunning.current && animation.current === segment) startClock(next);
+        });
+      };
+      startClock(position);
     }
   }, [position, running, revision, time]);
-  useEffect(() => () => {
+  useLayoutEffect(() => () => {
+    clockRunning.current = false;
     animation.current?.stop();
     time.stopAnimation();
   }, [time]);
@@ -315,7 +316,14 @@ const SweepWord = React.memo(function SweepWord({ token, font, textStyle, state,
   );
 });
 
-export default function LyricsRail({ lines, activeIndex, onSeek, height, width, position, playing, effect = 'simple', clockRevision = 0 }) {
+export default function LyricsRail({ visible = true, ...props }) {
+  const foreground = useAppForeground();
+  // Suspending only the clock left rows, glyph masks and layout animations alive
+  // through background track changes. Rebuild just the current window on return.
+  return foreground && visible ? <ActiveLyricsRail {...props} /> : null;
+}
+
+function ActiveLyricsRail({ lines, activeIndex, onSeek, height, width, position, playing, effect = 'simple', clockRevision = 0 }) {
   const simple = effect !== 'monet';
   const time = useLyricClock(position, playing, clockRevision);
   const { width: windowWidth, fontScale } = useWindowDimensions();

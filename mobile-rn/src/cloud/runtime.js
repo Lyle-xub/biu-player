@@ -1,6 +1,6 @@
 import { Paths, File } from 'expo-file-system';
-import { createDownloadResumable } from 'expo-file-system/legacy';
-import { native, crypto, fs, path, Buffer } from './platform';
+import { createDownloadResumable, writeAsStringAsync } from 'expo-file-system/legacy';
+import { native, crypto, fs, path } from './platform';
 import { backgroundCompute } from '../performance/backgroundCompute';
 import { streamHeaders } from '../api/client';
 const ensureActive = signal => {if(signal?.aborted)throw Error('同步已取消');};
@@ -19,7 +19,7 @@ export function createMobileVideoRuntime() {
           ensureActive(signal);
           fs.mkdirSync(request.folder);
           const payload=path.join(request.folder,'snapshot.bin'),output=path.join(request.folder,'video.mp4');
-          await fs.promises.writeFile(payload,Buffer.from(result.payload,'base64'));ensureActive(signal);
+          await writeAsStringAsync(payload,result.payload,{encoding:'base64'});ensureActive(signal);
           const proof=await native.encode(payload,output,result.snapshotId);ensureActive(signal);return proof;
         }
         if(request.operation!=='decode')throw Error('不支持的同步任务');

@@ -9,6 +9,7 @@ import '../../renderer/api.js';
 import '../../renderer/hot-comment-motion.js';
 import '../../renderer/player-sheet-motion.js';
 import BiuPlaybackSession from '../../renderer/playback-session.js';
+import BiuPlaybackRecovery from '../../renderer/playback-recovery.js';
 import BiuLibrarySync from '../../renderer/library-sync.js';
 import BiuSubtitles from '../../renderer/subtitles.js';
 import '../../renderer/split-decode.js';
@@ -23,6 +24,7 @@ window.BiuRecommendation = BiuRecommendation;
 window.BiuProfilePresentation = BiuProfilePresentation;
 
 window.BiuPlaybackSession = BiuPlaybackSession;
+window.BiuPlaybackRecovery = BiuPlaybackRecovery;
 window.BiuLibrarySync = BiuLibrarySync;
 window.BiuSubtitles = BiuSubtitles;
 

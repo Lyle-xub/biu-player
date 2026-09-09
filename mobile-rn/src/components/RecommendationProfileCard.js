@@ -18,7 +18,9 @@ function StatusDot() {
 }
 
 export default function RecommendationProfileCard({ source = 'home' }) {
-  const player = usePlayer();
+  const player = usePlayer(['libraryReady', 'account', ...(source === 'discovery'
+    ? ['discoveryRecommendationManager', 'discoveryRecommendationProfile']
+    : ['recommendationManager', 'recommendationProfile'])]);
   const manager = source === 'discovery'
     ? player.discoveryRecommendationManager : player.recommendationManager;
   const state = source === 'discovery'
@@ -73,7 +75,7 @@ const Editor = React.memo(function Editor({ manager, state, ready, source }) {
     {button('添加忽略', () => run(async () => { await manager.dailyAction({ type: 'ignored', name: ignoredText }); setIgnoredText(''); }))}
     <View style={styles.wrap}>{['ignored', 'muted', 'blocked'].flatMap((type) => (state.daily?.[type] || []).filter((v) => v.active)
       .map((v) => button(`恢复${type === 'blocked' ? '视频' : type === 'muted' ? '权重' : '标签'} ${v.name}`, () => run(() => manager.dailyAction({ type, name: v.name, active: false })))))}</View>
-    <Text style={styles.hint}>画像立即重算；当天每日推荐保持稳定，可在每日推荐中重新生成。</Text>
+    <Text style={styles.hint}>学习画像每 15 分钟批量更新，也可手动更新；当天每日推荐保持稳定。</Text>
     {!state.ready && state.error ? button('重新读取画像', () => run(() => manager.ready())) : null}
     <View style={styles.wrap}>
       {button('更新近期画像', () => run(() => manager.refresh(true)))}

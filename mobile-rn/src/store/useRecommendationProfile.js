@@ -5,6 +5,7 @@ import { usePlaylists } from './playlists';
 import { accountKey } from './accountStorage';
 import { createManager } from '../../../renderer/recommendation-profile';
 import { backgroundCompute } from '../performance/backgroundCompute';
+import { beginRecommendation } from '../updates/networkGate';
 
 export default function useRecommendationProfile(
   account, likes, libraryReady, storageName = 'biu.recommendation-profiles',
@@ -20,6 +21,7 @@ export default function useRecommendationProfile(
       get: client.get, getLikes: () => source.current,
       getPlaylists: () => source.playlists,
       compute: backgroundCompute,
+      beginDaily: beginRecommendation,
       read: async () => { const raw = await AsyncStorage.getItem(key); return raw ? backgroundCompute('parse', raw) : null; },
       write: async (value) => AsyncStorage.setItem(key, await backgroundCompute('stringify', value)),
     });
@@ -28,6 +30,6 @@ export default function useRecommendationProfile(
   useEffect(() => {
     if (libraryReady) manager.setActive(true);
     return () => manager.setActive(false);
-  }, [manager, libraryReady, likes, playlists]);
+  }, [manager, libraryReady]);
   return { recommendationManager: manager, recommendationProfile: state };
 }

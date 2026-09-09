@@ -391,6 +391,7 @@ const audio = $('audio');
 const video = $('originalVideo');
 const liveVideo = $('liveVideo');
 let videoLoadToken = 0;
+let audioLoadToken = 0;
 const videoStreamCache = new Map();
 let videoQualityOptions = [];
 let videoQualityOptionsKey = '';
@@ -414,6 +415,21 @@ const state = {
   recommendations: [], // B 站个性化推荐流中的音乐视频
   recommendFreshIdx: 0,
 };
+
+const playbackRecovery = window.BiuPlaybackRecovery.create({
+  read: () => ({ track: state.current, media: activeMedia(),
+    sound: activeMedia() === video && videoUsesSeparateAudio() ? audio : activeMedia(), videoMode: videoModeOn() }),
+  refresh: (snapshot, valid) => playTrack(snapshot.track, { recover: true, forceAudioRefresh: true,
+    keepView: true, startTime: snapshot.position, videoMode: snapshot.videoMode, cancelled: () => !valid() }),
+  report: error => toast('恢复播放失败：' + (error.message || error)),
+  cancelled: () => {
+    ++audioLoadToken; ++videoLoadToken; ++modeRequestToken;
+    audio.pause(); video.pause();
+    document.body.classList.remove('video-pending');
+    $('btnVideo').classList.remove('loading');
+  },
+  changed: busy => { if (!busy) { pendingPlaybackStart = null; syncToggleIcon(); } },
+});
 
 /* ---------- 重启续播 ---------- */
 const PLAYBACK_SESSION_KEY = 'biu-playback-session';
@@ -1970,7 +1986,7 @@ try { musicLibrary = JSON.parse(localStorage.getItem('biu-library') || '[]'); } 
 const saveLikes = () => {
   try { localStorage.setItem(dataKey('biu-likes'), JSON.stringify(likes)); } catch (e) {}
   if (api.hasBridge && window.bili.storeSet) window.bili.storeSet(dataKey('biu-likes'), likes);
-  recommendationProfiles.manager().refresh().catch(() => {});
+  recommendationProfiles.manager().ready().catch(() => {});
 };
 const isLiked = (t) => !!(t && trackKey(t) && likes.some((l) => trackKey(l) === trackKey(t)));
 const isInMusicLibrary = (t) => !!(t && trackKey(t)
@@ -2129,9 +2145,14 @@ async function playIndex(i, automatic = false) {
 }
 
 async function playTrack(t, options = {}) {
-  recommendationProfiles.startListening(t, { manual: options.autoplay !== false && !options.automatic,
-    search: state.queueName?.startsWith('搜索') });
-  recordHistory(t);
+  if (!options.recover) {
+    playbackRecovery.reset();
+    recommendationProfiles.startListening(t, { manual: options.autoplay !== false && !options.automatic,
+      search: state.queueName?.startsWith('搜索') });
+    recordHistory(t);
+  }
+  const request = ++audioLoadToken;
+  const obsolete = () => state.current !== t || request !== audioLoadToken || options.cancelled?.();
   const keepVideoMode = options.videoMode ?? videoModeOn();
   const autoplay = options.autoplay !== false;
   const startTime = Number.isFinite(options.startTime) ? options.startTime : null;
@@ -2158,7 +2179,7 @@ async function playTrack(t, options = {}) {
   destroyHls();
   fillPlayingBase(t);
   if (t.isSegment) resolveSourceTrack(t).then(source => {
-    if (state.current !== t) return;
+    if (obsolete()) return;
     patchSlice('np', { sourceTitle: source.parentTitle || '', sourceArtist: source.parentUp || '' });
     patchSlice('vdetail', { ...(source.parentTitle ? { title: source.parentTitle } : {}),
       ...(source.parentUp ? { upName: source.parentUp } : {}) });
@@ -2186,7 +2207,7 @@ async function playTrack(t, options = {}) {
     // 1. 拿详情（cid / aid / stat / 封面）
     if (!t.cid || !t.aid) {
       const d = await api.view(t.bvid);
-      if (state.current !== t) return; // 已切歌，丢弃过期结果
+      if (obsolete()) return; // 已切歌，丢弃过期结果
       t.cid = d.cid; t.aid = d.aid;
       fillPlayingDetail(d);
     } else {
@@ -2196,12 +2217,13 @@ async function playTrack(t, options = {}) {
     // 2. 拿音频地址并播放（音质跟随设置）
     // 分切歌单连播：同一稿件同一音质时复用已加载的音频管线，只做段内定位。
     // 否则每次切歌都重新请求签名地址并重建整个媒体管线，冷缓冲深度 seek 必造成开头卡顿。
-    const reuseAudio = !!(t.isSegment && audio.src && !audio.error
+    const reuseAudio = !!(!options.forceAudioRefresh && t.isSegment && audio.src && !audio.error
       && audio.dataset.bvid === t.bvid
       && audio.dataset.quality === String(settings.quality));
     if (!reuseAudio) {
+      audio.pause();
       const url = await api.playUrl(t.bvid, t.cid, settings.quality);
-      if (state.current !== t) return;
+      if (obsolete()) return;
       audio.src = api.media(url);
       audio.dataset.bvid = t.bvid;
       audio.dataset.quality = String(settings.quality);
@@ -2210,16 +2232,16 @@ async function playTrack(t, options = {}) {
     // 即使 play() 因网络 stalled 也不会从整曲开头播起）
     if (startTime !== null) {
       await waitForPlaybackMetadata(audio);
-      if (state.current !== t) return;
+      if (obsolete()) return;
       audio.currentTime = BiuPlaybackSession.resumePosition(t, startTime, audio.duration);
     } else if (t.isSegment && isFinite(t.from)) {
       try { audio.currentTime = Math.max(0, t.from); } catch (e) {}
     }
-    if (state.current !== t) return;
+    if (obsolete()) return;
     pendingPlaybackStart = null;
-    if (autoplay) await audio.play();
+    if (autoplay) await withTimeout(audio.play(), 12000, '播放启动超时，请检查网络');
     else audio.pause();
-    if (state.current !== t) return;
+    if (obsolete()) return;
     syncProgress();
     // 3. 封面取色 + 热评 + 歌词（不阻塞播放）
     applyArtColors(t.pic);
@@ -2229,9 +2251,11 @@ async function playTrack(t, options = {}) {
     else scheduleVideoWarmup(t);
     savePlaybackSession();
   } catch (e) {
-    if (state.current !== t) return;
-    if (pendingPlaybackStart?.track === t) pendingPlaybackStart.playing = false;
+    if (obsolete()) return;
+    pendingPlaybackStart = null;
+    syncToggleIcon();
     savePlaybackSession();
+    if (options.recover) throw e;
     console.error(e);
     toast('播放失败：' + (e.message || e));
   }
@@ -2383,21 +2407,25 @@ function prev() {
 }
 function togglePlay() {
   const media = activeMedia();
+  if (playbackRecovery.pending) {
+    playbackRecovery.cancel();
+    audio.pause(); video.pause();
+    return;
+  }
   if (!media.src && !hls) {
     if (state.queue.length) playIndex(Math.max(0, state.qi));
     else toast('队列是空的，先去挑几首吧');
     return;
   }
-  if (media === video && videoUsesSeparateAudio()) {
-    if (video.paused) {
-      audio.currentTime = video.currentTime;
-      Promise.all([video.play(), audio.play()]).catch(() => {});
-    } else {
-      video.pause();
-      audio.pause();
-    }
-  } else if (media.paused) media.play().catch(() => {});
-  else media.pause();
+  if (state.current?.isLive) {
+    if (media.paused) media.play().catch(error => toast('播放失败：' + error.message));
+    else media.pause();
+  } else if (media.paused || media.error || (media === video && videoUsesSeparateAudio() && audio.error)) {
+    void playbackRecovery.resume();
+  } else {
+    media.pause();
+    if (media === video && videoUsesSeparateAudio()) audio.pause();
+  }
 }
 // 播放 / 暂停图标同步
 function syncToggleIcon() {
@@ -3329,6 +3357,7 @@ function paintProgressAt(frac) {
 }
 
 function bindMediaEvents(media) {
+  playbackRecovery.bind(media);
   media.addEventListener('timeupdate', () => {
     syncProgress(media);
     if (media === activeMedia()) recommendationProfiles.listeningTick(media.currentTime, !media.paused && !media.seeking && media.readyState >= 3);
@@ -3546,15 +3575,9 @@ video.addEventListener('seeking', () => resetDanmaku(video.currentTime));
 video.addEventListener('play', () => $('danmakuLayer').classList.remove('paused'));
 video.addEventListener('pause', () => $('danmakuLayer').classList.add('paused'));
 
-audio.addEventListener('error', () => {
-  if (state.current && !state.current.isLive) toast('播放出错，可尝试切换音质');
-});
+audio.addEventListener('error', () => playbackRecovery.handleError(audio));
 video.addEventListener('error', () => {
-  if (!videoModeOn() || !video.getAttribute('src')) return;
-  // 观看中途流报错（多为签名 URL 过期）：强制刷新重连，进度由 positionPreparedVideo 从音频侧同步
-  if (document.body.classList.contains('video-pending') || video.dataset.ready !== 'true') return;
-  toast('原视频流中断，正在重连…');
-  setVideoMode(true, true);
+  if (videoModeOn() && video.dataset.ready === 'true') playbackRecovery.handleError(video);
 });
 
 /* 分切段尾自动连播：timeupdate 粒度只有 ~250ms，发现段尾时旧流已经越界，
@@ -3893,7 +3916,7 @@ if (!Array.isArray(customPlaylists)) customPlaylists = [];
 const saveCustomPlaylists = () => {
   store.set(dataKey('biu-playlists'), customPlaylists);
   if (api.hasBridge && window.bili.storeSet) window.bili.storeSet(dataKey('biu-playlists'), customPlaylists);
-  recommendationProfiles.manager().refresh().catch(() => {});
+  recommendationProfiles.manager().ready().catch(() => {});
 };
 
 let plDialogMode = 'create'; // 'create' | 'delete'

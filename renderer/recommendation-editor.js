@@ -40,7 +40,7 @@
         <div class="profile-buttons">${profile.tags.map((v) => button(`忽略 ${v.name}`, 'ignore-tag', v.name)).join('')}</div>
         <div class="profile-form"><input aria-label="添加忽略标签" name="ignored-tag" maxlength="40" placeholder="输入不想参与画像的标签" value="${esc(ignoredText)}" />${button('添加忽略', 'ignore-input')}</div>
         <div class="profile-buttons">${['ignored', 'muted', 'blocked'].flatMap((type) => (state.daily?.[type] || []).filter((v) => v.active).map((v) => button(`恢复${type === 'blocked' ? '视频' : type === 'muted' ? '权重' : '标签'} ${v.name}`, `restore-${type}`, v.name))).join('')}</div>
-        <p>画像立即重算；当天每日推荐保持稳定，可在每日推荐中重新生成。</p>
+        <p>学习画像每 15 分钟批量更新，也可手动更新；当天每日推荐保持稳定。</p>
         ${!state.ready && state.error ? button('重新读取画像', 'retry') : ''}
         <div class="profile-buttons">${button('更新近期画像', 'refresh')}${button('新建画像', 'new')}${button(profile.id === 'auto' ? '编辑并另存' : '编辑画像', 'edit')}${profile.id !== 'auto' ? button('删除画像', 'delete') : ''}</div>
         ${removing ? `<p>删除「${esc(profile.name)}」？</p><div class="profile-buttons">${button('确认删除', 'confirm-delete')}${button('保留画像', 'cancel-delete')}</div>` : ''}

@@ -1,6 +1,6 @@
 {
   "name": "mobile-rn",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "main": "index.js",
   "dependencies": {
     "@expo/ui": "~57.0.16",

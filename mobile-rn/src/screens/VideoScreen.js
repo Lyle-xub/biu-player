@@ -21,7 +21,7 @@ export default function VideoScreen({ route, navigation }) {
   const routeTrack = (route.params && route.params.track) || {};
   const {
     current, playing, buffering, playError, togglePlay, seekTo, player,
-  } = usePlayer();
+  } = usePlayer(['current', 'playing', 'buffering', 'playError', 'togglePlay', 'seekTo', 'player']);
   const { position, duration } = usePlaybackProgress();
   // 路由参数里的 track 可能与当前曲目错位（切过歌）：画面跟随 current，元信息优先 current
   const track = current || routeTrack;

@@ -11,6 +11,8 @@ export default function ProfilePortrait({ profile, ready, flipped, onFlip }) {
   // parsing and mounting dozens of SVG nodes on the navigation JS thread.
   const artworkSource = useMemo(() => ({ uri: `data:image/svg+xml;base64,${Buffer.from(art.svg, 'utf8').toString('base64')}` }), [art.svg]);
   const turn = useRef(new Animated.Value(0)).current;
+  const frontTurn = useMemo(() => turn.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '-180deg'] }), [turn]);
+  const backTurn = useMemo(() => turn.interpolate({ inputRange: [0, 1], outputRange: ['180deg', '0deg'] }), [turn]);
   const [quote, setQuote] = useState(null);
   const [error, setError] = useState('');
   const [retry, setRetry] = useState(0);
@@ -32,7 +34,7 @@ export default function ProfilePortrait({ profile, ready, flipped, onFlip }) {
     <View style={styles.card}>
       <Animated.View pointerEvents={flipped ? 'none' : 'auto'} accessibilityElementsHidden={flipped}
         importantForAccessibility={flipped ? 'no-hide-descendants' : 'auto'}
-        style={[styles.face, { transform: [{ perspective: 900 }, { rotateY: turn.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '-180deg'] }) }, { rotateZ: '-3deg' }] }]}>
+        style={[styles.face, { transform: [{ perspective: 900 }, { rotateY: frontTurn }, { rotateZ: '-3deg' }] }]}>
         <TouchableOpacity style={styles.front} onPress={onFlip} activeOpacity={0.9}
           accessibilityRole="button" accessibilityLabel="翻转卡片，查看用户画像">
           <View style={styles.art}><Image source={artworkSource} style={StyleSheet.absoluteFill}
@@ -45,7 +47,7 @@ export default function ProfilePortrait({ profile, ready, flipped, onFlip }) {
       </Animated.View>
       <Animated.View pointerEvents={flipped ? 'auto' : 'none'} accessibilityElementsHidden={!flipped}
         importantForAccessibility={flipped ? 'auto' : 'no-hide-descendants'}
-        style={[styles.face, styles.back, { transform: [{ perspective: 900 }, { rotateY: turn.interpolate({ inputRange: [0, 1], outputRange: ['180deg', '0deg'] }) }] }]}>
+        style={[styles.face, styles.back, { transform: [{ perspective: 900 }, { rotateY: backTurn }] }]}>
         <Text style={styles.name} numberOfLines={1}>{profile.name}</Text>
         <Text style={styles.serial}>你的兴趣 · {profile.tags.length} 个标签</Text>
         <ScrollView style={styles.weights} nestedScrollEnabled showsVerticalScrollIndicator={false}>

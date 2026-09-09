@@ -40,7 +40,18 @@ test('production iOS and Android worklet factories execute in Hermes, including 
       if (compute('parse', compute('stringify', config)).secret !== config.secret) throw Error('config');
       const profile = compute('profileNormalize', {profiles:[{id:'p',name:'美女',tags:['cos']}],activeId:'p'});
       if (profile.profiles[0].tags[0].name !== 'cos') throw Error('profile');
+      const pendingLearning = {auto:{tags:['钢琴'],evidence:[{bvid:'BVdeferred',owner:'up',source:'likes',at:Date.now(),tags:['爵士']} ]}};
+      if (compute('profileNormalize',pendingLearning,false).auto.tags[0].name !== '钢琴') throw Error('untimed learning');
+      if (compute('profileNormalize',pendingLearning,true).auto.tags[0].name !== '爵士') throw Error('timed learning');
+      const prepared = compute('profileBuildPrepare', [{track:{bvid:'BVlearn',title:'钢琴演奏'},source:'likes'}], profile.auto, false);
+      if (prepared.batch.length !== 1) throw Error('profile prepare');
+      const learned = compute('profileBuildFinish', prepared.evidence, prepared.batch,
+        [{...prepared.batch[0],tags:['钢琴']}], profile.auto, true);
+      if (learned.samples !== 1 || learned.tags[0].name !== '钢琴') throw Error('profile finish');
+      const failed = compute('profileBuildFinish', prepared.evidence, prepared.batch, [null], profile.auto, true);
+      if (failed.failures !== 1 || failed.evidence[0].retryAt <= Date.now()) throw Error('profile retry');
       const daily = compute('profileNormalize', {daily:{shown:[{bvid:'BVseen',at:Date.now()-60000}]}}).daily;
+      if (compute('dailyNormalize', daily).shown[0].bvid !== 'BVseen') throw Error('daily progress history');
       const selected = compute('dailySelect', [
         {bvid:'BVseen',title:'钢琴作品一',duration:180,tid:3},
         {bvid:'BVfresh',title:'钢琴作品二',duration:180,tid:3}
@@ -55,6 +66,11 @@ test('production iOS and Android worklet factories execute in Hermes, including 
       if(compute('dailySelectSongs', [{...candidate,bvid:'BVother'}], saved).length) throw Error('song exposure');
       const library = compute('librarySnapshot', fixture.library).library;
       if (JSON.stringify(library) !== ${JSON.stringify(JSON.stringify(expected))}) throw Error('library exports');
+      const wire = compute('lanReply', {text:'音乐🎵'.repeat(20000)});
+      if (compute('lanParse', wire.parts).text !== '音乐🎵'.repeat(20000)) throw Error('fragmented sync utf8');
+      if (Object.keys(compute('libraryChanges', library, library, library)).length) throw Error('unchanged sync');
+      const changed = compute('libraryChanges', library, {...library,likes:[...library.likes,{bvid:'BVsyncNew'}]}, library);
+      if (!changed.likes.value.some(t => t.bvid === 'BVsyncNew') || JSON.parse(changed.likes.raw).length !== changed.likes.value.length) throw Error('sync changes');
       const decoded = compute('unseal', fixture.payload, fixture.key, fixture.snapshotId);
       const sealed = compute('seal', decoded, fixture.key, 'ab'.repeat(12), 'phone', []);
       if (JSON.stringify(compute('unseal', sealed.payload, fixture.key, sealed.snapshotId)) !== JSON.stringify(decoded)) throw Error('crypto');
@@ -109,4 +125,30 @@ test('real worker executes a large sync merge while the caller event loop keeps 
     assert.ok(!result.likes.some(track => track.bvid === 'BVworker0'), 'three-way merge still preserves deletions');
     assert.ok(result.likes.some(track => track.bvid === 'BVnew'));
   } finally { clearInterval(timer); await worker.terminate(); }
+});
+
+test('large profile sorts reuse collators instead of allocating Android ICU objects for each comparison', () => {
+  let allocations = 0, comparisons = 0;
+  const sandbox = vm.createContext({ module: { exports: {} }, Intl: { Collator: function (...args) {
+    allocations++;
+    const collator = new Intl.Collator(...args);
+    return { compare(a, b) { comparisons++; return collator.compare(a, b); } };
+  } } });
+  vm.runInContext("String.prototype.localeCompare = function () { throw Error('uncached native collator'); };", sandbox);
+  vm.runInContext(fs.readFileSync(file, 'utf8'), sandbox);
+  const compute = sandbox.module.exports();
+  const profile = { auto: { evidence: Array.from({ length: 1200 }, (_, i) => ({
+    bvid: 'BVsort' + (1200 - i), source: 'likes', at: 1, tags: ['钢琴'], owner: '测试',
+  })) }, daily: { candidates: Array.from({ length: 600 }, (_, i) => ({
+    bvid: 'BVcandidate' + (600 - i), title: '音乐', duration: 180, at: 1,
+  })) } };
+  const library = { version: 1, likes: [], playlists: [], recommendation: compute('profileNormalize', profile) };
+  for (let i = 0; i < 3; i++) assert.equal(compute('librarySnapshot', library).library.recommendation.auto.evidence.length, 1200);
+  assert.ok(comparisons > 5000, 'exercise repeated sorting in full sync normalization');
+  assert.equal(allocations, 2, 'one collator per shared module, reused across snapshots');
+  const artSandbox = vm.createContext({ module: { exports: {} }, Intl: sandbox.Intl });
+  vm.runInContext(fs.readFileSync(path.join(root, '../renderer/profile-presentation.js'), 'utf8'), artSandbox);
+  const tags = [{ name: '钢琴', weight: 50 }, { name: '音乐', weight: 50 }];
+  for (let i = 0; i < 10; i++) artSandbox.module.exports.artwork({ name: '画像', tags });
+  assert.equal(allocations, 3, 'settings artwork also reuses its collator');
 });

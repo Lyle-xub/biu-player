@@ -3,6 +3,10 @@
   if (typeof module === 'object' && module.exports) module.exports = factory();
   else root.BiuProfilePresentation = factory();
 })(typeof window === 'object' ? window : this, function () {
+  // Hermes delegates localeCompare to Android ICU. Reuse its native collator
+  // instead of allocating one per comparison during large sync/profile sorts.
+  const compareText = typeof Intl !== 'undefined' && Intl.Collator
+    ? new Intl.Collator().compare : (a, b) => a.localeCompare(b);
   const themes = [
     { id: 'music', label: '旋律之间', word: 'RESONANCE', category: 'j', color: '#bb6653', match: /音乐|歌|钢琴|摇滚|爵士|电音|古典|民谣|rap|r&b|jazz|lofi|live|演奏/i },
     { id: 'anime', label: '想象之外', word: 'DAYDREAM', category: 'a', color: '#7879ae', match: /动漫|动画|二次元|cos|初音|术力口|番剧|日漫|vocaloid/i },
@@ -21,7 +25,7 @@
   }
   function artwork(profile) {
     const theme = themeFor(profile);
-    const tags = [...(profile?.tags || [])].sort((a, b) => a.name.localeCompare(b.name));
+    const tags = [...(profile?.tags || [])].sort((a, b) => compareText(a.name, b.name));
     let seed = 2166136261;
     for (const ch of JSON.stringify([profile?.name, tags])) seed = Math.imul(seed ^ ch.codePointAt(0), 16777619) >>> 0;
     const serial = String(seed % 1000).padStart(3, '0');

@@ -3,32 +3,9 @@ import createCompute from './compute.generated.js';
 import { recordTiming } from './diagnostics';
 
 let runtime;
-// Worklets caches/freezes transferred objects. Never hand it live React/store
-// objects (playback metadata can be enriched later). Bound cloning per JS turn.
-async function copyArguments(args) {
-  const output = [], pending = [[args, output]];
-  const seen = new WeakMap([[args, output]]);
-  let budget = performance.now();
-  while (pending.length) {
-    const [source, target] = pending.pop();
-    for (const key of Object.keys(source)) {
-      const value = source[key];
-      if (key === '__proto__') Object.defineProperty(target, key, { value: undefined, writable: true, enumerable: true, configurable: true });
-      if (value && typeof value === 'object') {
-        if (seen.has(value)) target[key] = seen.get(value);
-        else {
-          target[key] = Array.isArray(value) ? [] : {};
-          seen.set(value, target[key]); pending.push([value, target[key]]);
-        }
-      } else target[key] = value;
-      if (performance.now() - budget >= 4) {
-        await new Promise(resolve => setTimeout(resolve, 0));
-        budget = performance.now();
-      }
-    }
-  }
-  return output;
-}
+// These operations consume JSON data. Native JSON encoding is much cheaper than
+// Worklets recursively cloning/freezing thousands of JS objects (hundreds of ms
+// on Android). Strings also isolate live state from Worklets' shareable cache.
 export async function backgroundCompute(operation, ...args) {
   // Allocate lazily, so importing a screen never creates a worker on navigation.
   const totalStarted = performance.now();
@@ -36,19 +13,23 @@ export async function backgroundCompute(operation, ...args) {
     runtime = createWorkletRuntime({ name: 'biu-data' });
     recordTiming('runtime-init', performance.now() - totalStarted);
   }
-  const copied = await copyArguments(args);
+  const encoded = args.map(value => JSON.stringify(value));
   recordTiming(operation, performance.now() - totalStarted, 'prepare');
   const started = performance.now();
-  const task = runOnRuntimeAsync(runtime, (name, values) => {
+  const task = runOnRuntimeAsync(runtime, (name, encodedValues) => {
     'worklet';
     const started = performance.now();
     globalThis.__biuCompute ||= createCompute();
+    const values = encodedValues.map(raw => raw === undefined ? undefined : JSON.parse(raw));
     const value = globalThis.__biuCompute(name, ...values);
-    return { value, duration: performance.now() - started };
-  }, operation, copied);
+    return { value: JSON.stringify(value), duration: performance.now() - started };
+  }, operation, encoded);
   recordTiming(operation, performance.now() - started, 'dispatch');
   const result = await task;
   recordTiming(operation, result.duration, 'worker');
+  const received = performance.now();
+  const value = result.value === undefined ? undefined : JSON.parse(result.value);
+  recordTiming(operation, performance.now() - received, 'receive');
   recordTiming(operation, performance.now() - totalStarted, 'total');
-  return result.value;
+  return value;
 }

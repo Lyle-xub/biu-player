@@ -23,7 +23,12 @@ class BiuVideoCloudModule : Module() {
   companion object { init { System.loadLibrary("biu_cloud") } }
   // Encoding can take minutes. Never occupy Expo's shared AsyncFunctionQueue:
   // file reads and other modules must remain available while sync is running.
-  private val codecDispatcher = Executors.newSingleThreadExecutor { task -> Thread(task, "biu.video-cloud") }.asCoroutineDispatcher()
+  private val codecDispatcher = Executors.newSingleThreadExecutor { task ->
+    Thread({
+      android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+      task.run()
+    }, "biu.video-cloud")
+  }.asCoroutineDispatcher()
   private val codecScope = CoroutineScope(SupervisorJob() + codecDispatcher)
   @Volatile private var cancelled = false
   private external fun encoder(payload: ByteArray, sid: String): Long
@@ -82,6 +87,7 @@ class BiuVideoCloudModule : Module() {
     try {
       val format=MediaFormat.createVideoFormat("video/avc",width,height).apply {
         setInteger(MediaFormat.KEY_COLOR_FORMAT,MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
+        setInteger(MediaFormat.KEY_PRIORITY,1) // Non-realtime cloud encoding yields to playback.
         setInteger(MediaFormat.KEY_BIT_RATE,4_000_000);setInteger(MediaFormat.KEY_FRAME_RATE,30);setInteger(MediaFormat.KEY_I_FRAME_INTERVAL,1)
       }
       codec.configure(format,null,null,MediaCodec.CONFIGURE_FLAG_ENCODE);codec.start()
@@ -147,6 +153,7 @@ class BiuVideoCloudModule : Module() {
       extractor.setDataSource(source.absolutePath)
       val track=(0 until extractor.trackCount).firstOrNull {extractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("video/")==true} ?: error("未找到视频轨道")
       extractor.selectTrack(track);val format=extractor.getTrackFormat(track)
+      format.setInteger(MediaFormat.KEY_PRIORITY,1)
       format.setInteger(MediaFormat.KEY_COLOR_FORMAT,MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
       codec=MediaCodec.createDecoderByType(format.getString(MediaFormat.KEY_MIME)!!);codec.configure(format,null,null,0);codec.start()
       var inputDone=false;var outputDone=false;var last=-250000L;var scanned=0;val info=MediaCodec.BufferInfo()

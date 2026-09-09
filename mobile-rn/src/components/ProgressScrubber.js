@@ -1,6 +1,7 @@
-import React, { useLayoutEffect, useRef, useState } from 'react';
+import React, { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Animated, Easing, StyleSheet, Text, View } from 'react-native';
 import { colors, fmtDur } from '../theme';
+import useAppForeground from '../performance/useAppForeground';
 
 const clamp = (value) => Math.max(0, Math.min(1, value));
 
@@ -19,9 +20,18 @@ export default function ProgressScrubber({ position, duration, isLive, playing, 
   const animated = useRef(new Animated.Value(progress)).current;
   const touch = useRef(new Animated.Value(0)).current;
   const revision = useRef(seekRevision);
+  const foreground = useAppForeground();
+  const transforms = useMemo(() => ({
+    thumbX: animated.interpolate({ inputRange: [0, 1], outputRange: [0, width] }),
+    bubbleX: animated.interpolate({ inputRange: [0, 1], outputRange: [0, Math.max(0, width - 58)] }),
+    bubbleY: touch.interpolate({ inputRange: [0, 1], outputRange: [5, 0] }),
+    trackScale: touch.interpolate({ inputRange: [0, 1], outputRange: [1, 1.6] }),
+    fillX: animated.interpolate({ inputRange: [0, 1], outputRange: [-width, 0] }),
+    thumbScale: touch.interpolate({ inputRange: [0, 1], outputRange: [1, 1.5] }),
+  }), [animated, touch, width]);
 
   useLayoutEffect(() => {
-    if (dragging.current) return undefined;
+    if (!foreground || dragging.current) return undefined;
     // An explicit seek is already under the finger. Do not animate from an old tick.
     if (revision.current !== seekRevision || !playing) animated.setValue(progress);
     revision.current = seekRevision;
@@ -31,15 +41,16 @@ export default function ProgressScrubber({ position, duration, isLive, playing, 
     });
     animation.start();
     return () => animation.stop();
-  }, [position, duration, playing, seekRevision, progress, animated]);
+  }, [position, duration, playing, seekRevision, progress, animated, foreground]);
   useLayoutEffect(() => {
+    if (!foreground) { dragging.current = false; setActive(false); return undefined; }
     const animation = Animated.timing(touch, {
       toValue: active ? 1 : 0, duration: active ? 120 : 180,
       easing: Easing.out(Easing.cubic), useNativeDriver: true, isInteraction: false,
     });
     animation.start();
     return () => animation.stop();
-  }, [active, touch]);
+  }, [active, touch, foreground]);
 
   const updateAt = (pageX, fallbackX, forceLabel = false) => {
     const current = values.current;
@@ -96,7 +107,6 @@ export default function ProgressScrubber({ position, duration, isLive, playing, 
     onResponderTerminate: () => finish(undefined, undefined, true),
   };
   const shown = active ? preview : position;
-  const translateX = animated.interpolate({ inputRange: [0, 1], outputRange: [0, width] });
 
   if (isLive) return <Text style={styles.liveHint}>直播中 · 无法拖动进度</Text>;
   return <View>
@@ -111,18 +121,16 @@ export default function ProgressScrubber({ position, duration, isLive, playing, 
       onLayout={(e) => setWidth(Math.max(1, e.nativeEvent.layout.width))}
       {...responderHandlers}>
       <Animated.View pointerEvents="none" style={[styles.bubble, { opacity: touch,
-        transform: [{ translateX: animated.interpolate({ inputRange: [0, 1], outputRange: [0, Math.max(0, width - 58)] }) },
-          { translateY: touch.interpolate({ inputRange: [0, 1], outputRange: [5, 0] }) }],
+        transform: [{ translateX: transforms.bubbleX },
+          { translateY: transforms.bubbleY }],
       }]}><Text style={styles.bubbleText}>{fmtDur(preview)}</Text></Animated.View>
       <Animated.View pointerEvents="none" style={[styles.track, {
-        transform: [{ scaleY: touch.interpolate({ inputRange: [0, 1], outputRange: [1, 1.6] }) }],
+        transform: [{ scaleY: transforms.trackScale }],
       }]}>
-        <Animated.View style={[styles.fill, { transform: [{ translateX: animated.interpolate({
-          inputRange: [0, 1], outputRange: [-width, 0],
-        }) }] }]} />
+        <Animated.View style={[styles.fill, { transform: [{ translateX: transforms.fillX }] }]} />
       </Animated.View>
       <Animated.View pointerEvents="none" style={[styles.thumb, {
-        transform: [{ translateX }, { scale: touch.interpolate({ inputRange: [0, 1], outputRange: [1, 1.5] }) }],
+        transform: [{ translateX: transforms.thumbX }, { scale: transforms.thumbScale }],
       }]} />
     </View>
     <View style={styles.timeRow}>

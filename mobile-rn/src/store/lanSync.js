@@ -46,7 +46,7 @@ export async function lanRequest(peer, scope, path, payload, signal) {
           ...(payload ? { 'Content-Type': 'application/json' } : {}) },
         ...(payload ? { body: await backgroundCompute('stringify', payload) } : {}),
       });
-      const result = await response.json();
+      const result = await backgroundCompute('parse', await response.text());
       receivedResponse = true;
       if (signal?.aborted) throw new Error('同步已取消');
       if (!response.ok) throw new Error(result.error || '设备同步失败');

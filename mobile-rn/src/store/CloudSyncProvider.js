@@ -16,7 +16,7 @@ const Context=createContext(null);
 export const useCloudSync=()=>useContext(Context);
 
 export function CloudSyncProvider({children}) {
-  const player=usePlayer(),latest=useRef(player);latest.current=player;
+  const player=usePlayer(['account', 'libraryReady', 'getSyncLibrary', 'applySyncLibrary']),latest=useRef(player);latest.current=player;
   const runner=useRef(null),accountUpdates=useRef(Promise.resolve());
   const [ready,setReady]=useState(false),[saving,setSaving]=useState(false),[status,setStatus]=useState({});
   const mounted=useRef(true);

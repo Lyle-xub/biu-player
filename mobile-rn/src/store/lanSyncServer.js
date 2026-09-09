@@ -31,20 +31,36 @@ export function startLanReceiver({ tcp, scope, deviceId, getLibrary, applyLibrar
       if (stopped || socket.destroyed) return;
       dispatched = true;
       try {
-        const body = await backgroundCompute('stringify', { version: 2, account: scope, deviceId, ...data });
-        if (!stopped && !socket.destroyed) socket.end(`HTTP/1.1 ${code} ${code === 200 ? 'OK' : 'Error'}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n${body}`);
+        const body = await backgroundCompute('lanReply', { version: 2, account: scope, deviceId, ...data });
+        if (stopped || socket.destroyed) return;
+        const write = (part, encoding) => new Promise((resolve, reject) => {
+          const closed = () => done(new Error('同步连接已关闭'));
+          const done = (error) => {
+            socket.removeListener('close', closed);
+            error ? reject(error) : resolve();
+          };
+          socket.once('close', closed);
+          try { socket.write(part, encoding, done); } catch (error) { done(error); }
+        });
+        await write(`HTTP/1.1 ${code} ${code === 200 ? 'OK' : 'Error'}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: ${body.length}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n`, 'utf8');
+        // Each native write acknowledges a bounded block before submitting another.
+        for (const part of body.parts) {
+          if (stopped || socket.destroyed) return;
+          await write(part, 'base64');
+        }
+        socket.end();
       } catch { socket.destroy(); }
     };
     const handle = async () => {
       try {
         check();
-        if (request.path !== '/v2/ack' && isRecommendationBusy()) { reply(503, { error: '正在加载首页，请稍后重试同步' }); return; }
+        if (request.path !== '/v2/ack' && isRecommendationBusy()) { reply(503, { error: '正在获取推荐，请稍后重试同步' }); return; }
         if (request.path === '/v2/status') {
           const { revision } = await snapshot(await getLibrary(scope)); check(); lastSeen = Date.now();
           if (lastSync) onStatus(status());
           reply(200, { revision, discoveryProfiles: true }); return;
         }
-        const body = await backgroundCompute('parse', Buffer.concat(chunks, received).toString('utf8'));
+        const body = await backgroundCompute('lanParse', chunks);
         check(); if (socket.destroyed) return;
         chunks = [];
         if (!/^[\w-]{8,80}$/.test(body.clientId || '') || body.clientId === deviceId) throw new Error('设备标识无效');
@@ -106,7 +122,7 @@ export function startLanReceiver({ tcp, scope, deviceId, getLibrary, applyLibrar
         }
         received += data.length;
         if (received > request.length) throw new Error('请求长度不匹配');
-        chunks.push(data);
+        chunks.push(Buffer.from(data).toString('base64'));
         if (received === request.length) { dispatched = true; handle(); }
       } catch (error) { reply(400, { error: error.message || '同步请求无效' }); }
     });

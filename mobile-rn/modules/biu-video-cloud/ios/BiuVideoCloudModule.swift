@@ -7,7 +7,7 @@ import Dispatch
 
 public class BiuVideoCloudModule: Module {
   // Keep long codec work off Expo's shared serial AsyncFunctionQueue.
-  private let codecQueue = DispatchQueue(label: "biu.video-cloud", qos: .utility)
+  private let codecQueue = DispatchQueue(label: "biu.video-cloud", qos: .background)
   private let lock = NSLock()
   private var cancelled = false
   private func cancel(_ value: Bool) { lock.lock(); cancelled=value; lock.unlock() }

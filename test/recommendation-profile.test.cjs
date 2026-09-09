@@ -336,7 +336,7 @@ test('account managers save multiple profiles, reload selection, preserve failed
   assert.deepEqual(await a.recommend({}), []); assert.equal(calls.length, count);
 });
 
-test('automatic learning accumulates beyond 24, drains pending work and survives restart without counting repeats', async (t) => {
+test('scheduled learning accumulates beyond 24 at fifteen-minute intervals and survives restart without counting repeats', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let disk, calls = 0, likes = Array.from({ length: 36 }, (_, i) => ({ bvid: `BVaccumulate${i}`, mid: i }));
   const options = { read: async () => disk, write: async (value) => { disk = value; }, getLikes: () => likes,
@@ -346,7 +346,7 @@ test('automatic learning accumulates beyond 24, drains pending work and survives
     await manager.refresh();
     assert.equal(disk.auto.samples, 12); assert.equal(disk.auto.pending, 24);
     for (let i = 0; i < 2; i++) {
-      t.mock.timers.tick(4000); await new Promise(setImmediate);
+      t.mock.timers.tick(15 * 60 * 1000); await new Promise(setImmediate);
     }
     assert.equal(disk.auto.samples, 36); assert.equal(disk.auto.sources.likes, 36);
     assert.equal(disk.auto.pending, 0); assert.equal(calls, 36);
@@ -417,4 +417,39 @@ test('short Latin profile interests cannot match inside software names and cospl
   const hosiery = ['黑丝', '白丝', '连裤袜', '丝袜', '软件应用'].map((tag) => ({ bvid: tag, tags: [tag] }));
   assert.deepEqual(R.rank(hosiery, { tags: ['丝袜'] }, [], 18, { tagsOnly: true }).map((v) => v.bvid), ['黑丝', '白丝', '连裤袜', '丝袜']);
   assert.deepEqual(R.rank(hosiery, { tags: ['黑丝'] }, [], 18, { tagsOnly: true }).map((v) => v.bvid), ['黑丝']);
+});
+
+
+test('learning records persist immediately but weights update only on the timer or an explicit refresh', async t => {
+  t.mock.timers.enable({apis:['setTimeout']});
+  let disk = R.normalize({auto:{tags:['钢琴'],evidence:[]}}), requests = 0;
+  const options = {read:async()=>disk,write:async value=>{disk=value;},getLikes:()=>[],
+    get:async()=>{requests++;return {status:200,body:JSON.stringify({code:0,data:[{tag_name:'爵士'}]})};}};
+  let manager = R.createManager(options);
+  try {
+    await manager.ready(); manager.setActive(true);
+    const before = structuredClone(manager.getSnapshot().auto.tags);
+    await manager.recordListening({id:'session-timed',at:Date.now(),seconds:120,manual:true,
+      track:{bvid:'BVtimedLearning',mid:'1',duration:180,title:'爵士演奏',tags:['爵士']}});
+    manager.observeFeed([{bvid:'BVtimedFeed',title:'爵士',tags:['爵士']}]);
+    await new Promise(setImmediate); await manager.exportSync();
+    assert.equal(disk.daily.events.length,1);
+    assert.deepEqual(disk.auto.tags,before);
+    assert.equal(requests,0);
+    await manager.applySync(structuredClone(disk),disk);
+    assert.deepEqual(manager.getSnapshot().auto.tags,before, 'sync validation does not relearn recorded events');
+    manager.dispose(); manager=R.createManager(options); await manager.ready();
+    assert.deepEqual(manager.getSnapshot().auto.tags,before, 'restart retains the last learned weights');
+    t.mock.timers.tick(15*60*1000-1); await new Promise(setImmediate);
+    assert.equal(requests,0);
+    t.mock.timers.tick(1); await new Promise(setImmediate); await manager.exportSync();
+    assert.equal(requests,1);
+    assert.equal(manager.getSnapshot().auto.tags[0].name,'爵士');
+    manager.setActive(false);
+    t.mock.timers.tick(30*60*1000); await new Promise(setImmediate);
+    assert.equal(requests,1,'inactive account has no scheduled work');
+    manager.setActive(true);
+    await manager.refresh(true);
+    assert.equal(manager.getSnapshot().auto.tags[0].name,'爵士');
+  } finally {manager.dispose();}
 });
