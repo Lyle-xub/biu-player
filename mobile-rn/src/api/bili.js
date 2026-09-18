@@ -77,15 +77,16 @@ async function jget(url, opts) {
 /* ---------- 接口 ---------- */
 
 // 音乐区排行（用户主动选择热榜时使用）
-export async function ranking() {
+export async function ranking({ music = true, ...options } = {}) {
+  const rid = music ? 3 : 0;
   try {
-    const data = await jget('https://api.bilibili.com/x/web-interface/ranking/v2?rid=3&ps=100');
+    const data = await jget(`https://api.bilibili.com/x/web-interface/ranking/v2?rid=${rid}&ps=100`, options);
     return (data.list || []).map(toTrack);
   } catch (error) {
-    if (Number(error.code) !== -352) throw error;
+    if (options.signal?.aborted || Number(error.code) !== -352) throw error;
     // The v2 chart can reject anonymous sessions. The public music-region
     // chart returns data as an array and does not require an account.
-    const data = await jget('https://api.bilibili.com/x/web-interface/ranking/region?rid=3&day=3&original=0');
+    const data = await jget(`https://api.bilibili.com/x/web-interface/ranking/region?rid=${rid}&day=3&original=0`, options);
     return (Array.isArray(data) ? data : data.list || []).map(toTrack);
   }
 }
@@ -227,7 +228,7 @@ export async function musicRecommendations(candidates, onBatch, opts = {}) {
   return music;
 }
 
-// Home always uses the account's Web recommendation feed.
+// Home uses Web recommendations for both signed-in accounts and anonymous visitors.
 export async function homeRecommendations(page = 0, limit = 20, { music = false, onBatch, onPageLoaded, signal } = {}) {
   const opts = { signal, timeout: 6000, retry: false, detailConcurrency: 2 };
   if (signal?.aborted) throw new Error('推荐请求已取消');

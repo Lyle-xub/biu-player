@@ -107,10 +107,6 @@ export default function HomeScreen({ navigation }) {
       let list;
       if (m === 'rank') {
         list = await wait(bili.ranking());
-      } else if (!account?.isLogin) {
-        // Guests use the public recommendation endpoint only as their source;
-        // logged-in feeds never mix in ranking items as a supplement.
-        list = await wait(bili.ranking());
       } else {
         const seen = new Set(exclude);
         list = [];
@@ -184,6 +180,11 @@ export default function HomeScreen({ navigation }) {
           // Start distinct Web pages immediately; seed-related lookups stream alongside them.
           await Promise.all(Array.from({ length: 3 }, worker));
           await Promise.all(relatedTasks);
+          // Anonymous Web feeds can be rejected by Bilibili. Keep a public
+          // fallback, but use it only when the actual feed produced no cards.
+          if (!list.length && !account?.isLogin && !controller.signal.aborted && token === requestRef.current) {
+            append(await wait(bili.ranking({ music: recommendMode !== 'all', signal: pages.signal, timeout: 6000 })));
+          }
         } finally {
           controller.signal.removeEventListener('abort', cancelPages);
         }
@@ -251,14 +252,14 @@ export default function HomeScreen({ navigation }) {
   useEffect(() => () => { screenActive.current = false; requestRef.current += 1; activeRequest.current?.abort(); }, []);
   const previousAccount = useRef(accountKey);
   useEffect(() => {
-    if (account === null || mode !== 'recommend') return;
+    if (mode !== 'recommend') return;
     // Only account changes clear personal content. Profile sync/refresh retains cards until replacement succeeds.
     if (previousAccount.current !== accountKey) {
       setTracks([]); tracksRef.current = []; freshIdxRef.current = 0; profilePageRef.current = 0;
     }
     previousAccount.current = accountKey;
     load(false, 'recommend');
-  }, [recommendMode, accountKey, account === null, recommendationManager, selection]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [recommendMode, accountKey, recommendationManager, selection]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const switchMode = (m) => {
     setMode(m);

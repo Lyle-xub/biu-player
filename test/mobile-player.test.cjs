@@ -255,6 +255,13 @@ test('anonymous music ranking falls back on -352 while preserving other failures
   code = -500;
   await assert.rejects(api.ranking(), (error) => error.code === -500);
   assert.equal(requests.length, 3, 'unrelated failures are not retried against other endpoints');
+  code = -352;
+  await api.ranking({ music: false });
+  assert.match(requests.at(-2), /rid=0&ps=100$/);
+  assert.match(requests.at(-1), /rid=0&day=3&original=0$/);
+  const controller = new AbortController(); controller.abort();
+  await assert.rejects(api.ranking({ signal: controller.signal }), error => error.code === -352);
+  assert.equal(requests.length, 6, 'cancellation never starts another fallback request');
 });
 
 test('system lyrics share offsets and seek timing, and cannot return after disable or unmount', async () => {
@@ -1405,8 +1412,8 @@ test('home fills the first fifteen unique recommendations and keeps subsequent p
     tree.update(React.createElement(Home, { navigation: { navigate() {} } }));
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
-  assert.equal(rankRequests, 1, 'guest recommendations switch to the music ranking');
-  checkRecommendations(20);
+  assert.equal(rankRequests, 0, 'guests retain the paginated Web recommendation feed');
+  checkRecommendations(90);
   account = { isLogin: true };
   recommendMode = 'music';
   await act(async () => {
@@ -1417,7 +1424,7 @@ test('home fills the first fifteen unique recommendations and keeps subsequent p
   const musicCount = Math.min(Math.max(...musicRequests), 4) * 5;
   checkRecommendations(musicCount);
   const musicStart = musicRequests.length;
-  assert.equal(rankRequests, 1, 'enough personalized music needs no ranking supplement');
+  assert.equal(rankRequests, 0, 'enough personalized music needs no ranking supplement');
   await act(async () => {
     tree.root.findByType('FlatList').props.onScrollBeginDrag();
     tree.root.findByType('FlatList').props.onScrollEndDrag({ nativeEvent: {
@@ -1430,7 +1437,7 @@ test('home fills the first fifteen unique recommendations and keeps subsequent p
   const cards = tree.root.findAllByType('TrackCard');
   checkRecommendations(20);
   assert.equal(cards.filter((card) => card.props.track.recommendationReason === '音乐热榜').length, 0);
-  assert.equal(rankRequests, 1);
+  assert.equal(rankRequests, 0);
   const beforeFailure = musicRequests.length;
   failRecommendations = true;
   await act(async () => {
@@ -1496,7 +1503,7 @@ test('home leaves a usable feed and empty state even with fewer than six guest r
     const load = loader({
       'react-native': { ...rn, RefreshControl: 'RefreshControl' }, 'react-native-safe-area-context': safeArea,
       'src/api/client': { initClient: async () => {} },
-      'src/api/bili': { ranking: async () => Array.from({ length: count }, (_, i) => ({ bvid: `BV${i}`, title: 'Song' })) },
+      'src/api/bili': { homeRecommendations: async () => [], ranking: async () => Array.from({ length: count }, (_, i) => ({ bvid: `BV${i}`, title: 'Song' })) },
       'src/player/PlayerContext': { usePlayer: () => ({ account: { isLogin: false }, likes: [] }) },
       'src/components/TrackCard': { default: 'TrackCard', __esModule: true },
       'src/components/HomeBanner': { default: 'HomeBanner', __esModule: true },
@@ -1506,7 +1513,7 @@ test('home leaves a usable feed and empty state even with fewer than six guest r
     let tree;
     await act(async () => { tree = create(React.createElement(Home, { navigation: {} })); });
     assert.equal(tree.root.findAllByType('TrackCard').length, count ? 1 : 0);
-    if (!count) assert.match(tree.root.findAllByType('Text').map((node) => node.props.children).join(''), /暂时没有内容/);
+    if (!count) assert.match(tree.root.findAllByType('Text').map((node) => node.props.children).join(''), /暂未获取足够推荐/);
     await act(async () => tree.unmount());
   }
 });
@@ -6048,4 +6055,60 @@ test('split recognition uses NCM first, Shazam fallback and releases native WASM
   const html = require('../mobile-rn/src/split/editor.generated.json');
   new vm.Script(html.slice(html.indexOf('<script>') + 8, html.lastIndexOf('</script>')));
   assert.ok(fs.readFileSync(path.join(root, 'src/split/runtime.js'), 'utf8').includes('return identifyAudioClip('));
+});
+
+test('guest home starts before account hydration, retains cards when signed out and paginates Web recommendations', async () => {
+  let account = null, requests = [], tree;
+  const load = loader({
+    'react-native-safe-area-context': safeArea,
+    'src/api/bili': { homeRecommendations: async (page, limit, options) => {
+      requests.push({ page, music: options.music });
+      return Array.from({ length: 15 }, (_, i) => ({ bvid: `BVguest${page}-${i}`, title: 'Guest recommendation' }));
+    }, ranking: () => { throw Error('healthy anonymous feed must not use ranking'); } },
+    'src/player/PlayerContext': { usePlayer: () => ({ account, likes: [], recommendMode: 'all' }) },
+    'src/components/TrackCard': { default: 'TrackCard', __esModule: true },
+    'src/components/HomeBanner': { default: 'HomeBanner', __esModule: true },
+    'src/screens/DailyScreen': { DailyCard: 'DailyCard' }, 'src/components/icons': iconMock,
+  });
+  const Home = load('src/screens/HomeScreen.js').default, navigation = {};
+  try {
+    await act(async () => { tree = create(React.createElement(Home, { navigation })); });
+    assert.equal(requests.length, 3, 'network account detection and library hydration do not block the public feed');
+    assert.equal(tree.root.findAllByType('TrackCard').length, 40);
+    account = { isLogin: false };
+    await act(async () => tree.update(React.createElement(Home, { navigation })));
+    assert.equal(requests.length, 3, 'guest hydration does not refresh away the already visible cards');
+    await act(async () => { const list = tree.root.findByType('FlatList'); list.props.onScrollBeginDrag(); list.props.onEndReached(); });
+    assert.deepEqual(requests.map(r => r.page), [0,1,2,3,4,5]);
+    assert.ok(requests.every(r => !r.music));
+    assert.equal(tree.root.findAllByType('TrackCard').length, 85);
+  } finally { if (tree) await act(async () => tree.unmount()); }
+});
+
+test('guest home falls back within the selected partition and retains visible cards if retry fails', async () => {
+  for (const mode of ['music', 'all']) {
+    let rejectFallback = false, tree; const fallback = [];
+    const load = loader({
+      'react-native-safe-area-context': safeArea,
+      'src/api/bili': { homeRecommendations: async () => { throw Error('anonymous Web feed unavailable'); },
+        ranking: async options => { fallback.push(options); if (rejectFallback) throw Error('public chart unavailable');
+          return Array.from({ length: 16 }, (_, i) => ({ bvid: `BVfallback${i}`, title: 'Public recommendation' })); } },
+      'src/player/PlayerContext': { usePlayer: () => ({ account: { isLogin: false }, likes: [], recommendMode: mode }) },
+      'src/components/TrackCard': { default: 'TrackCard', __esModule: true },
+      'src/components/HomeBanner': { default: 'HomeBanner', __esModule: true },
+      'src/screens/DailyScreen': { DailyCard: 'DailyCard' }, 'src/components/icons': iconMock,
+    });
+    const Home = load('src/screens/HomeScreen.js').default;
+    try {
+      await act(async () => { tree = create(React.createElement(Home, { navigation: {} })); });
+      assert.equal(fallback.length, 1);
+      assert.equal(fallback[0].music, mode === 'music');
+      assert.ok(fallback[0].signal instanceof AbortSignal);
+      assert.equal(tree.root.findAllByType('TrackCard').length, 11);
+      rejectFallback = true;
+      await act(async () => tree.root.findByType('FlatList').props.refreshControl.props.onRefresh());
+      assert.equal(tree.root.findAllByType('TrackCard').length, 11, 'a failed refresh keeps the public feed visible');
+      assert.match(tree.root.findAllByType('Text').map(n => n.props.children).join(''), /public chart unavailable/);
+    } finally { if (tree) await act(async () => tree.unmount()); }
+  }
 });
