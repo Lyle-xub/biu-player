@@ -1,6 +1,7 @@
 import { yieldToInput as yieldDiscoveryWork } from '../updates/networkGate';
 export { yieldToInput as yieldDiscoveryWork } from '../updates/networkGate';
-import { rank } from '../../../renderer/recommendation-profile';
+import { discovery } from '../../../renderer/recommendation-profile';
+const { rank } = discovery;
 import { interests as profileInterests } from '../../../renderer/profile-interest';
 import { analysis } from '../recommendation/localAnalysis';
 import { videoTags, musicRecommendations } from '../api/bili';

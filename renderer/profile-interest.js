@@ -54,14 +54,14 @@
     return false;
   }
   // General-language fallback; no music vocabulary or category allowlist.
-  function terms(value) {
+  function terms(value, { allowSingle = false } = {}) {
     return [...new Set(text(value).split(/[\s,，。;；、!！?？:：|/【】《》「」()（）]+/)
       .map(x=>x.replace(/^(我喜欢|我想看|偏好|喜欢|关于|学习|适合)/,''))
-      .filter(x=>x.length>=2 && x.length<=20 && !noise.test(x) && !/^(不要|不喜欢|少一些|排除)/.test(x)))].slice(0,20);
+      .filter(x=>(x.length>=2 || allowSingle && /^\p{Script=Han}$/u.test(x)) && x.length<=20 && !noise.test(x) && !/^(不要|不喜欢|少一些|排除)/.test(x)))].slice(0,20);
   }
   function interests(profile) {
     const result=list(profile?.tags).map(t=>({name:text(t.name || t,40),weight:Number(t.weight)||50}));
-    for (const name of terms(profile?.interests?.description)) if (!result.some(t=>key(t.name)===key(name))) result.push({name,weight:40});
+    for (const name of terms(profile?.interests?.description, {allowSingle:true})) if (!result.some(t=>key(t.name)===key(name))) result.push({name,weight:40});
     return result;
   }
   const ownerId=track=>String(track.mid || track.owner?.mid || (typeof track.owner==='string'?track.owner:'') || '');
@@ -96,6 +96,11 @@
       authors:[...authors.values()].sort((a,b)=>b.weight-a.weight).slice(0,50),
       samples:[...records.values()].filter(e=>e.weight>1 && /^https?:\/\//.test(e.pic||'')).sort((a,b)=>b.at-a.at).slice(0,200) };
   }
+  function visualSamples(profile) {
+    const removed = new Set((profile.interests?.removedSamples || []).map(s => s.bvid));
+    return (profile.learned?.samples || []).filter(s => s.at > (profile.interests?.visualResetAt || 0)
+      && !removed.has(s.bvid) && !blocked(s, profile) && (profile.id === 'auto' || evaluate(s, profile).eligible)).slice(0,30);
+  }
   function cosine(a,b) {
     if (!a || !b || a.length!==b.length || !a.length) return 0;
     let dot=0,x=0,y=0;
@@ -119,5 +124,5 @@
       score:eligible?lexical+Math.max(0,Number(evidence.textSimilarity)||0)*30+Math.max(0,Number(evidence.visualSimilarity)||0)*10+authorBonus:0,
       reasons:[...(matches.length?[`画像 · ${matches.slice(0,2).map(t=>t.name).join(' / ')}`]:semantic?['标题接近你的兴趣']:visual?['封面接近你收藏的视频']:[]),...(eligible&&authorBonus?['来自常看的 UP 主']:[])]};
   }
-  return {normalize,selection,learned,validate,merge,contains,terms,interests,blocked,learn,cosine,evaluate};
+  return {normalize,selection,learned,validate,merge,contains,terms,interests,blocked,learn,cosine,evaluate,visualSamples};
 });

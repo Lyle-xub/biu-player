@@ -10,6 +10,8 @@ import { Buffer } from 'buffer';
 import { seal, unseal, hash } from '../cloud/envelope';
 
 export function compute(operation, ...args) {
+  const engine = operation.startsWith('discovery') ? profile.discovery : profile;
+  if (operation.startsWith('discovery')) operation = 'profile' + operation.slice(9);
   switch (operation) {
     case 'profileTokenize':
       if(args[1]) vocabulary=JSON.parse(args[1]).model.vocab;
@@ -44,13 +46,13 @@ export function compute(operation, ...args) {
     }
     case 'libraryFingerprint': return hash(JSON.stringify(library.normalize(...args)));
     case 'libraryPreview': return JSON.stringify(library.normalize(...args), null, 2).slice(0, 32000);
-    case 'profileEvidence': return profile.recordEvidence(...args);
-    case 'profileBuildPrepare': return profile.prepareBuild(...args);
-    case 'profileBuildFinish': return profile.finishBuild(...args);
-    case 'profileNormalize': return profile.normalize(args[0], args[1]);
+    case 'profileEvidence': return engine.recordEvidence(...args);
+    case 'profileBuildPrepare': return engine.prepareBuild(...args);
+    case 'profileBuildFinish': return engine.finishBuild(...args);
+    case 'profileNormalize': return engine.normalize(args[0], args[1]);
     case 'profileReconcile': {
-      const current = profile.normalize(args[2], false);
-      const next = profile.reconcile(args[0], args[1], current);
+      const current = engine.normalize(args[2], false);
+      const next = engine.reconcile(args[0], args[1], current);
       return JSON.stringify(next) === JSON.stringify(current) ? null : next;
     }
     case 'profileObserve': return { ...args[0], daily: daily.observe(args[0].daily, args[1]) };

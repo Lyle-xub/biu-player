@@ -42,6 +42,7 @@ import HistoryScreen from './src/screens/HistoryScreen';
 import LocalPlaylistScreen from './src/screens/LocalPlaylistScreen';
 import PlaylistDetailScreen from './src/screens/PlaylistDetailScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
+import DiscoveryProfileScreen from './src/screens/DiscoveryProfileScreen';
 import ShareCardScreen from './src/screens/ShareCardScreen';
 import { AppUpdateNotice } from './src/components/AppUpdateCard';
 import LyricsActivitySync from './src/components/LyricsActivitySync';
@@ -382,6 +383,7 @@ export default function App() {
             <Stack.Screen name="LocalPlaylist" component={LocalPlaylistScreen} />
             <Stack.Screen name="PlaylistDetail" component={PlaylistDetailScreen} />
             <Stack.Screen name="Settings" component={SettingsScreen} />
+            <Stack.Screen name="DiscoveryProfile" component={DiscoveryProfileScreen} />
             <Stack.Screen name="SearchInput" component={SearchScreen} options={{ animation: 'fade', animationDuration: 180 }} />
             <Stack.Screen name="ShareCard" component={ShareCardScreen} />
           </Stack.Navigator>

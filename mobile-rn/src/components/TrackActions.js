@@ -64,7 +64,7 @@ function TrackActionsSheet({ track, source, playlistId, removeTrack, onClose }) 
       if (mode === 'move' && source === 'playlist') {
         await transferPlaylistTrack(playlistId, playlist.id, trackKeyOf(track));
       } else {
-        const result = await addToPlaylist(playlist.id, {...track,profileId:context.recommendationManager?.getSnapshot().activeId || 'auto',recommendationScope:'home'});
+        const result = await addToPlaylist(playlist.id, track);
         if (!result) throw new Error('目标歌单已被删除');
         if (mode === 'move') { check(); await removeTrack(track); }
       }
@@ -72,12 +72,10 @@ function TrackActionsSheet({ track, source, playlistId, removeTrack, onClose }) 
     } finally { if (live.current) setBusy(false); }
   };
   const favorite = (folder) => run(async () => {
-    const manager=context.recommendationManager, profileId=manager?.getSnapshot().activeId || 'auto';
     const aid = Number(track.aid) || Number((await bili.view(track.parentBvid || track.bvid)).aid);
     check();
     if (!aid) throw new Error('无法获取视频信息');
     await bili.favDeal(aid, [folder.id]);
-    manager?.recordPreference?.(track,'playlists',profileId).catch(()=>{});
   });
   const item = (label, action, Icon, { disabled = false, danger = false, detail, accessibilityLabel = label } = {}) => <TouchableOpacity key={label} accessibilityRole="button"
     accessibilityLabel={accessibilityLabel} accessibilityState={{ disabled: busy || disabled }} disabled={busy || disabled} onPress={action}

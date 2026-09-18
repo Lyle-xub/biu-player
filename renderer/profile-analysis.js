@@ -34,11 +34,7 @@
       }catch(e){lastError=e.message||'本地分析暂不可用';pauseUntil=Date.now()+30000;}
       finally{running=false;pauseUntil=Math.max(pauseUntil,Date.now()+Math.min(2000,Math.max(100,(Date.now()-started)*4)));publish();schedule();}
     }
-    function seeds(profile){
-      const removed=new Set((profile.interests?.removedSamples||[]).map(s=>s.bvid));
-      return (profile.learned?.samples||[]).filter(s=>s.at>(profile.interests?.visualResetAt||0)&&!removed.has(s.bvid)&&!I.blocked(s,profile)
-        &&(profile.id==='auto'||I.evaluate(s,profile).eligible)).slice(0,30);
-    }
+    const seeds = I.visualSamples;
     function observe(items,profile){
       I.interests(profile).slice(0,8).forEach(t=>enqueue('text',t.name));
       (profile.interests?.avoid||[]).slice(0,30).forEach(t=>enqueue('text',t));

@@ -6051,3 +6051,32 @@ test('split recognition uses NCM first, Shazam fallback and releases native WASM
   new vm.Script(html.slice(html.indexOf('<script>') + 8, html.lastIndexOf('</script>')));
   assert.ok(fs.readFileSync(path.join(root, 'src/split/runtime.js'), 'utf8').includes('return identifyAudioClip('));
 });
+
+test('discovery settings retain flip-to-edit, separate simple interests and learning, and leave homepage untouched',async()=>{
+ const R=require('../renderer/recommendation-profile').discovery;
+ let saved;
+ const manager=R.createManager({read:async()=>null,write:async value=>{saved=value;},getLikes:()=>[],get(){}});await manager.ready();
+ const Portrait=({profile,flipped,onFlip})=>React.createElement('TouchableOpacity',{accessibilityLabel:flipped?'返回画像卡片正面':'翻转卡片，查看用户画像',onPress:onFlip},profile.name);
+ const load=loader({
+   'expo-image':{Image:'Image'},
+   'src/components/icons':{IconPlus:()=>null,IconChevronDown:()=>null,IconChevronRight:()=>null},
+   'src/components/ProfilePortrait':{__esModule:true,default:Portrait},
+   'src/player/PlayerContext':{usePlayer:()=>({discoveryRecommendationManager:manager,
+     discoveryRecommendationProfile:React.useSyncExternalStore(manager.subscribe,manager.getSnapshot),libraryReady:true,account:{isLogin:true,mid:1}})},
+ });
+ const Card=load('src/components/RecommendationProfileCard.js').default;let tree;
+ try{
+   await act(async()=>{tree=create(React.createElement(Card,{source:'discovery'}));});
+   assert.equal(tree.root.findAllByProps({accessibilityLabel:'新建发现画像'}).length,0);
+   await click(tree,'翻转卡片，查看用户画像');await click(tree,'新建发现画像');
+   await act(async()=>tree.root.findByProps({accessibilityLabel:'发现画像名称'}).props.onChangeText('旅行'));
+   await act(async()=>tree.root.findByProps({accessibilityLabel:'发现兴趣描述'}).props.onChangeText('摄影、城市夜景'));
+   await act(async()=>tree.root.findByProps({accessibilityLabel:'发现排除主题'}).props.onChangeText('广告'));
+   await click(tree,'保存偏好');
+   assert.equal(saved.profiles[0].interests.description,'摄影、城市夜景');assert.deepEqual(saved.profiles[0].interests.avoid,['广告']);
+   assert.equal(saved.profiles[0].tags.length,0,'simple description does not require the weight editor');
+   await click(tree,'学习记录');assert.equal(tree.root.findAllByProps({accessibilityLabel:'现在更新画像'}).length>0,true);
+   await click(tree,'本地 AI');assert.equal(tree.root.findAllByProps({accessibilityLabel:'管理模型与缓存'}).length>0,true);
+   await click(tree,'返回画像卡片正面');assert.equal(tree.root.findAllByProps({accessibilityLabel:'兴趣设置'}).length,0);
+ }finally{if(tree)await act(async()=>tree.unmount());manager.dispose();}
+});

@@ -933,7 +933,7 @@ export default function DiscoveryScreen({ navigation }) {
             accessibilityState={{ checked: !!selected, disabled: profileSaving }} disabled={profileSaving}
             onPress={() => selectProfile(item.id)} style={[s.profileRow, selected && s.profileRowSelected]}>
             <View style={s.profileRowCopy}><Text style={s.profileRowName}>{item.name}</Text>
-              <Text numberOfLines={2} style={s.sheetHint}>{item.id === null ? '保留 B 站推荐，不作画像筛选' : item.tags?.length ? item.tags.slice(0, 4).map((tag) => tag.name).join(' · ') : '暂无可用标签，完善画像后显示推荐'}</Text></View>
+              <Text numberOfLines={2} style={s.sheetHint}>{item.id === null ? '保留 B 站推荐，不作画像筛选' : profileInterests(item).length ? profileInterests(item).slice(0, 5).map((tag) => tag.name).join(' · ') : '添加兴趣描述后开始匹配'}</Text></View>
             {selected ? <IconCheck size={20} color={colors.accent} /> : null}
           </TouchableOpacity>;
         })}
@@ -941,7 +941,7 @@ export default function DiscoveryScreen({ navigation }) {
       {profileSaving ? <ActivityIndicator color={colors.accent} /> : null}
       {!!profileError && <Text style={s.errorText}>{profileError}</Text>}
       <TouchableOpacity accessibilityRole="button" accessibilityLabel="管理推荐画像"
-        onPress={() => { setProfileOpen(false); navigation.navigate('Settings'); }} style={s.manageProfiles}><Text style={s.retry}>管理与新建画像</Text></TouchableOpacity>
+        onPress={() => { setProfileOpen(false); navigation.navigate('DiscoveryProfile'); }} style={s.manageProfiles}><Text style={s.retry}>管理与新建画像</Text></TouchableOpacity>
     </BottomSheet>
     {message ? <View pointerEvents="none" style={s.toast}><Text accessibilityLiveRegion="polite" style={s.toastText}>{message}</Text></View> : null}
   </SafeAreaView>;

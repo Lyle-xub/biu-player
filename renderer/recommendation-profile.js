@@ -1,12 +1,14 @@
 /* Shared by desktop and React Native: account-scoped interests and recommendations. */
 (function (root, factory) {
-  if (typeof module === 'object' && module.exports) module.exports = factory(require('./daily-recommendation'), require('./daily-music-source'), require('./profile-interest'));
-  else root.BiuRecommendation = factory(root.BiuDaily, root.BiuDailyMusic, root.BiuProfileInterest);
-})(typeof window === 'object' ? window : this, function (D, M, I) {
-  // Hermes delegates localeCompare to Android ICU. Reuse its native collator
-  // instead of allocating one per comparison during large sync/profile sorts.
-  const compareText = typeof Intl !== 'undefined' && Intl.Collator
-    ? new Intl.Collator().compare : (a, b) => a.localeCompare(b);
+  const make = (D, M, I) => {
+    const compareText = typeof Intl !== 'undefined' && Intl.Collator ? new Intl.Collator().compare : (a,b) => a.localeCompare(b);
+    const home = factory(D, M, I, false, compareText);
+    home.discovery = factory(D, M, I, true, compareText);
+    return home;
+  };
+  if (typeof module === 'object' && module.exports) module.exports = make(require('./daily-recommendation'), require('./daily-music-source'), require('./profile-interest'));
+  else root.BiuRecommendation = make(root.BiuDaily, root.BiuDailyMusic, root.BiuProfileInterest);
+})(typeof window === 'object' ? window : this, function (D, M, I, multimodal, compareText) {
   const MUSIC = new Set([3, 28, 29, 30, 31, 59, 130, 193, 194, 243, 244, 265, 267]);
   const DAILY_MIN_TRACKS = 15;
   const DAILY_MAX_ROUNDS = 10;
@@ -34,7 +36,7 @@
         at: Math.max(0, Number(item.at) || 0),
         ...(Array.isArray(item.tags) ? { tags: tags(item.tags).map((t) => t.name).sort() }
           : item.retryAt ? { retryAt: Math.max(0, Number(item.retryAt) || 0) } : {}) };
-      const evidenceKey=next.bvid+':'+(next.profileId || 'auto');
+      const evidenceKey=next.bvid+(multimodal?':'+(next.profileId || 'auto'):'');
       const old = byVideo.get(evidenceKey);
       if (!old) { byVideo.set(evidenceKey, next); continue; }
       const labels = old.tags && next.tags
@@ -84,14 +86,16 @@
     }
     const daily = D.normalize(value?.daily);
     if (!ids.has(daily.profileId)) daily.profileId = 'auto';
-    if (learn) {
+    if (learn && multimodal) {
       for (const p of [auto,...profiles]) {
         const learned = I.learn(auto.evidence || [], daily.events, p.id);
         if(learned.tags.length || learned.authors.length || learned.samples.length) p.learned=learned;
         if(p.id==='auto' && (auto.evidence || daily.events.length)) p.tags = tags([...D.taste((auto.evidence || []).filter(e=>!e.profileId || e.profileId==='auto'),{...daily,events:daily.events.filter(e=>!e.profileId || e.profileId==='auto')}).tags,...learned.tags]);
       }
     }
-    auto.tags = auto.tags.filter(v => D.category(v.name)!=='noise' && !D.activeRules(daily.ignored).includes(v.name));
+    if (multimodal) auto.tags = auto.tags.filter(v => D.category(v.name)!=='noise' && !D.activeRules(daily.ignored).includes(v.name));
+    else if (auto.evidence && learn) auto.tags = D.taste(auto.evidence, daily).tags;
+    else auto.tags = auto.tags.filter(v => !['noise','format'].includes(D.category(v.name)) && !D.activeRules(daily.ignored).includes(v.name));
     return { version: 1, enabled: value?.enabled !== false, activeId: ids.has(value?.activeId) ? value.activeId : 'auto', auto, profiles, daily };
   }
   const activeProfile = (state) => state.profiles.find((p) => p.id === state.activeId) || state.auto;
@@ -100,7 +104,7 @@
   // Background learning must not invalidate an already visible feed. Only a
   // changed selection or custom filter requires removing the previous results.
   const feedSelection = (state) => JSON.stringify([state.enabled,
-    state.enabled ? state.activeId : null, isStrict(state) ? activeProfile(state).tags : null, state.enabled ? I.selection(activeProfile(state).interests) : null]);
+    state.enabled ? state.activeId : null, isStrict(state) ? activeProfile(state).tags : null, multimodal && state.enabled ? I.selection(activeProfile(state).interests) : null]);
   const feedChanged = (before, after) => feedSelection(before) !== feedSelection(after);
   // Missing data means an older peer, not a request to delete its profiles.
   function syncState(value) {
@@ -264,7 +268,7 @@
   }
   // Weighted round robin: strong interests recur more often; weaker ones still get discovery slots.
   function queries(profile, page = 0, batchSize) {
-    const list = tags(I.interests(profile)).sort((a, b) => b.weight - a.weight).slice(0, 12);
+    const list = tags(multimodal ? I.interests(profile) : profile?.tags).sort((a, b) => b.weight - a.weight).slice(0, 12);
     if (!list.length) return [];
     const counts = list.map(() => 0), selected = [];
     const batch = batchSize || Math.min(3, list.length), offset = Math.max(0, Math.min(1000, Math.floor(page))) * batch;
@@ -284,7 +288,33 @@
     return /^[a-z0-9]/i.test(word) || /[a-z0-9]$/i.test(word)
       ? new RegExp(`(^|[^a-z0-9])${escaped}($|[^a-z0-9])`, 'i').test(title) : title.includes(word);
   }
+  function legacyRank(candidates, profile, excluded = [], limit = 18, { tagsOnly = false } = {}) {
+    const seen = new Set(excluded), selected = [], owners = new Map(), interests = tags(profile?.tags);
+    const pool = candidates.filter((track) => {
+      if (!track.bvid || seen.has(track.bvid)) return false;
+      seen.add(track.bvid); return true;
+    }).map((track) => {
+      const names = new Set(tags(track.tags).map((tag) => interestKey(tag.name)));
+      const title = String(track.title || '').normalize('NFKC').toLowerCase();
+      const matches = interests.filter((tag) => names.has(interestKey(tag.name))
+        // A broad hosiery interest includes its specific types, not vice versa.
+        || (keyOf(tag.name) === '丝袜' && ['黑丝', '白丝', '肉丝', '连裤袜', '长筒袜'].some((name) => names.has(name)))
+        || (!tagsOnly && titleMatches(title, tag.name)));
+      const score = matches.reduce((sum, tag) => sum + tag.weight, 0);
+      return { track, score, matches };
+    }).filter((item) => item.score > 0);
+    while (pool.length && selected.length < limit) {
+      pool.sort((a, b) => b.score / (1 + (owners.get(b.track.mid || b.track.up) || 0) * 0.7)
+        - a.score / (1 + (owners.get(a.track.mid || a.track.up) || 0) * 0.7));
+      const { track, matches } = pool.shift();
+      const owner = track.mid || track.up;
+      owners.set(owner, (owners.get(owner) || 0) + 1);
+      selected.push({ ...track, recommendationReason: `画像 · ${matches.slice(0, 2).map((tag) => tag.name).join(' / ')}` });
+    }
+    return selected;
+  }
   function rank(candidates, profile, excluded = [], limit = 18, { tagsOnly = false, evidence = {}, prior = [] } = {}) {
+    if (!multimodal) return legacyRank(candidates, profile, excluded, limit, {tagsOnly});
     const seen = new Set(excluded), selected = [], owners = new Map();
     const pool = candidates.filter(track => {
       if (!track?.bvid || seen.has(track.bvid)) return false;
@@ -329,7 +359,7 @@
         if (!detail || (mode === 'music' && !MUSIC.has(Number(detail.tid)))) return null;
         let labels = tags(typeof v.tag === 'string' ? v.tag.split(',') : v.tags);
         if (v.tag == null && v.tags == null && !rank([{ ...detail, bvid: v.bvid }], profile).length) {
-          try { labels = await videoTags(get, v.bvid); } catch(error) { failure=error; }
+          try { labels = await videoTags(get, v.bvid); } catch(error) { if (!multimodal) throw error; failure=error; }
         }
         return { bvid: v.bvid, aid: detail.aid, cid: detail.cid, title: String(detail.title || '').replace(/<[^>]*>/g, '').slice(0, 500),
           up: detail.owner?.name || v.author || '', mid: detail.owner?.mid || v.mid,
@@ -398,6 +428,11 @@
     return out;
   }
   function createManager({ read, write, get, getLikes, getPlaylists = () => [], compute, analysis = null, beginDaily = () => () => {} }) {
+    if (!multimodal) analysis = null;
+    else if (compute) {
+      const execute = compute;
+      compute = (operation, ...args) => execute(operation.startsWith('profile') ? 'discovery' + operation.slice(7) : operation, ...args);
+    }
     let snapshot = { ...normalize(null), ready: false, busy: false, error: '', revision: 0 };
     let initial, building, dailyBuilding, dailyEpoch = 0, writes = Promise.resolve(), edits = Promise.resolve();
     let refreshTimer, disposed = false, syncValue;
@@ -424,7 +459,7 @@
     // Syncing exposure history or learned interests must not cancel a running
     // daily queue. Only an explicit selection/filter change invalidates it.
     const dailySelection = (state) => JSON.stringify([state.daily.profileId,
-      state.profiles.find(p => p.id === state.daily.profileId)?.tags, I.selection((state.daily.profileId==='auto'?state.auto:state.profiles.find(p => p.id === state.daily.profileId))?.interests),
+      state.profiles.find(p => p.id === state.daily.profileId)?.tags,
       ...['ignored', 'muted', 'blocked'].map(key => D.activeRules(state.daily[key]))]);
     const commit = (next, refresh, normalizedInput = false) => {
       let normalized, resetFeed;
@@ -464,7 +499,7 @@
         emit({ busy: true, error: '' });
         const auto = await build(source, get, snapshot.auto, force, compute);
         if (disposed) return;
-        await commit((current) => normalizeAsync({ ...current, auto }, true),
+        await commit((current) => normalizeAsync({ ...current, auto: multimodal ? {...auto,interests:I.merge(auto.interests,current.auto.interests),evidence:mergeEvidence(auto.evidence||[],current.auto.evidence||[])} : auto }, true),
           (current) => force && current.enabled && current.activeId === 'auto', true);
         if (auto.failures) emit({ error: '部分视频标签暂未获取，已保留累计画像，可稍后重试' });
       })
@@ -477,7 +512,7 @@
     }
     async function edit(action) {
       await ready();
-      if (building) await building;
+      if (building && !multimodal) await building;
       await writes.catch(() => {});
       const next = await normalizeAsync(snapshot);
       if (action.type === 'enable') next.enabled = !!action.enabled;
@@ -489,16 +524,17 @@
         next.profiles = next.profiles.filter((p) => p.id !== action.id);
         if (next.activeId === action.id) next.activeId = 'auto';
       } else if (action.type === 'interests') {
+        if (!multimodal) throw Error('扩展画像仅用于发现页');
         const p = action.id==='auto' ? next.auto : next.profiles.find(p=>p.id===action.id);
         if (!p) throw Error('画像不存在');
         p.interests=I.normalize({...p.interests,...action.patch,at:Date.now()});
       } else if (action.type === 'save') {
         const name = clean(action.name), labels = tags(action.tags);
-        if (!name || (!labels.length && !String(action.interests?.description ?? next.profiles.find(p=>p.id===action.id)?.interests?.description ?? '').trim())) throw new Error('请填写画像名称，并添加兴趣主题或描述');
+        if (!name || (!labels.length && (!multimodal || !String(action.interests?.description ?? next.profiles.find(p=>p.id===action.id)?.interests?.description ?? '').trim()))) throw new Error(multimodal ? '请填写画像名称，并添加兴趣主题或描述' : '请填写画像名称并添加至少一个标签');
         const old = next.profiles.find((p) => p.id === action.id);
         if (!old && next.profiles.length >= 20) throw new Error('最多保存 20 份画像，请先删除不需要的画像');
         const id = old?.id || `p${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
-        const profile = { ...old, id, name, tags: labels, interests:I.normalize({...old?.interests,...action.interests,at:Date.now()}) };
+        const profile = { ...old, id, name, tags: labels, ...(multimodal ? {interests:I.normalize({...old?.interests,...action.interests,at:Date.now()})} : {}) };
         next.profiles = old ? next.profiles.map((p) => p.id === id ? profile : p) : [...next.profiles, profile];
         next.activeId = id;
       }
@@ -518,11 +554,9 @@
         const profileId = snapshot.profiles.some(p => p.id === snapshot.daily.profileId) ? snapshot.daily.profileId : 'auto';
         const strict = profileId === 'auto' ? null : snapshot.profiles.find(p => p.id === profileId);
         const ignored = new Set(D.activeRules(snapshot.daily.ignored).map(D.canonical));
-        const chosenProfile=strict || snapshot.auto;
-        const searchProfile = {tags:tags([...I.interests(chosenProfile),...D.semantic({title:chosenProfile.interests?.description}).map(t=>({name:t.name,weight:40}))]).filter(t=>!ignored.has(D.canonical(t.name)))};
+        const searchProfile = { tags: (strict?.tags || snapshot.auto.tags).filter(t => !ignored.has(D.canonical(t.name))) };
         const epoch = dailyEpoch, deadline = Date.now() + 90000;
         const stopped = () => disposed || epoch !== dailyEpoch || snapshot.daily.profileId !== profileId;
-        if(!M.plans(searchProfile).length) throw Error('这份画像没有明确的音乐兴趣，请为每日歌曲推荐选择音乐相关画像');
         const source = M.create({ get, cache: dailyCache, profile: searchProfile, state: () => snapshot.daily, stopped: () => stopped() || Date.now() >= deadline,
           decode: compute ? (body,kind) => compute('dailySourceDecode',body,kind) : M.decode });
         let entry = !force && old && old.profileId === profileId ? { ...old } : {
@@ -572,9 +606,6 @@
               failures = batch.every(v=>v.error) ? failures+1 : 0;
               if (stopped()) break;
               const items = batch.map(v=>v.value).filter(Boolean);
-              analysis?.observe?.(items,chosenProfile);
-              const evidence=analysis?.evidence?.(items,chosenProfile) || {};
-              items.sort((a,b)=>I.evaluate(b,chosenProfile,evidence[b.bvid]).score-I.evaluate(a,chosenProfile,evidence[a.bvid]).score);
               entry.tracks = await selectSongs(items,snapshot.daily,entry.tracks,24,artistLimit);
               await save();
               if(failures>=2) throw batch.find(v=>v.error).error;
@@ -595,7 +626,7 @@
     }
     return { ready, refresh, analysis,
       async recordPreference(track,source='playlists',profileId=snapshot.activeId) {
-        await ready(); if(disposed)return;
+        await ready(); if(disposed || !multimodal)return;
         return commit(s=>compute?compute('profileEvidence',s,track,source,profileId):recordEvidence(s,track,source,profileId),false);
       }, edit: (action) => enqueue(() => edit(action)),
       generateDaily,
@@ -671,7 +702,7 @@
         const exclude = [...(options?.exclude || []), ...(getLikes() || []).filter((t) => t?.bvid).map((t) => t.bvid)];
         let page = options?.page || 0, feed;
         if (strict) {
-          const key = JSON.stringify([profile.id, profile.tags, I.selection(profile.interests), options?.mode || 'music']);
+          const key = JSON.stringify([profile.id, profile.tags, multimodal ? I.selection(profile.interests) : null, options?.mode || 'music']);
           if (!strictFeeds.has(key)) {
             if (strictFeeds.size >= 40) strictFeeds.delete(strictFeeds.keys().next().value);
             strictFeeds.set(key, { page: 0, seen: new Set() });

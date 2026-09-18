@@ -1,5 +1,5 @@
 const {test}=require('node:test');const assert=require('node:assert/strict');
-const I=require('../renderer/profile-interest'), R=require('../renderer/recommendation-profile'), A=require('../renderer/profile-analysis');
+const I=require('../renderer/profile-interest'), R=require('../renderer/recommendation-profile').discovery, A=require('../renderer/profile-analysis');
 const profile=(tags=['摄影'],interests={})=>({id:'p',name:'兴趣',tags:tags.map(name=>({name,weight:80})),interests:I.normalize(interests)});
 test('general interests support nonmusic, missing tags, explicit negatives and product-name boundaries',()=>{
  for(const name of ['摄影','旅行','美食','软件','游戏','穿搭'])assert.equal(I.evaluate({title:name+'教学'},profile([name])).eligible,true,name);
@@ -104,4 +104,52 @@ test('a calibrated threshold cannot authorize missing or disabled model output',
  const evidence=service.evidence([track],p)[track.bvid];
  assert.equal(evidence.textCalibrated,false);assert.equal(evidence.visualCalibrated,false);
  assert.equal(I.evaluate(track,p,evidence).eligible,false);service.dispose();
+});
+
+test('multimodal matching and learning are discovery-only; homepage keeps its prior rules',()=>{
+ const Home=require('../renderer/recommendation-profile');
+ const p=profile(['摄影'],{description:'旅行',avoid:['广告']});
+ const track={bvid:'BVads',title:'摄影广告',mid:'1'};
+ assert.equal(Home.rank([track],p).length,1,'homepage uses the old tag/title rules');
+ assert.equal(R.rank([track],p).length,0,'discovery applies its own exclusions');
+ assert.equal(Home.rank([{bvid:'BVtravel',title:'旅行日常'}],p).length,0);
+ assert.equal(R.rank([{bvid:'BVtravel',title:'旅行日常'}],p).length,1);
+ const input={profiles:[p],auto:{evidence:[{bvid:'BVphoto',profileId:'p',title:'摄影',owner:'1',source:'likes',tags:['摄影'],at:Date.now()}]}};
+ assert.equal(Home.normalize(input).profiles[0].learned,undefined);
+ assert.equal(R.normalize(input).profiles[0].learned.authors[0].mid,'1');
+ const analysis={observe(){throw Error('homepage must not use local AI');}};
+ const home=Home.createManager({analysis,read:async()=>null,write:async()=>{},getLikes:()=>[]});
+ assert.equal(home.analysis,null);home.dispose();
+});
+
+test('discovery descriptions accept explicit single-character interests',()=>{
+ const p=profile([],{description:'摄影、脚、旅行'});
+ assert.deepEqual(I.interests(p).map(t=>t.name),['摄影','脚','旅行']);
+ assert.deepEqual(I.terms('脚'),[],'single characters in arbitrary titles are not learned as interests');
+});
+
+test('background normalize and sync keep discovery and homepage engines separate',()=>{
+ const compute=require('../mobile-rn/scripts/build-compute.cjs');const run=require(compute())();
+ const library=require('../renderer/library-sync');
+ const p=profile(['摄影']);const input={profiles:[p],auto:{evidence:[{bvid:'BVp',profileId:'p',owner:'2',source:'likes',tags:['摄影'],at:1}]}};
+ assert.equal(run('profileNormalize',input,true).profiles[0].learned,undefined);
+ const discovery=run('discoveryNormalize',input,true);
+ assert.equal(discovery.profiles[0].learned.authors[0].mid,'2');
+ const synced=library.normalize({version:1,likes:[],playlists:[],recommendation:require('../renderer/recommendation-profile').normalize(input),discoveryRecommendation:discovery});
+ assert.equal(synced.discoveryRecommendation.profiles[0].learned.authors[0].mid,'2');
+ assert.equal(synced.recommendation.profiles[0].learned,undefined);
+});
+
+test('discovery preference edits do not wait on a background tag request',async()=>{
+ let respond;const network=new Promise(r=>respond=r);
+ const p=profile();let disk=R.normalize({profiles:[p],activeId:'p'});
+ const manager=R.createManager({read:async()=>disk,write:async s=>disk=s,getLikes:()=>[{bvid:'BVwaiting',profileId:'p',title:'摄影',mid:'1'}],get:()=>network});
+ await manager.ready();const refresh=manager.refresh(true);
+ for(let i=0;i<10&&!manager.getSnapshot().busy;i++)await Promise.resolve();
+ assert.equal(manager.getSnapshot().busy,true);
+ try{
+   await manager.edit({type:'interests',id:'auto',patch:{description:'旅行'}});
+   assert.equal(manager.getSnapshot().auto.interests.description,'旅行');
+ }finally{respond({status:200,body:JSON.stringify({code:0,data:[{tag_name:'摄影'}]})});await refresh;manager.dispose();}
+ assert.equal(disk.auto.interests.description,'旅行','finishing the old request preserves newer preferences');
 });

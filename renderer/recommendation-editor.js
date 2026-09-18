@@ -12,7 +12,7 @@
       const state = manager.getSnapshot(), profile = R.activeProfile(state);
       const art = P.artwork(profile);
       const disabled = !state.ready || state.busy || saving;
-      const button = (label, action, id = '', selected = false) => `<button type="button" class="btn-ghost${selected ? ' on' : ''}" data-action="${action}" data-id="${esc(id)}" ${disabled && !['retry','model-cancel'].includes(action) ? 'disabled' : ''}>${esc(label)}</button>`;
+      const button = (label, action, id = '', selected = false) => `<button type="button" class="btn-ghost${selected ? ' on' : ''}" data-action="${action}" data-id="${esc(id)}" ${disabled && action !== 'retry' ? 'disabled' : ''}>${esc(label)}</button>`;
       host.innerHTML = `<section class="recommendation-profile">
         <div class="profile-heading"><h4>我的推荐画像</h4><span>PERSONAL ARCHIVE</span></div>
         <div class="profile-buttons">${button(state.enabled ? '画像推荐已开启' : '画像推荐已关闭', 'enable', '', state.enabled)}</div>
@@ -33,16 +33,8 @@
         <div class="profile-details" ${flipped ? '' : 'hidden'}>
         <p>持续累积喜欢、自建歌单与有效收听。推荐信息流只进入候选库；长期兴趣与最近 14 天行为共同影响选曲。</p>
         <div class="profile-buttons">${[state.auto, ...state.profiles].map((p) => button(p.name + (state.activeId === p.id ? ' · 使用中' : ''), 'select', p.id, state.activeId === p.id)).join('')}</div>
-        <p>${profile.id === 'auto' ? `累计分析 ${state.auto.samples} 个视频${state.auto.pending ? ` · ${state.auto.pending} 个待分析` : ''} · 喜欢 ${state.auto.sources?.likes || 0} / 歌单 ${state.auto.sources?.playlists || 0} / 信息流 ${state.auto.sources?.feed || 0}` : '自定义画像 · 根据兴趣主题与描述匹配；排除主题优先，UP 主与本地分析辅助排序'}${state.enabled ? '' : ' · 当前未用于首页推荐'}</p>
+        <p>${profile.id === 'auto' ? `累计分析 ${state.auto.samples} 个视频${state.auto.pending ? ` · ${state.auto.pending} 个待分析` : ''} · 喜欢 ${state.auto.sources?.likes || 0} / 歌单 ${state.auto.sources?.playlists || 0} / 信息流 ${state.auto.sources?.feed || 0}` : '自定义画像 · 仅推荐标题或标签匹配的视频，不混入其他推荐；多个标签匹配任意一个，权重影响排序'}${state.enabled ? '' : ' · 当前未用于首页推荐'}</p>
 
-        ${profile.interests?.description ? `<p>${esc(profile.interests.description)}</p>` : ''}
-        ${profile.interests?.avoid?.length ? `<p>避开：${esc(profile.interests.avoid.join('、'))}</p>` : ''}
-        <h4>UP 主偏好</h4><div class="profile-buttons">${(profile.learned?.authors || []).slice(0,8).map(a=>button(`忽略 ${a.name}`,'author-ignore',a.mid)+button(`不推荐 ${a.name}`,'author-block',a.mid)).join('')}
-        ${(profile.interests?.authors || []).filter(a=>a.mode!=='normal').map(a=>button(`恢复 ${a.name}`,'author-normal',a.mid)).join('')}</div>
-        <h4>封面偏好</h4><div class="profile-buttons">${button(profile.interests?.visualEnabled===false?'开启封面推荐':'关闭封面推荐','visual-toggle')}${button('清除封面学习记录','visual-clear')}</div>
-        <div class="profile-buttons">${(profile.learned?.samples || []).filter(a=>a.at>(profile.interests?.visualResetAt||0)&&!(profile.interests?.removedSamples||[]).some(r=>r.bvid===a.bvid)).slice(0,6).map(a=>button(`移除样本 ${a.title || a.bvid}`,'sample-remove',a.bvid)).join('')}</div>
-        <h4>本地 AI</h4><p>按需下载，设备内分析。当前模型仅辅助排序；通过质量验证后才允许独立命中。</p>
-        <div class="profile-buttons">${Object.entries(root.BiuLocalAnalysis?.models.getSnapshot() || {}).map(([kind,m])=>m.progress!=null?`<span>${esc(m.label)} ${Math.round(m.progress*100)}%</span>`+button('取消下载','model-cancel',kind):button(`${m.label} · ${(m.files.reduce((n,f)=>n+f.bytes,0)/1048576).toFixed(1)} MB · ${m.installed?(m.enabled?'暂停':'开启'):'下载'}`,'model-'+(m.installed?'toggle':'download'),kind)+(m.installed?button('删除 '+m.label,'model-remove',kind):'')).join('')}${button('清除分析缓存','model-clear')}</div>
         ${state.busy ? '<p role="status">正在分析视频标签…</p>' : ''}
         <h4>画像忽略标签</h4><p>已自动过滤音乐推荐、音乐分享官、征集令等平台标签。歌单、合集、MV 等只识别为内容形式，不参与音乐兴趣。</p>
         <div class="profile-buttons">${profile.tags.map((v) => button(`忽略 ${v.name}`, 'ignore-tag', v.name)).join('')}</div>
@@ -53,9 +45,7 @@
         <div class="profile-buttons">${button('更新近期画像', 'refresh')}${button('新建画像', 'new')}${button(profile.id === 'auto' ? '编辑并另存' : '编辑画像', 'edit')}${profile.id !== 'auto' ? button('删除画像', 'delete') : ''}</div>
         ${removing ? `<p>删除「${esc(profile.name)}」？</p><div class="profile-buttons">${button('确认删除', 'confirm-delete')}${button('保留画像', 'cancel-delete')}</div>` : ''}
         ${draft ? `<div class="profile-form"><input aria-label="画像名称" name="profile-name" maxlength="40" placeholder="画像名称" value="${esc(draft.name)}">
-          <textarea aria-label="兴趣描述" name="profile-description" maxlength="500" rows="3" placeholder="喜欢摄影实拍教学、旅行记录">${esc(draft.description || '')}</textarea>
-          <input aria-label="避开主题" name="profile-avoid" maxlength="1200" placeholder="避开主题，用顿号分隔" value="${esc(draft.avoid || '')}">
-          <p>兴趣不限于音乐。每行一个主题，可写「摄影:80」。权重为 1–100，最多 30 个。</p>
+          <p>每行一个标签，可写「古典:80」。权重为 1–100，不填默认 50，最多 30 个。</p>
           <textarea aria-label="画像标签与权重" name="profile-tags" rows="5" placeholder="古典:80&#10;钢琴:60">${esc(draft.text)}</textarea>
           <div class="profile-buttons">${button('保存并使用', 'save')}${draft.id ? button('另存为新画像', 'copy') : ''}${button('取消编辑', 'cancel')}</div></div>` : ''}
         </div>
@@ -111,32 +101,18 @@
         finally { flipAnimation = null; }
         return;
       }
-      if(action==='model-cancel'){try{await root.BiuLocalAnalysis.models.cancel(target.dataset.id);}catch(e){error=e.message;render();}return;}
       if (action === 'quote-retry') { quoteKey = null; loadQuote(profile); return; }
       error = '';
       if (action === 'new') draft = { name: '', text: '' };
       else if (action === 'edit') draft = { id: profile.id === 'auto' ? undefined : profile.id,
-        name: profile.id === 'auto' ? '我的兴趣' : profile.name, text: R.tagsText(profile.tags), description:profile.interests?.description || '', avoid:(profile.interests?.avoid || []).join('、') };
+        name: profile.id === 'auto' ? '我的兴趣' : profile.name, text: R.tagsText(profile.tags) };
       else if (action === 'cancel') draft = null;
       else if (action === 'delete') removing = true;
       else if (action === 'cancel-delete') removing = false;
       else {
         saving = true; render();
         try {
-          if (action.startsWith('model-')) {
-            const models=root.BiuLocalAnalysis.models, kind=target.dataset.id;
-            if(action==='model-download') await models.download(kind);
-            else if(action==='model-clear') await models.clear();
-            else await models.configure({kind,enabled:!models.getSnapshot()[kind]?.enabled,remove:action==='model-remove'});
-          }
-          else if(action.startsWith('author-')) {const mid=target.dataset.id,name=profile.learned?.authors?.find(a=>a.mid===mid)?.name || mid;
-            await manager.edit({type:'interests',id:profile.id,patch:{authors:[...(profile.interests?.authors||[]).filter(a=>a.mid!==mid),{mid,name,mode:action.slice(7),at:Date.now()}]}});
-          }
-          else if(action==='visual-toggle'||action==='visual-clear'||action==='sample-remove') {
-            const patch=action==='visual-toggle'?{visualEnabled:profile.interests?.visualEnabled===false}:action==='visual-clear'?{visualResetAt:Date.now()}:{removedSamples:[...(profile.interests?.removedSamples||[]),{bvid:target.dataset.id,at:Date.now()}]};
-            await manager.edit({type:'interests',id:profile.id,patch});
-          }
-          else if (action === 'retry') await manager.ready();
+          if (action === 'retry') await manager.ready();
           else if (action === 'ignore-tag' || action === 'ignore-input') { await manager.dailyAction({ type: 'ignored', name: action === 'ignore-input' ? ignoredText : target.dataset.id }); ignoredText = ''; }
           else if (action.startsWith('restore-')) await manager.dailyAction({ type: action.slice(8), name: target.dataset.id, active: false });
           else if (action === 'refresh') await manager.refresh(true);
@@ -144,7 +120,7 @@
           else if (action === 'select') await manager.edit({ type: 'select', id: target.dataset.id });
           else if (action === 'confirm-delete') await manager.edit({ type: 'delete', id: profile.id });
           else if (action === 'save' || action === 'copy') await manager.edit({ type: 'save', id: action === 'save' ? draft.id : undefined,
-            name: draft.name + (action === 'copy' ? ' 副本' : ''), tags: R.parseTagsText(draft.text), interests:{description:draft.description || '',avoid:(draft.avoid || '').split(/[、,，\n]/).map(v=>v.trim()).filter(Boolean)} });
+            name: draft.name + (action === 'copy' ? ' 副本' : ''), tags: R.parseTagsText(draft.text) });
           draft = null; removing = false;
         } catch (e) { error = e.message || '保存失败，请重试'; }
         finally { saving = false; }
@@ -155,14 +131,11 @@
       if (event.target.name === 'ignored-tag') ignoredText = event.target.value;
       if (!draft) return;
       if (event.target.name === 'profile-name') draft.name = event.target.value;
-      if (event.target.name === 'profile-description') draft.description = event.target.value;
-      if (event.target.name === 'profile-avoid') draft.avoid = event.target.value;
       if (event.target.name === 'profile-tags') draft.text = event.target.value;
     }
     host.addEventListener('click', act); host.addEventListener('input', input);
     const unsubscribe = manager.subscribe(render);
-    const unsubscribeModels=root.BiuLocalAnalysis?.models.subscribe(render);
     render(); manager.ready().then(render).catch(() => {});
-    return () => { disposed = true; flipAnimation?.cancel(); unsubscribe(); unsubscribeModels?.(); host.removeEventListener('click', act); host.removeEventListener('input', input); host.replaceChildren(); };
+    return () => { disposed = true; flipAnimation?.cancel(); unsubscribe(); host.removeEventListener('click', act); host.removeEventListener('input', input); host.replaceChildren(); };
   };
 })(typeof window === 'object' ? window : this);

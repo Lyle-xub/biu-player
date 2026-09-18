@@ -1,6 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { interests, selection as interestSelection } from '../../../renderer/profile-interest';
-import { rank } from '../../../renderer/recommendation-profile';
+import { discovery } from '../../../renderer/recommendation-profile';
+const { rank } = discovery;
 
 export const DISCOVERY_TARGET = 24;
 export const DISCOVERY_LOW_WATER = 12;

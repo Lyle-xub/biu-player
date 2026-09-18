@@ -2,7 +2,6 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('bili', {
-  profileAI: (method,args) => ipcRenderer.invoke('profile-ai:call',method,args),
   // GET 请求 B 站接口：返回 { status, body }，body 为文本
   get: (url, opts) => ipcRenderer.invoke('bili:get', url, opts),
   // POST 请求 B 站接口：form 编码对象，主进程自动补 csrf

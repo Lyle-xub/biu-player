@@ -50,7 +50,7 @@
     if (new Set(playlists.map((p) => String(p.id))).size !== playlists.length) throw new Error('歌单标识重复');
     return { version: 1, likes, library, playlists,
       ...(v.recommendation === undefined ? {} : { recommendation: recommendation.syncState(v.recommendation) }),
-      ...(!discovery || v.discoveryRecommendation === undefined ? {} : { discoveryRecommendation: recommendation.syncState(v.discoveryRecommendation) }) };
+      ...(!discovery || v.discoveryRecommendation === undefined ? {} : { discoveryRecommendation: recommendation.discovery.syncState(v.discoveryRecommendation) }) };
   }
   function merge(a, b) {
     const local = normalize(a), remote = normalize(b);
@@ -63,7 +63,7 @@
     return normalize({ version: 1, likes: unique([...local.likes, ...remote.likes], trackKey),
       library: unique([...local.library, ...remote.library], trackKey), playlists: [...playlists.values()],
       recommendation: recommendation.reconcile(undefined, local.recommendation, remote.recommendation),
-      discoveryRecommendation: recommendation.reconcile(undefined, local.discoveryRecommendation, remote.discoveryRecommendation) });
+      discoveryRecommendation: recommendation.discovery.reconcile(undefined, local.discoveryRecommendation, remote.discoveryRecommendation) });
   }
   // First contact is additive. Later exchanges compare with the last shared copy,
   // so a removal is distinguishable from a song the other device has never seen.
@@ -100,7 +100,7 @@
     return normalize({ version: 1, likes: list(base.likes, local.likes, remote.likes, trackKey),
       library: list(base.library, local.library, remote.library, trackKey), playlists,
       recommendation: recommendation.reconcile(base.recommendation, local.recommendation, remote.recommendation),
-      discoveryRecommendation: recommendation.reconcile(base.discoveryRecommendation, local.discoveryRecommendation, remote.discoveryRecommendation) });
+      discoveryRecommendation: recommendation.discovery.reconcile(base.discoveryRecommendation, local.discoveryRecommendation, remote.discoveryRecommendation) });
   }
   const libraryCount = (value) => new Set([...(value.likes || []), ...(value.library || [])].map(trackKey)).size;
   const profileCount = (library) => [library.recommendation, library.discoveryRecommendation]

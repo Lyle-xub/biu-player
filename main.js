@@ -424,9 +424,6 @@ app.whenReady().then(() => {
 
   // 通用 GET：带 UA + Referer + Electron 持久化 Cookie，返回文本由渲染层自行解析
   // opts.wbi = true 时对查询串做 WBI 签名（playurl / 字幕等接口风控需要）
-  const profileAI = require('./profile-ai.cjs')(path.join(app.getPath('userData'),'profile-ai'));
-  ipcMain.handle('profile-ai:call', (_event, method, args) => profileAI.call(method,args));
-  app.on('before-quit',()=>profileAI.close());
   ipcMain.handle('bili:get', async (_e, url, opts = {}) => {
     try {
       const res = await biliFetch(url, opts);

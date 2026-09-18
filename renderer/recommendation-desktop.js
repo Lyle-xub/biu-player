@@ -9,7 +9,6 @@
       const ownScope = scope;
       current = root.BiuRecommendation.createManager({
         get: (url, options) => { if (!root.bili?.get) throw new Error('请在桌面应用中使用画像推荐'); return root.bili.get(url, options); },
-        analysis: root.BiuLocalAnalysis?.analysis,
         getLikes: () => ownScope === getScope() ? getLikes().filter(t=>t.recommendationScope!=='discovery') : [],
         getPlaylists: async () => ownScope === getScope() ? (await getPlaylists()).map(p=>({...p,tracks:(p.tracks||[]).filter(t=>t.recommendationScope!=='discovery')})) : [],
         read: async () => {
@@ -28,7 +27,6 @@
         if (value.revision !== revision && ownScope === getScope()) { revision = value.revision; onRefresh(); }
       });
       if (host) { unmount?.(); unmount = root.BiuRecommendationEditor(host, current); }
-      root.BiuLocalAnalysis?.models.ready();
       const instance = current;
       listening = root.BiuDaily?.tracker((event) => instance.recordListening(event));
       const dailyHost = root.document?.getElementById('dailyHome');
