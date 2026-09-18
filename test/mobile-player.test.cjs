@@ -6129,7 +6129,7 @@ test('comment API uses real cursor pagination in both sorts and preserves string
     const parsed = new URL(url); calls.push({ url: parsed, options });
     const latest = parsed.searchParams.get('mode') === '2';
     return { status: 200, body: JSON.stringify({ code: 0, data: {
-      cursor: { next: latest ? 160336 : 2, is_end: false, all_count: 184065,
+      cursor: { next: latest ? 160336 : 0, is_end: false, all_count: 184065,
         pagination_reply: { next_offset: latest ? 'CAEaADIECNDkCQ==' : 'CAEiAggC' } },
       page: { num: 2, size: 2, count: 3 }, replies: [
       { rpid_str: '90071992547409931', rcount: 3, member: { uname: 'Root' }, content: { message: 'Parent' }, replies: [
@@ -6148,8 +6148,10 @@ test('comment API uses real cursor pagination in both sorts and preserves string
     assert.equal(first.list[0].replies[0].message, 'Preview');
     assert.equal(first.hasMore, true);
     assert.equal(first.total, 184065);
-    // A repeated cursor must be retryable, not silently leave "load more" stuck.
-    await assert.rejects(api.replies(7, first.nextCursor, 20, { sort, signal: controller.signal }), /未推进/);
+    // A logged-in hot session legitimately returns the same cursor on each page.
+    const second = await api.replies(7, first.nextCursor, 20, { sort, signal: controller.signal });
+    assert.equal(second.hasMore, true);
+    assert.deepEqual(second.nextCursor, first.nextCursor);
     const next = calls.at(-1).url;
     assert.equal(next.searchParams.get('next'), String(first.nextCursor.next));
     assert.deepEqual(JSON.parse(next.searchParams.get('pagination_str')), { offset: first.nextCursor.offset });
@@ -6339,5 +6341,56 @@ test('lyric reveal hides the outgoing cover on completion, bounds missing callba
     await act(async () => { tree = create(render('lyrics')); });
     assert.equal(state.coverVisible, false, 'direct lyric entry never paints a cover layer');
     assert.equal(state.lyricsReady, true);
+  } finally { if (tree) await act(async () => tree.unmount()); }
+});
+
+
+test('logged-in hot comments append new pages even when all pagination tokens remain identical', async () => {
+  const cursor = { next: 0, offset: 'CAESEDE4MzI3MjU4OTY0NjU5NDkiAggB' };
+  const calls = [];
+  const Panel = loader({ 'src/api/client': { imageHeaders: () => ({}) }, 'src/api/bili': {
+    replies: async (aid, next) => { calls.push(next); const index = calls.length;
+      return { list: index <= 4 ? [{ rpid: String(index), message: `comment ${index}` }] : [],
+        total: 10, hasMore: index <= 4, nextCursor: cursor }; },
+  } })('src/components/CommentsPanel.js').default;
+  let tree;
+  try {
+    await act(async () => { tree = create(React.createElement(Panel, { aid: 7 })); });
+    const list = () => tree.root.findByProps({ testID: 'comments-list' });
+    await act(async () => list().props.onScrollBeginDrag({ nativeEvent: {} }));
+    for (let page = 2; page <= 5; page++) await act(async () => list().props.onEndReached());
+    assert.deepEqual(calls, [null, cursor, cursor, cursor, cursor]);
+    assert.deepEqual(list().props.data.map(c => c.rpid), ['1', '2', '3', '4']);
+    assert.match(textOf(tree), /已显示全部评论/);
+    assert.equal(tree.root.findAllByProps({ accessibilityRole: 'alert' }).length, 0);
+  } finally { if (tree) await act(async () => tree.unmount()); }
+});
+
+test('comment content stalls are bounded, transient overlaps recover, and failed continuation preserves existing rows', async () => {
+  const cursor = { next: 0, offset: 'same-session' }; let requests = 0;
+  const Panel = loader({ 'src/api/client': { imageHeaders: () => ({}) }, 'src/api/bili': {
+    replies: async () => { requests++;
+      // First continuation overlaps twice, then recovers. The next continuation
+      // repeats forever until the user retries after the bounded recovery.
+      const id = requests < 4 ? 'a' : requests < 8 ? 'b' : 'c';
+      return { list: [{ rpid: id, message: id }], total: 10, hasMore: true, nextCursor: cursor };
+    },
+  } })('src/components/CommentsPanel.js').default;
+  let tree;
+  try {
+    await act(async () => { tree = create(React.createElement(Panel, { aid: 7 })); });
+    const list = () => tree.root.findByProps({ testID: 'comments-list' });
+    await act(async () => list().props.onScrollBeginDrag({ nativeEvent: {} }));
+    await act(async () => list().props.onEndReached());
+    assert.equal(requests, 4, 'two duplicate batches are skipped within a bounded continuation');
+    assert.deepEqual(list().props.data.map(c => c.rpid), ['a', 'b']);
+    await act(async () => list().props.onEndReached());
+    assert.equal(requests, 7);
+    assert.match(textOf(tree), /暂时未获取到更多评论/);
+    await act(async () => { list().props.onEndReached(); list().props.onEndReached(); });
+    assert.equal(requests, 7, 'a stalled response does not create an infinite scroll request loop');
+    await click(tree, '重试');
+    assert.equal(requests, 8);
+    assert.deepEqual(list().props.data.map(c => c.rpid), ['a', 'b', 'c']);
   } finally { if (tree) await act(async () => tree.unmount()); }
 });

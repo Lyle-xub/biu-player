@@ -9,6 +9,7 @@ function useComments(aid, sort, root) {
   const [state, setState] = useState({ items: null, total: 0, more: false, loading: true, error: '' });
   const request = useRef(null), epoch = useRef(0), page = useRef(0), pending = useRef(false);
   const cursor = useRef(null), ended = useRef(false);
+  const seen = useRef(new Set());
   const load = useCallback(async (next = 1) => {
     if (pending.current || ended.current) return;
     pending.current = true;
@@ -16,13 +17,23 @@ function useComments(aid, sort, root) {
     request.current = controller;
     setState(s => ({ ...s, loading: true, error: '' }));
     try {
-      const result = root
-        ? await bili.commentReplies(aid, root, next, 20, { signal: controller.signal })
-        : await bili.replies(aid, cursor.current, 20, { sort, signal: controller.signal });
-      if (token !== epoch.current || controller.signal.aborted) return;
-      page.current = next;
+      let result, nextCursor = cursor.current, nextPage = next;
+      // Some sessions return overlapping/empty batches while replenishing the
+      // hot feed. Skip a bounded number without making the user scroll again.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        result = root
+          ? await bili.commentReplies(aid, root, nextPage, 20, { signal: controller.signal })
+          : await bili.replies(aid, nextCursor, 20, { sort, signal: controller.signal });
+        if (token !== epoch.current || controller.signal.aborted) return;
+        if (!result.hasMore || result.list.some(c => !seen.current.has(String(c.rpid)))) break;
+        if (attempt === 2) throw new Error('暂时未获取到更多评论，请稍后重试');
+        nextCursor = result.nextCursor;
+        nextPage++;
+      }
+      page.current = nextPage;
       cursor.current = result.nextCursor;
       ended.current = !result.hasMore;
+      result.list.forEach(c => seen.current.add(String(c.rpid)));
       setState(s => ({ items: [...new Map([...(next === 1 ? [] : s.items || []), ...result.list].map(c => [String(c.rpid), c])).values()],
         total: result.total, more: !!result.hasMore, loading: false, error: '' }));
     } catch (e) {
@@ -35,9 +46,10 @@ function useComments(aid, sort, root) {
   }, [load]);
   return { ...state, next: () => load(page.current + 1) };
 }
-function Action({ label, onPress, disabled = false }) {
+function Action({ label, onPress, disabled = false, compact = false }) {
   return <TouchableOpacity accessibilityRole="button" accessibilityLabel={label} disabled={disabled}
-    onPress={onPress} style={s.action}><Text style={[s.link, disabled && { opacity: .5 }]}>{label}</Text></TouchableOpacity>;
+    onPress={onPress} hitSlop={compact ? { top: 4, bottom: 8, left: 6, right: 6 } : undefined}
+    style={compact ? s.replyAction : s.action}><Text style={[s.link, disabled && { opacity: .5 }]}>{label}</Text></TouchableOpacity>;
 }
 function Comment({ item, onReplies }) {
   const count = Math.max(item.replyCount || 0, item.replies?.length || 0);
@@ -48,7 +60,7 @@ function Comment({ item, onReplies }) {
       {onReplies && count > 0 ? <View style={s.preview}>
         {(item.replies || []).slice(0, 2).map(reply => <Text key={reply.rpid} numberOfLines={2} style={s.previewText}>
           <Text style={s.link}>{reply.name}：</Text>{reply.message}</Text>)}
-        <Action label={`查看 ${count} 条回复`} onPress={() => onReplies(item)} />
+        <Action compact label={`查看 ${count} 条回复`} onPress={() => onReplies(item)} />
       </View> : null}
     </View>
   </View>;
@@ -107,8 +119,9 @@ const s = StyleSheet.create({ panel: { flexShrink: 1, gap: 10 }, body: { flexShr
   toolbar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   comment: { flexDirection: 'row', gap: 10, paddingVertical: 13 }, avatar: { width: 34, height: 34, borderRadius: 17, backgroundColor: colors.cardBorder },
   name: { color: colors.text2, fontSize: 12 }, message: { color: colors.text, fontSize: 14, lineHeight: 21, marginTop: 5 }, meta: { color: colors.text3, fontSize: 11, marginTop: 6 },
-  preview: { backgroundColor: colors.card, borderRadius: 12, paddingHorizontal: 12, paddingTop: 10, marginTop: 10, gap: 6 }, previewText: { color: colors.text2, fontSize: 12, lineHeight: 18 },
+  preview: { backgroundColor: colors.card, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, marginTop: 10, gap: 6 }, previewText: { color: colors.text2, fontSize: 12, lineHeight: 18 },
   link: { color: colors.accent, fontSize: 12 }, action: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 6 },
+  replyAction: { minHeight: 22, justifyContent: 'center', alignSelf: 'flex-start' },
   root: { paddingBottom: 12, borderBottomWidth: 1, borderBottomColor: colors.cardBorder },
   separator: { marginLeft: 44, height: StyleSheet.hairlineWidth, backgroundColor: colors.cardBorder },
   footer: { minHeight: 52, flexDirection: 'row', gap: 8, alignItems: 'center', justifyContent: 'center', paddingVertical: 6 },

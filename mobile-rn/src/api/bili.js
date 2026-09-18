@@ -479,10 +479,10 @@ export async function replies(aid, cursor = null, ps = 20, { sort = 'default', .
   if (!data?.cursor || typeof data.cursor.is_end !== 'boolean') throw new Error('评论分页响应异常，请重试');
   const nextCursor = { next: data.cursor.next, offset: data.cursor.pagination_reply?.next_offset || '' };
   const hasMore = !data.cursor.is_end;
-  if (hasMore && ((!nextCursor.offset && nextCursor.next == null)
-    || (String(nextCursor.next ?? 0) === String(cursor?.next ?? 0) && nextCursor.offset === (cursor?.offset || '')))) {
-    throw new Error('评论分页未推进，请重试');
-  }
+  // Logged-in hot feeds advance on the server: next=0 and next_offset can
+  // remain identical across many distinct pages. Only missing cursors are
+  // invalid here; the consumer detects repeated content, not repeated tokens.
+  if (hasMore && !nextCursor.offset && nextCursor.next == null) throw new Error('评论分页响应异常，请重试');
   return { list: (data.replies || []).map(r => toComment(r)), total: Number(data.cursor.all_count) || 0,
     hasMore, nextCursor };
 }

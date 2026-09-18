@@ -264,7 +264,7 @@ function TrackActions({ track, onShowLyrics, onSplit, active = true }) {
       headerAction={sheet === 'comments' ? <TouchableOpacity accessibilityRole="button"
         accessibilityLabel={commentSort === 'default' ? '切换为最新评论' : '切换为默认评论'}
         accessibilityHint="切换评论排序" onPress={() => setCommentSort(value => value === 'default' ? 'latest' : 'default')}
-        style={styles.commentSort}>
+        style={styles.commentSort} hitSlop={6}>
         <Text style={styles.commentSortIcon}>⇅</Text><Text style={styles.moreText}>{commentSort === 'default' ? '默认排序' : '最新发布'}</Text>
       </TouchableOpacity> : null}>
       {sheet === 'coin' ? <>
@@ -325,8 +325,8 @@ function TrackActions({ track, onShowLyrics, onSplit, active = true }) {
 const styles = StyleSheet.create({
   wrap: { marginTop: 10 },
   sheetHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
-  commentSort: { flexDirection: 'row', gap: 6, alignItems: 'center', minHeight: 44, paddingHorizontal: 14, borderRadius: 22, backgroundColor: colors.card },
-  commentSortIcon: { color: colors.accent, fontSize: 17 },
+  commentSort: { flexDirection: 'row', gap: 5, alignItems: 'center', minHeight: 30, paddingHorizontal: 10, borderRadius: 15, backgroundColor: colors.card },
+  commentSortIcon: { color: colors.accent, fontSize: 15 },
   error: { color: colors.danger, fontSize: 12, lineHeight: 18, paddingVertical: 8, textAlign: 'center' },
   actionCount: { color: colors.text3, fontSize: 10 },
   searchRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
@@ -339,7 +339,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8, paddingHorizontal: 6,
   },
   actionText: { color: colors.text2, fontSize: 11 },
-  sheetTitle: { color: colors.text, fontSize: 15, fontWeight: '600', textAlign: 'center', marginBottom: 12 },
+  sheetTitle: { color: colors.text, fontSize: 15, fontWeight: '600', textAlign: 'center' },
   sheetList: { flexGrow: 0 },
   sheetHint: {
     color: colors.text3, fontSize: 12, textAlign: 'center',
