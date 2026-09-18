@@ -6117,30 +6117,59 @@ test('guest home falls back within the selected partition and retains visible ca
   }
 });
 
-test('comment API preserves reply previews and string IDs, changes sort, and pages a reply thread', async () => {
+test('comment API uses real cursor pagination in both sorts and preserves string IDs and reply previews', async () => {
   const calls = [], controller = new AbortController();
   const api = loader({ './client': { get: async (url, options) => {
-    calls.push({ url: new URL(url), options });
-    return { status: 200, body: JSON.stringify({ code: 0, data: { page: { num: 1, size: 2, count: 3 }, replies: [
+    const parsed = new URL(url); calls.push({ url: parsed, options });
+    const latest = parsed.searchParams.get('mode') === '2';
+    return { status: 200, body: JSON.stringify({ code: 0, data: {
+      cursor: { next: latest ? 160336 : 2, is_end: false, all_count: 184065,
+        pagination_reply: { next_offset: latest ? 'CAEaADIECNDkCQ==' : 'CAEiAggC' } },
+      page: { num: 2, size: 2, count: 3 }, replies: [
       { rpid_str: '90071992547409931', rcount: 3, member: { uname: 'Root' }, content: { message: 'Parent' }, replies: [
         { rpid_str: '90071992547409932', member: { uname: 'Child' }, content: { message: 'Preview' } },
       ] },
     ] } }) };
   } } })('src/api/bili.js');
-  const first = await api.replies(7, 1, 2, { signal: controller.signal });
-  assert.equal(calls[0].url.searchParams.get('sort'), '2');
-  assert.equal(first.list[0].rpid, '90071992547409931');
-  assert.equal(first.list[0].replyCount, 3);
-  assert.equal(first.list[0].replies[0].message, 'Preview');
-  assert.equal(first.hasMore, true);
-  await api.replies(7, 2, 2, { sort: 'latest', signal: controller.signal });
-  assert.equal(calls[1].url.searchParams.get('sort'), '0');
-  assert.equal(calls[1].url.searchParams.get('pn'), '2');
-  await api.commentReplies(7, first.list[0].rpid, 2, 20, { signal: controller.signal });
-  assert.equal(calls[2].url.pathname, '/x/v2/reply/reply');
-  assert.equal(calls[2].url.searchParams.get('root'), first.list[0].rpid);
-  assert.equal(calls[2].url.searchParams.get('pn'), '2');
+  for (const sort of ['default', 'latest']) {
+    const first = await api.replies(7, null, 20, { sort, signal: controller.signal });
+    const initial = calls.at(-1).url;
+    assert.equal(initial.pathname, '/x/v2/reply/main');
+    assert.equal(initial.searchParams.get('mode'), sort === 'latest' ? '2' : '3');
+    assert.equal(initial.searchParams.get('next'), '0');
+    assert.equal(first.list[0].rpid, '90071992547409931');
+    assert.equal(first.list[0].replyCount, 3);
+    assert.equal(first.list[0].replies[0].message, 'Preview');
+    assert.equal(first.hasMore, true);
+    assert.equal(first.total, 184065);
+    // A repeated cursor must be retryable, not silently leave "load more" stuck.
+    await assert.rejects(api.replies(7, first.nextCursor, 20, { sort, signal: controller.signal }), /未推进/);
+    const next = calls.at(-1).url;
+    assert.equal(next.searchParams.get('next'), String(first.nextCursor.next));
+    assert.deepEqual(JSON.parse(next.searchParams.get('pagination_str')), { offset: first.nextCursor.offset });
+  }
+  const children = await api.commentReplies(7, '90071992547409931', 2, 20, { signal: controller.signal });
+  assert.equal(calls.at(-1).url.pathname, '/x/v2/reply/reply');
+  assert.equal(calls.at(-1).url.searchParams.get('root'), '90071992547409931');
+  assert.equal(calls.at(-1).url.searchParams.get('pn'), '2');
+  assert.equal(children.hasMore, false);
   assert.ok(calls.every(c => c.options.signal === controller.signal));
+});
+
+test('comment API distinguishes an empty final page from invalid data and honors cursor is_end', async () => {
+  let data;
+  const api = loader({ './client': { get: async () => ({ status: 200, body: JSON.stringify({ code: 0, data }) }) } })('src/api/bili.js');
+  for (const invalid of [null, {}, { page: { count: 0 }, replies: [] }]) {
+    data = invalid;
+    await assert.rejects(api.replies(7), /分页响应异常/);
+  }
+  data = { cursor: { is_end: true, all_count: 0 }, replies: null };
+  assert.deepEqual((await api.replies(7)).list, []);
+  assert.equal((await api.replies(7)).hasMore, false);
+  data = { cursor: { is_end: false, next: 80, all_count: 100 }, replies: [] };
+  assert.equal((await api.replies(7)).hasMore, true, 'an advancing empty page may still have later comments');
+  data = { cursor: { is_end: true, next: 80, all_count: 100 }, replies: [{ rpid_str: 'last' }] };
+  assert.equal((await api.replies(7)).hasMore, false, 'total includes nested replies and is not a page boundary');
 });
 
 test('comment sorting cancels stale results; replies preview, paginate, deduplicate and retry without losing the root', async () => {
@@ -6159,7 +6188,7 @@ test('comment sorting cancels stale results; replies preview, paginate, deduplic
   try {
     await act(async () => { tree = create(React.createElement(Panel, { aid: 7 })); });
     assert.ok(tree.root.findAllByProps({ testID: 'sheet-placeholder' }).length);
-    await click(tree, '最新评论');
+    await act(async () => tree.update(React.createElement(Panel, { aid: 7, sort: 'latest' })));
     assert.equal(oldSignal.aborted, true);
     await act(async () => old.resolve({ list: [{ rpid: 'old', message: 'stale default comment' }], total: 1 }));
     assert.doesNotMatch(textOf(tree), /stale default comment/);
@@ -6213,5 +6242,41 @@ test('lyric adjustment moves one tenth of a second in either direction', async (
     await act(async () => tree.update(React.createElement(h.Component, { track })));
     await click(tree, '提前 0.1 秒');
     assert.equal(h.calls.at(-1)[2].offset, 0.3, 'saved values do not accumulate floating-point tails');
+  } finally { if (tree) await act(async () => tree.unmount()); }
+});
+
+
+test('comment header toggles sorting and load more carries cursor, prevents duplicate clicks, and retries without skipping', async () => {
+  const calls = [], second = deferred(); let fail = true;
+  const cursor = { next: 160336, offset: 'CAEaADIECNDkCQ==' };
+  const h = actionHarness({ api: { replies: async (aid, next, ps, options) => {
+    calls.push({ next, sort: options.sort });
+    if (options.sort === 'default') return { list: [{ rpid: 'hot', message: 'hot comment' }], total: 10, hasMore: false };
+    if (!next) return { list: [{ rpid: 'a', message: 'new comment' }], total: 10, hasMore: true, nextCursor: cursor };
+    if (fail) { fail = false; return second.promise; }
+    return { list: [{ rpid: 'a', message: 'new comment' }, { rpid: 'b', message: 'older comment' }], total: 10, hasMore: false };
+  } } });
+  let tree;
+  try {
+    await act(async () => { tree = create(React.createElement(h.Component, { track })); });
+    await click(tree, '评论');
+    assert.doesNotMatch(textOf(tree), /完成/);
+    await click(tree, '切换为最新评论');
+    assert.match(textOf(tree), /最新发布/);
+    assert.doesNotMatch(textOf(tree), /hot comment/);
+    const more = touch(tree, '加载更多').props.onPress;
+    await act(async () => { more(); more(); });
+    assert.equal(calls.length, 3, 'one request despite repeated presses');
+    assert.deepEqual(calls.at(-1).next, cursor);
+    await act(async () => second.reject(Error('network error')));
+    assert.match(textOf(tree), /new comment/);
+    await click(tree, '重试');
+    assert.deepEqual(calls.at(-1).next, cursor, 'retry uses the last successful cursor');
+    const list = tree.root.findByProps({ testID: 'comments-list' });
+    assert.deepEqual(list.props.data.map(c => c.rpid), ['a', 'b']);
+    assert.equal(tree.root.findAllByProps({ accessibilityLabel: '加载更多' }).length, 0);
+    await click(tree, '切换为默认评论');
+    assert.deepEqual(calls.at(-1), { next: null, sort: 'default' });
+    assert.match(textOf(tree), /hot comment/);
   } finally { if (tree) await act(async () => tree.unmount()); }
 });

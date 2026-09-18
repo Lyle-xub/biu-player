@@ -468,10 +468,23 @@ function commentPage(data, page, ps) {
   const total = Number(data.page?.count) || 0;
   return { list, total, hasMore: list.length > 0 && (data.page?.num || page) * (data.page?.size || ps) < total };
 }
-export async function replies(aid, page = 1, ps = 12, { sort = 'default', ...options } = {}) {
+export async function replies(aid, cursor = null, ps = 20, { sort = 'default', ...options } = {}) {
+  // Main comments use an opaque cursor. In latest mode `next` is a floor ID,
+  // not a page number; the legacy pn/sort endpoint returns empty pages.
+  const query = new URLSearchParams({ type: '1', oid: String(aid), mode: sort === 'latest' ? '2' : '3',
+    next: String(cursor?.next ?? 0), ps: String(ps),
+    pagination_str: JSON.stringify({ offset: cursor?.offset || '' }) });
   const data = await jget(
-    `https://api.bilibili.com/x/v2/reply?type=1&oid=${encodeURIComponent(aid)}&sort=${sort === 'latest' ? 0 : 2}&pn=${page}&ps=${ps}`, options);
-  return commentPage(data, page, ps);
+    `https://api.bilibili.com/x/v2/reply/main?${query}`, options);
+  if (!data?.cursor || typeof data.cursor.is_end !== 'boolean') throw new Error('评论分页响应异常，请重试');
+  const nextCursor = { next: data.cursor.next, offset: data.cursor.pagination_reply?.next_offset || '' };
+  const hasMore = !data.cursor.is_end;
+  if (hasMore && ((!nextCursor.offset && nextCursor.next == null)
+    || (String(nextCursor.next ?? 0) === String(cursor?.next ?? 0) && nextCursor.offset === (cursor?.offset || '')))) {
+    throw new Error('评论分页未推进，请重试');
+  }
+  return { list: (data.replies || []).map(r => toComment(r)), total: Number(data.cursor.all_count) || 0,
+    hasMore, nextCursor };
 }
 export async function commentReplies(aid, root, page = 1, ps = 20, options = {}) {
   const data = await jget(

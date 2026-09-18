@@ -18,14 +18,14 @@ import { trackKeyOf } from '../player/track';
 import SplitPanel from './SplitPanel';
 import { IconCoin, IconComment, IconDownload, IconLyric, IconSplit, IconStar, IconThumbUp } from './icons';
 
-function Sheet({ visible, title, onClose, children }) {
+function Sheet({ visible, title, onClose, headerAction, children }) {
   return (
     <BottomSheet visible={visible} onClose={onClose}>
       <View style={styles.sheetHeader}>
         <Text style={styles.sheetTitle}>{title}</Text>
-        <TouchableOpacity accessibilityRole="button" accessibilityLabel="关闭面板" onPress={onClose} hitSlop={12}>
+        {headerAction || <TouchableOpacity accessibilityRole="button" accessibilityLabel="关闭面板" onPress={onClose} hitSlop={12}>
           <Text style={styles.moreText}>完成</Text>
-        </TouchableOpacity>
+        </TouchableOpacity>}
       </View>
       {children}
     </BottomSheet>
@@ -50,6 +50,7 @@ function TrackActions({ track, onShowLyrics, onSplit, active = true }) {
   const [relation, setRelation] = useState(null);
   const [loggedIn, setLoggedIn] = useState(false);
   const [sheet, setSheet] = useState(null);
+  const [commentSort, setCommentSort] = useState('default');
   const [error, setError] = useState('');
   const [readyError, setReadyError] = useState('');
   const [reload, setReload] = useState(0);
@@ -259,7 +260,13 @@ function TrackActions({ track, onShowLyrics, onSplit, active = true }) {
     {error && !sheet ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
     {busy === 'download' && !sheet ? button('正在下载 · 查看进度', () => setSheet('download'), false) : null}
     <Sheet visible={!!sheet} title={{ coin: '投币', favorite: '收藏到', comments: '评论',
-      lyrics: '歌词', download: '下载原视频' }[sheet]} onClose={() => setSheet(null)}>
+      lyrics: '歌词', download: '下载原视频' }[sheet]} onClose={() => setSheet(null)}
+      headerAction={sheet === 'comments' ? <TouchableOpacity accessibilityRole="button"
+        accessibilityLabel={commentSort === 'default' ? '切换为最新评论' : '切换为默认评论'}
+        accessibilityHint="切换评论排序" onPress={() => setCommentSort(value => value === 'default' ? 'latest' : 'default')}
+        style={styles.commentSort}>
+        <Text style={styles.commentSortIcon}>⇅</Text><Text style={styles.moreText}>{commentSort === 'default' ? '默认排序' : '最新发布'}</Text>
+      </TouchableOpacity> : null}>
       {sheet === 'coin' ? <>
         <Text style={styles.sheetHint}>已投 {coinCount} 枚 · 还可投 {Math.max(0, coinLimit - coinCount)} 枚</Text>
         <View style={styles.coinRow}>
@@ -277,7 +284,7 @@ function TrackActions({ track, onShowLyrics, onSplit, active = true }) {
           <Text style={styles.favName}>{item.title}</Text><Text style={styles.favCount}>{item.count} 首</Text>
         </TouchableOpacity>}
         ListEmptyComponent={!busy && !error ? <Text style={styles.sheetHint}>还没有收藏夹，请先在 B 站创建</Text> : null} /></SheetContent> : null}
-      {sheet === 'comments' ? <CommentsPanel aid={aid} /> : null}
+      {sheet === 'comments' ? <CommentsPanel aid={aid} sort={commentSort} /> : null}
       {sheet === 'download' ? <SheetContent loading={busy === 'download-info' && dlInfo === null} minHeight={240}><ScrollView style={styles.sheetList}>
         {track.isSegment ? <Text style={styles.sheetHint}>下载包含全部分切的原视频</Text> : null}
         {(dlInfo?.qualities || []).map((q) => <TouchableOpacity key={q.quality} disabled={!!busy} style={styles.dlRow}
@@ -317,7 +324,9 @@ function TrackActions({ track, onShowLyrics, onSplit, active = true }) {
 }
 const styles = StyleSheet.create({
   wrap: { marginTop: 10 },
-  sheetHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 },
+  sheetHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
+  commentSort: { flexDirection: 'row', gap: 6, alignItems: 'center', minHeight: 44, paddingHorizontal: 14, borderRadius: 22, backgroundColor: colors.card },
+  commentSortIcon: { color: colors.accent, fontSize: 17 },
   error: { color: colors.danger, fontSize: 12, lineHeight: 18, paddingVertical: 8, textAlign: 'center' },
   actionCount: { color: colors.text3, fontSize: 10 },
   searchRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
