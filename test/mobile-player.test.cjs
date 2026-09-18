@@ -1754,9 +1754,15 @@ test('player tabs retain the same video surface and expose local likes in cover 
   assert.ok(cover);
   const beforeReveal = animationCalls.length;
   await act(async () => lyricButton.props.onPress());
-  assert.ok(animationCalls.slice(beforeReveal).some((a) => a.config.toValue === 1 && a.config.duration === 320 && a.config.useNativeDriver));
+  assert.ok(animationCalls.slice(beforeReveal).some((a) => a.config.toValue === 1 && a.config.duration === 260 && a.config.useNativeDriver));
   assert.equal(findCover(), cover,
     'cover stays mounted during the lyric reveal');
+  const coverLayer = () => tree.root.findByProps({ testID: 'player-cover-layer' });
+  assert.equal(coverLayer().props.style.at(-1).display, 'flex');
+  const revealAnimation = animationCalls.slice(beforeReveal).find(a => a.config.duration === 260);
+  await act(async () => revealAnimation.finish());
+  assert.equal(coverLayer().props.style.at(-1).display, 'none', 'completed lyric transition removes cover from rendering');
+  assert.equal(tree.root.findByType('VideoView'), video, 'the lyric transition does not recreate playback');
   assert.equal(tree.root.findAll((n) => n.props.accessibilityRole === 'adjustable')[0], scrubber,
     'lyrics share the same footer and scrubber without a remount or layout jump');
   assert.ok(touch(tree, '取消我喜欢'), 'lyric mode shares the same local like state');
@@ -6195,7 +6201,11 @@ test('comment sorting cancels stale results; replies preview, paginate, deduplic
     assert.match(textOf(tree), /reply preview/);
     await click(tree, '查看 3 条回复');
     assert.match(textOf(tree), /first full reply/);
-    await click(tree, '加载更多');
+    await act(async () => {
+      const props = tree.root.findAllByType('FlatList').at(-1).props;
+      props.onScrollBeginDrag({ nativeEvent: { contentOffset: { y: 900 }, contentSize: { height: 1200 }, layoutMeasurement: { height: 360 } } });
+      props.onEndReached();
+    });
     assert.match(textOf(tree), /reply network error/);
     await click(tree, '重试');
     const threadList = tree.root.findAllByType('FlatList').at(-1);
@@ -6246,7 +6256,7 @@ test('lyric adjustment moves one tenth of a second in either direction', async (
 });
 
 
-test('comment header toggles sorting and load more carries cursor, prevents duplicate clicks, and retries without skipping', async () => {
+test('comment infinite scroll waits for a drag, carries cursor, deduplicates events, and stops on error or end', async () => {
   const calls = [], second = deferred(); let fail = true;
   const cursor = { next: 160336, offset: 'CAEaADIECNDkCQ==' };
   const h = actionHarness({ api: { replies: async (aid, next, ps, options) => {
@@ -6264,19 +6274,70 @@ test('comment header toggles sorting and load more carries cursor, prevents dupl
     await click(tree, '切换为最新评论');
     assert.match(textOf(tree), /最新发布/);
     assert.doesNotMatch(textOf(tree), /hot comment/);
-    const more = touch(tree, '加载更多').props.onPress;
-    await act(async () => { more(); more(); });
-    assert.equal(calls.length, 3, 'one request despite repeated presses');
+    const listProps = () => tree.root.findByProps({ testID: 'comments-list' }).props;
+    assert.equal(tree.root.findAllByProps({ accessibilityLabel: '加载更多' }).length, 0);
+    await act(async () => listProps().onEndReached());
+    assert.equal(calls.length, 2, 'initial layout must not exhaust the comment feed');
+    const scroll = y => ({ nativeEvent: { contentOffset: { y }, contentSize: { height: 1200 }, layoutMeasurement: { height: 360 } } });
+    await act(async () => listProps().onScrollBeginDrag(scroll(0)));
+    assert.equal(calls.length, 2, 'dragging at the top does not fetch another page');
+    await act(async () => { listProps().onScroll(scroll(750)); listProps().onEndReached(); listProps().onEndReached(); });
+    assert.equal(calls.length, 3, 'one request despite repeated scroll events');
     assert.deepEqual(calls.at(-1).next, cursor);
     await act(async () => second.reject(Error('network error')));
     assert.match(textOf(tree), /new comment/);
+    await act(async () => { listProps().onScroll(scroll(900)); listProps().onEndReached(); });
+    assert.equal(calls.length, 3, 'scrolling cannot cause an automatic error retry loop');
     await click(tree, '重试');
     assert.deepEqual(calls.at(-1).next, cursor, 'retry uses the last successful cursor');
     const list = tree.root.findByProps({ testID: 'comments-list' });
     assert.deepEqual(list.props.data.map(c => c.rpid), ['a', 'b']);
+    await act(async () => listProps().onEndReached());
+    assert.equal(calls.length, 4, 'end-of-feed never loads again');
     assert.equal(tree.root.findAllByProps({ accessibilityLabel: '加载更多' }).length, 0);
     await click(tree, '切换为默认评论');
     assert.deepEqual(calls.at(-1), { next: null, sort: 'default' });
     assert.match(textOf(tree), /hot comment/);
+  } finally { if (tree) await act(async () => tree.unmount()); }
+});
+
+
+test('lyric reveal hides the outgoing cover on completion, bounds missing callbacks, and ignores superseded animations', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const useReveal = loader()('src/player/useLyricReveal.js').default;
+  let state, tree;
+  function Probe({ mode }) { state = useReveal(mode); return null; }
+  const render = mode => React.createElement(Probe, { mode });
+  try {
+    await act(async () => { tree = create(render('cover')); });
+    assert.equal(state.coverVisible, true);
+    assert.equal(state.lyricsReady, false);
+    await act(async () => tree.update(render('lyrics')));
+    const first = animationCalls.at(-1);
+    assert.equal(first.config.useNativeDriver, true);
+    assert.equal(first.config.isInteraction, false);
+    assert.equal(state.coverVisible, true);
+    assert.equal(state.lyricsReady, false, 'glyph layout waits until the outgoing cover has faded');
+    await act(async () => first.finish());
+    assert.equal(state.coverVisible, false);
+    assert.equal(state.lyricsReady, true);
+    await act(async () => tree.update(render('cover')));
+    const back = animationCalls.at(-1);
+    assert.equal(state.coverVisible, true, 'reverse transition shows cover immediately');
+    await act(async () => tree.update(render('lyrics')));
+    await act(async () => back.finish());
+    assert.equal(state.lyricsReady, false, 'stale reverse completion cannot settle a newer transition');
+    await act(async () => t.mock.timers.tick(340));
+    assert.equal(state.coverVisible, false, 'cover cannot linger when the native callback never arrives');
+    assert.equal(state.progress.value, 1);
+    await act(async () => tree.update(render('cover')));
+    await act(async () => { for (const listener of appStateListeners) listener('active'); });
+    assert.equal(state.progress.value, 0);
+    assert.equal(state.transitioning, false, 'resume settles an interrupted animation');
+    assert.equal(state.lyricsReady, false);
+    await act(async () => tree.unmount()); tree = null;
+    await act(async () => { tree = create(render('lyrics')); });
+    assert.equal(state.coverVisible, false, 'direct lyric entry never paints a cover layer');
+    assert.equal(state.lyricsReady, true);
   } finally { if (tree) await act(async () => tree.unmount()); }
 });

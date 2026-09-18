@@ -12,13 +12,14 @@
  *   两种效果共用原生时钟与切行滚动，>3s 空档插间奏圆点，支持点行 seek。
  * 直播（isLive）：显示同一 player 的 HLS 画面和弹幕，无点播进度与歌词。
  */
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator, Animated, Easing,
   ScrollView, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View,
 } from 'react-native';
 import { useIsFocused } from '@react-navigation/native';
 import useMediaTransition from '../player/useMediaTransition';
+import useLyricReveal from '../player/useLyricReveal';
 import { trackKeyOf } from '../player/track';
 import VideoActionBar from '../components/VideoActionBar';
 import { colors } from '../theme';
@@ -53,16 +54,7 @@ export default function PlayerScreen({ navigation, route }) {
   const focused = useIsFocused();
 
   const [mode, setMode] = useState(route.params?.showLyrics ? 'lyrics' : 'cover'); // cover | lyrics（歌词侧子页）
-  const reveal = useRef(new Animated.Value(mode === 'lyrics' ? 1 : 0)).current;
-  useLayoutEffect(() => {
-    const animation = Animated.timing(reveal, {
-      toValue: mode === 'lyrics' ? 1 : 0, duration: 320,
-      easing: Easing.bezier(0.22, 0.61, 0.36, 1), useNativeDriver: true,
-      isInteraction: false,
-    });
-    animation.start();
-    return () => animation.stop();
-  }, [mode, reveal]);
+  const { progress: reveal, transitioning: revealingLyrics, coverVisible, lyricsReady } = useLyricReveal(mode);
   const [mediaMode, setMediaMode] = useState('lyrics'); // lyrics | video（顶部分段开关，纯显隐）
   const [sheet, setSheet] = useState(null); // menu | queue | playlist
 
@@ -112,10 +104,11 @@ export default function PlayerScreen({ navigation, route }) {
   ], [modeAnim, winW]);
   const segSlide = useMemo(() => modeAnim.interpolate({ inputRange: [0, 1], outputRange: [0, segW] }), [modeAnim, segW]);
   const revealStyles = useMemo(() => ({
-    coverOpacity: reveal.interpolate({ inputRange: [0, 1], outputRange: [1, 0] }),
+    coverOpacity: reveal.interpolate({ inputRange: [0, 0.55, 1], outputRange: [1, 0, 0], extrapolate: 'clamp' }),
     coverY: reveal.interpolate({ inputRange: [0, 1], outputRange: [0, -18] }),
     coverScale: reveal.interpolate({ inputRange: [0, 1], outputRange: [1, 0.97] }),
     lyricY: reveal.interpolate({ inputRange: [0, 1], outputRange: [22, 0] }),
+    lyricOpacity: reveal.interpolate({ inputRange: [0, 0.15, 1], outputRange: [0, 0, 1], extrapolate: 'clamp' }),
   }), [reveal]);
 
   // 分段开关：纯 UI 显隐（player 始终活跃，声音画面同一条流）
@@ -155,6 +148,7 @@ export default function PlayerScreen({ navigation, route }) {
     <View style={styles.bottomRow}>
       {!isLive ? (
         <TouchableOpacity
+          accessibilityRole="button" accessibilityLabel={mode === 'lyrics' ? '显示封面' : '显示歌词'}
           style={[styles.roundBtn, mode === 'lyrics' && styles.roundBtnOn]}
           onPress={() => setMode(mode === 'lyrics' ? 'cover' : 'lyrics')}
           hitSlop={8}
@@ -256,11 +250,13 @@ export default function PlayerScreen({ navigation, route }) {
               ) : (
                 <View style={styles.playerBody}>
                   <View style={styles.bodyStack}>
-                    {/* Both layouts stay measured; toggling only animates opacity/transforms. */}
-                    <Animated.View pointerEvents={mode === 'cover' ? 'auto' : 'none'}
+                    {/* Explicitly hide the cover after its fade; it must not linger behind lyrics. */}
+                    <Animated.View testID="player-cover-layer" pointerEvents={mode === 'cover' ? 'auto' : 'none'}
+                      needsOffscreenAlphaCompositing={revealingLyrics}
                       accessibilityElementsHidden={mode !== 'cover'}
                       importantForAccessibility={mode === 'cover' ? 'auto' : 'no-hide-descendants'}
                       style={[StyleSheet.absoluteFill, styles.coverBody, {
+                        display: coverVisible ? 'flex' : 'none',
                         opacity: revealStyles.coverOpacity,
                         transform: [{ translateY: revealStyles.coverY },
                           { scale: revealStyles.coverScale }],
@@ -299,11 +295,11 @@ export default function PlayerScreen({ navigation, route }) {
 
                       {playError ? <Text style={styles.error} numberOfLines={2}>{playError}</Text> : null}
                     </Animated.View>
-                    <Animated.View pointerEvents={mode === 'lyrics' ? 'auto' : 'none'}
+                    <Animated.View testID="player-lyric-layer" pointerEvents={mode === 'lyrics' ? 'auto' : 'none'}
                       accessibilityElementsHidden={mode !== 'lyrics'}
                       importantForAccessibility={mode === 'lyrics' ? 'auto' : 'no-hide-descendants'}
                       style={[StyleSheet.absoluteFill, styles.lyricBody, {
-                        opacity: reveal,
+                        opacity: revealStyles.lyricOpacity,
                         transform: [{ translateY: revealStyles.lyricY }],
                       }]}>
 
@@ -343,7 +339,7 @@ export default function PlayerScreen({ navigation, route }) {
                         {lyrics && lyrics.length ? (
                           <LyricsRail
                             key={curKey}
-                            visible={focused && mediaMode === 'lyrics' && mode === 'lyrics'}
+                            visible={focused && mediaMode === 'lyrics' && lyricsReady}
                             effect={lyricEffect}
                             clockRevision={`${curKey}:${seekRevision}:${lyricOffset}`}
                             lines={lyrics}
@@ -351,7 +347,7 @@ export default function PlayerScreen({ navigation, route }) {
                             height={railSize.height}
                             width={railSize.width}
                             position={lyricPosition}
-                            playing={playing && !buffering && focused && mediaMode === 'lyrics' && mode === 'lyrics'}
+                            playing={playing && !buffering && focused && mediaMode === 'lyrics' && lyricsReady}
                             onSeek={(line) => seekTo(line.from - lyricOffset)}
                           />
                         ) : (

@@ -53,10 +53,23 @@ function Comment({ item, onReplies }) {
     </View>
   </View>;
 }
-function CommentList({ data, header, onReplies }) {
+function CommentList({ data, header, onReplies, active = true }) {
+  const interacted = useRef(false);
+  const loadMore = () => {
+    if (active && interacted.current && data.more && !data.loading && !data.error) data.next();
+  };
+  const scrollNearEnd = ({ nativeEvent }) => {
+    const { contentOffset, contentSize, layoutMeasurement } = nativeEvent;
+    if (contentSize && layoutMeasurement && contentOffset
+      && contentSize.height - contentOffset.y - layoutMeasurement.height <= layoutMeasurement.height * 0.35) loadMore();
+  };
   return <SheetContent loading={data.items === null && data.loading} minHeight={260}>
     <FlatList testID="comments-list" data={data.items || []} keyExtractor={c => String(c.rpid)} style={s.list}
       keyboardShouldPersistTaps="handled" renderItem={({ item }) => <Comment item={item} onReplies={onReplies} />}
+      onEndReached={loadMore} onEndReachedThreshold={0.35}
+      alwaysBounceVertical overScrollMode="always"
+      onScrollBeginDrag={event => { interacted.current = true; scrollNearEnd(event); }}
+      onScroll={scrollNearEnd} scrollEventThrottle={100}
       ListHeaderComponent={header}
       ItemSeparatorComponent={() => <View style={s.separator} />}
       ListEmptyComponent={!data.loading && !data.error && !data.more ? <Text style={s.empty}>暂无{onReplies ? '评论' : '回复'}</Text> : null}
@@ -64,7 +77,7 @@ function CommentList({ data, header, onReplies }) {
         {data.error ? <><Text accessibilityRole="alert" style={s.error}>{data.error}</Text><Action label="重试" onPress={data.next} /></> : null}
         {data.loading && data.items !== null ? <View style={s.footer}><ActivityIndicator color={colors.accent} size="small" /><Text style={s.meta}>正在加载评论…</Text></View> : null}
         {!data.error && !data.loading && (data.more || !!data.items?.length) ? <View style={s.footer}>
-          {data.more ? <Action label="加载更多" onPress={data.next} /> : <Text style={s.meta}>已显示全部评论</Text>}
+          <Text style={s.meta}>{data.more ? '继续上滑查看更多' : `已显示全部${onReplies ? '评论' : '回复'}`}</Text>
         </View> : null}
       </>} />
   </SheetContent>;
@@ -79,7 +92,7 @@ function Feed({ aid, sort }) {
   return <>
     {root ? <View style={s.toolbar}><Action label="返回评论" onPress={() => setRoot(null)} /><Text style={s.meta}>{root.replyCount || root.replies?.length || 0} 条回复</Text></View> : <Text style={s.meta}>{data.items === null ? (data.loading ? '正在获取评论…' : '评论加载失败') : `共 ${fmtCount(data.total)} 条评论`}</Text>}
     <View style={[s.body, root && { display: 'none' }]} accessibilityElementsHidden={!!root} importantForAccessibility={root ? 'no-hide-descendants' : 'auto'}>
-      <CommentList data={data} onReplies={setRoot} />
+      <CommentList data={data} onReplies={setRoot} active={!root} />
     </View>
     {root ? <Thread key={root.rpid} aid={aid} root={root} /> : null}
   </>;
