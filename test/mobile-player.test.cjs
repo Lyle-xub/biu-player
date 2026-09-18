@@ -577,7 +577,7 @@ test('personalized music recommendations preserve personalization while excludin
 test('playlist default art is deterministic and favorite covers keep their first observed state', async () => {
   const writes = new Map(); let writeCount = 0;
   const load = loader({
-    'react-native': { View: 'View', StyleSheet: { create: (x) => x, absoluteFill: {} } },
+    'react-native': { View: 'View', StyleSheet: { create: (x) => x, flatten: x => Object.assign({}, ...[x].flat(Infinity).filter(Boolean)), absoluteFill: {} } },
     'react-native-svg': Object.assign({ default: 'Svg', __esModule: true },
       Object.fromEntries(['Circle', 'Defs', 'Ellipse', 'LinearGradient', 'Path', 'Rect', 'Stop'].map((name) => [name, name]))),
     '@react-native-async-storage/async-storage': {
@@ -723,7 +723,7 @@ const rn = {
   AppState: { currentState: 'active', addEventListener: (_, fn) => {
     appStateListeners.add(fn); return { remove: () => appStateListeners.delete(fn) };
   } },
-  StyleSheet: { create: (x) => x, absoluteFill: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 } },
+  StyleSheet: { create: (x) => x, flatten: x => Object.assign({}, ...[x].flat(Infinity).filter(Boolean)), absoluteFill: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 } },
   useWindowDimensions: () => ({ width: 390, height: 844 }),
   PanResponder: { create: (x) => ({ panHandlers: x }) },
   Keyboard: { dismiss() {} },
@@ -1138,6 +1138,10 @@ test('app sheets animate without waiting for layout, keep closing content, and s
   const surface = () => tree.root.findAllByType('AnimatedView').find((n) => n.props.onLayout);
   await act(async () => surface().props.onLayout({ nativeEvent: { layout: { height: 320 } } }));
   const opening = animationCalls.at(-1);
+  const distance = () => surface().props.style.at(-1).transform[0].translateY.a.config.outputRange[0];
+  const initialDistance = distance();
+  await act(async () => surface().props.onLayout({ nativeEvent: { layout: { height: 500 } } }));
+  assert.equal(distance(), initialDistance, 'loading content cannot move the in-flight animation by changing its height');
   assert.equal(opening.value.value, 0, 'first visible frame starts fully below the screen');
   assert.equal(opening.config.toValue, 1);
   assert.equal(surface().props.style.at(-1).paddingBottom, 42, 'navigation inset plus normal padding');
@@ -3634,7 +3638,7 @@ test('discovery screen starts swipes on the UI thread, retains failed drops, and
         },
         videoTags: async () => ['Card'],
       },
-      'src/store/playlists': { usePlaylists: () => localPlaylists, addToPlaylist: async () => {
+      'src/store/playlists': { usePlaylists: (options) => options?.withStatus ? { playlists: localPlaylists, ready: true } : localPlaylists, addToPlaylist: async () => {
         if (playlistSave) return playlistSave.promise;
         throw new Error('Storage unavailable');
       } },
@@ -6111,4 +6115,103 @@ test('guest home falls back within the selected partition and retains visible ca
       assert.match(tree.root.findAllByType('Text').map(n => n.props.children).join(''), /public chart unavailable/);
     } finally { if (tree) await act(async () => tree.unmount()); }
   }
+});
+
+test('comment API preserves reply previews and string IDs, changes sort, and pages a reply thread', async () => {
+  const calls = [], controller = new AbortController();
+  const api = loader({ './client': { get: async (url, options) => {
+    calls.push({ url: new URL(url), options });
+    return { status: 200, body: JSON.stringify({ code: 0, data: { page: { num: 1, size: 2, count: 3 }, replies: [
+      { rpid_str: '90071992547409931', rcount: 3, member: { uname: 'Root' }, content: { message: 'Parent' }, replies: [
+        { rpid_str: '90071992547409932', member: { uname: 'Child' }, content: { message: 'Preview' } },
+      ] },
+    ] } }) };
+  } } })('src/api/bili.js');
+  const first = await api.replies(7, 1, 2, { signal: controller.signal });
+  assert.equal(calls[0].url.searchParams.get('sort'), '2');
+  assert.equal(first.list[0].rpid, '90071992547409931');
+  assert.equal(first.list[0].replyCount, 3);
+  assert.equal(first.list[0].replies[0].message, 'Preview');
+  assert.equal(first.hasMore, true);
+  await api.replies(7, 2, 2, { sort: 'latest', signal: controller.signal });
+  assert.equal(calls[1].url.searchParams.get('sort'), '0');
+  assert.equal(calls[1].url.searchParams.get('pn'), '2');
+  await api.commentReplies(7, first.list[0].rpid, 2, 20, { signal: controller.signal });
+  assert.equal(calls[2].url.pathname, '/x/v2/reply/reply');
+  assert.equal(calls[2].url.searchParams.get('root'), first.list[0].rpid);
+  assert.equal(calls[2].url.searchParams.get('pn'), '2');
+  assert.ok(calls.every(c => c.options.signal === controller.signal));
+});
+
+test('comment sorting cancels stale results; replies preview, paginate, deduplicate and retry without losing the root', async () => {
+  const old = deferred(), root = { rpid: 'root', name: 'Author', message: 'current parent', replyCount: 3,
+    replies: [{ rpid: 'a', name: 'Reader', message: 'reply preview' }] };
+  let oldSignal, childCalls = [], fail = true;
+  const load = loader({ 'src/api/client': { imageHeaders: () => ({}) }, 'src/api/bili': {
+    replies: (aid, page, ps, options) => { if (options.sort === 'default') { oldSignal = options.signal; return old.promise; }
+      return Promise.resolve({ list: [root], total: 1, hasMore: false }); },
+    commentReplies: async (aid, rootId, page) => { childCalls.push([aid, rootId, page]);
+      if (page === 2 && fail) { fail = false; throw Error('reply network error'); }
+      return { list: page === 1 ? [{ rpid: 'a', message: 'first full reply' }] : [{ rpid: 'a', message: 'first full reply' }, { rpid: 'b', message: 'second full reply' }], total: 2, hasMore: page === 1 };
+    },
+  } });
+  const Panel = load('src/components/CommentsPanel.js').default; let tree;
+  try {
+    await act(async () => { tree = create(React.createElement(Panel, { aid: 7 })); });
+    assert.ok(tree.root.findAllByProps({ testID: 'sheet-placeholder' }).length);
+    await click(tree, '最新评论');
+    assert.equal(oldSignal.aborted, true);
+    await act(async () => old.resolve({ list: [{ rpid: 'old', message: 'stale default comment' }], total: 1 }));
+    assert.doesNotMatch(textOf(tree), /stale default comment/);
+    assert.match(textOf(tree), /reply preview/);
+    await click(tree, '查看 3 条回复');
+    assert.match(textOf(tree), /first full reply/);
+    await click(tree, '加载更多');
+    assert.match(textOf(tree), /reply network error/);
+    await click(tree, '重试');
+    const threadList = tree.root.findAllByType('FlatList').at(-1);
+    assert.deepEqual(threadList.props.data.map(c => c.rpid), ['a', 'b']);
+    assert.deepEqual(childCalls, [[7, 'root', 1], [7, 'root', 2], [7, 'root', 2]]);
+    await click(tree, '返回评论');
+    assert.equal(tree.root.findAllByType('FlatList').length, 1);
+    assert.match(textOf(tree), /current parent/);
+  } finally { if (tree) await act(async () => tree.unmount()); }
+});
+
+test('sheet placeholders keep content mounted, reveal after data, and recover without animation callbacks', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const Content = loader()('src/components/SheetContent.js').default;
+  let mounts = 0, tree;
+  function Probe() { React.useEffect(() => { mounts++; }, []); return React.createElement('Text', null, 'Ready content'); }
+  const render = loading => React.createElement(Content, { loading, minHeight: 240 }, React.createElement(Probe));
+  try {
+    await act(async () => { tree = create(render(true)); });
+    assert.equal(tree.root.findByProps({ testID: 'sheet-content' }).props.pointerEvents, 'none');
+    await act(async () => tree.update(render(false)));
+    assert.equal(tree.root.findByProps({ testID: 'sheet-content' }).props.pointerEvents, 'auto');
+    assert.equal(mounts, 1, 'the measured list is revealed without remounting');
+    assert.equal(tree.root.findAllByProps({ testID: 'sheet-placeholder' }).length, 1);
+    await act(async () => t.mock.timers.tick(220));
+    assert.equal(tree.root.findAllByProps({ testID: 'sheet-placeholder' }).length, 0);
+    assert.equal(tree.root.findByProps({ testID: 'sheet-content' }).props.style.at(-1).opacity.value, 1);
+    await act(async () => tree.update(render(true)));
+    assert.equal(tree.root.findByProps({ testID: 'sheet-content' }).props.style.at(-1).opacity.value, 0);
+    assert.equal(mounts, 1);
+  } finally { if (tree) await act(async () => tree.unmount()); }
+});
+
+test('lyric adjustment moves one tenth of a second in either direction', async () => {
+  const h = actionHarness(); let tree;
+  try {
+    await act(async () => { tree = create(React.createElement(h.Component, { track })); });
+    await click(tree, '歌词');
+    await click(tree, '提前 0.1 秒');
+    assert.equal(h.calls.at(-1)[2].offset, 0.1);
+    await click(tree, '延后 0.1 秒');
+    assert.equal(h.calls.at(-1)[2].offset, -0.1);
+    h.context.lyricSettings = { [trackModel.trackKeyOf(track)]: { offset: 0.2 } };
+    await act(async () => tree.update(React.createElement(h.Component, { track })));
+    await click(tree, '提前 0.1 秒');
+    assert.equal(h.calls.at(-1)[2].offset, 0.3, 'saved values do not accumulate floating-point tails');
+  } finally { if (tree) await act(async () => tree.unmount()); }
 });

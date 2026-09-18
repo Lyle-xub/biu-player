@@ -1,16 +1,18 @@
 /* Shared video actions. A keyed child isolates requests, sheets and downloads per track. */
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  ActivityIndicator, FlatList, Image,
+  ActivityIndicator, FlatList,
   ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View,
 } from 'react-native';
 import { useIsFocused } from '@react-navigation/native';
 import BottomSheet from './BottomSheet';
+import SheetContent from './SheetContent';
+import CommentsPanel from './CommentsPanel';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import { colors, fmtCount, fmtDur } from '../theme';
 import * as bili from '../api/bili';
-import { authStatus, imageHeaders, streamHeaders } from '../api/client';
+import { authStatus, streamHeaders } from '../api/client';
 import { usePlayer } from '../player/PlayerContext';
 import { trackKeyOf } from '../player/track';
 import SplitPanel from './SplitPanel';
@@ -153,21 +155,6 @@ function TrackActions({ track, onShowLyrics, onSplit, active = true }) {
     if (was !== now) addStat('favorite', now ? 1 : -1);
   });
 
-  const [comments, setComments] = useState(null);
-  const [commentPage, setCommentPage] = useState(0);
-  const [commentTotal, setCommentTotal] = useState(0);
-  const [commentMore, setCommentMore] = useState(true);
-  const loadComments = (page = 1) => run('comments', async () => {
-    const result = await bili.replies(aid, page);
-    setComments((list) => {
-      const all = page === 1 ? result.list : [...(list || []), ...result.list];
-      return [...new Map(all.map((c) => [c.rpid, c])).values()];
-    });
-    setCommentPage(page);
-    setCommentTotal(result.total);
-    setCommentMore(result.hasMore && result.list.length > 0);
-  });
-
   const [dlInfo, setDlInfo] = useState(null);
   const [dlProgress, setDlProgress] = useState(null);
   const [savedFile, setSavedFile] = useState(null);
@@ -237,7 +224,7 @@ function TrackActions({ track, onShowLyrics, onSplit, active = true }) {
     { key: 'favorite', Icon: IconStar, label: favored ? '已收藏' : '收藏', count: stat.favorite, on: favored,
       onPress: () => { if (requireLogin()) { open('favorite'); loadFolders(); } } },
     { key: 'comments', Icon: IconComment, label: '评论', count: stat.reply,
-      onPress: () => { open('comments'); if (!comments) loadComments(); } },
+      onPress: () => open('comments') },
     { key: 'lyrics', Icon: IconLyric, label: '歌词', onPress: () => open('lyrics') },
     { key: 'split', Icon: IconSplit, label: '分切', onPress: () => onSplit({
       bvid: track.bvid, aid, cid, duration: totalDuration,
@@ -246,7 +233,7 @@ function TrackActions({ track, onShowLyrics, onSplit, active = true }) {
     }) },
     { key: 'download', Icon: IconDownload, label: '下载', onPress: () => { open('download'); if (!dlInfo) loadDownload(); } },
   ];
-  const retry = { favorite: loadFolders, comments: () => loadComments(commentPage + 1),
+  const retry = { favorite: loadFolders,
     download: loadDownload }[sheet];
   const button = (label, onPress, disabled = !!busy) => (
     <TouchableOpacity accessibilityRole="button" accessibilityLabel={label} disabled={disabled}
@@ -271,7 +258,7 @@ function TrackActions({ track, onShowLyrics, onSplit, active = true }) {
     {readyError ? button(readyError + ' · 重试', () => setReload((n) => n + 1)) : null}
     {error && !sheet ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
     {busy === 'download' && !sheet ? button('正在下载 · 查看进度', () => setSheet('download'), false) : null}
-    <Sheet visible={!!sheet} title={{ coin: '投币', favorite: '收藏到', comments: `评论 ${fmtCount(commentTotal)}`,
+    <Sheet visible={!!sheet} title={{ coin: '投币', favorite: '收藏到', comments: '评论',
       lyrics: '歌词', download: '下载原视频' }[sheet]} onClose={() => setSheet(null)}>
       {sheet === 'coin' ? <>
         <Text style={styles.sheetHint}>已投 {coinCount} 枚 · 还可投 {Math.max(0, coinLimit - coinCount)} 枚</Text>
@@ -283,22 +270,15 @@ function TrackActions({ track, onShowLyrics, onSplit, active = true }) {
           ))}
         </View>
       </> : null}
-      {sheet === 'favorite' ? <FlatList data={folders || []} keyExtractor={(f) => String(f.id)} style={styles.sheetList}
+      {sheet === 'favorite' ? <SheetContent loading={busy === 'folders' && folders === null} minHeight={240}><FlatList data={folders || []} keyExtractor={(f) => String(f.id)} style={styles.sheetList}
         renderItem={({ item }) => <TouchableOpacity disabled={!!busy} onPress={() => toggleFolder(item)}
           accessibilityRole="checkbox" accessibilityLabel={item.title} accessibilityState={{ checked: item.favored }} style={styles.favRow}>
           <View style={[styles.favCheck, item.favored && styles.favCheckOn]}><Text style={styles.favCheckMark}>{item.favored ? '✓' : ''}</Text></View>
           <Text style={styles.favName}>{item.title}</Text><Text style={styles.favCount}>{item.count} 首</Text>
         </TouchableOpacity>}
-        ListEmptyComponent={!busy && !error ? <Text style={styles.sheetHint}>还没有收藏夹，请先在 B 站创建</Text> : null} /> : null}
-      {sheet === 'comments' ? <FlatList data={comments || []} keyExtractor={(c) => String(c.rpid)} style={styles.sheetList}
-        renderItem={({ item }) => <View style={styles.commentRow}>
-          {item.avatar ? <Image source={{ uri: item.avatar, headers: imageHeaders() }} style={styles.commentAvatar} /> : null}
-          <View style={styles.commentBody}><Text style={styles.commentName}>{item.name}</Text>
-            <Text selectable style={styles.commentText}>{item.message}</Text><Text style={styles.commentLike}>赞 {fmtCount(item.like)}</Text></View>
-        </View>}
-        ListEmptyComponent={!busy && !error ? <Text style={styles.sheetHint}>暂无评论</Text> : null}
-        ListFooterComponent={comments?.length && !error ? button(commentMore ? '加载更多' : '没有更多了', () => loadComments(commentPage + 1), !!busy || !commentMore) : null} /> : null}
-      {sheet === 'download' ? <ScrollView style={styles.sheetList}>
+        ListEmptyComponent={!busy && !error ? <Text style={styles.sheetHint}>还没有收藏夹，请先在 B 站创建</Text> : null} /></SheetContent> : null}
+      {sheet === 'comments' ? <CommentsPanel aid={aid} /> : null}
+      {sheet === 'download' ? <SheetContent loading={busy === 'download-info' && dlInfo === null} minHeight={240}><ScrollView style={styles.sheetList}>
         {track.isSegment ? <Text style={styles.sheetHint}>下载包含全部分切的原视频</Text> : null}
         {(dlInfo?.qualities || []).map((q) => <TouchableOpacity key={q.quality} disabled={!!busy} style={styles.dlRow}
           accessibilityLabel={`下载 ${q.label}`} onPress={() => startDownload(q.quality)}>
@@ -309,23 +289,23 @@ function TrackActions({ track, onShowLyrics, onSplit, active = true }) {
           <Text style={styles.dlProgressText}>下载中 {Math.round(dlProgress * 100)}% · 退出此页面会取消下载</Text>
         </View> : null}
         {savedFile ? <><Text style={styles.sheetHint}>已下载：{savedFile.label}</Text>{button('保存到文件 / 分享', exportFile)}</> : null}
-      </ScrollView> : null}
+      </ScrollView></SheetContent> : null}
       {sheet === 'lyrics' ? <ScrollView style={styles.sheetList} keyboardShouldPersistTaps="handled">
         {button('显示动态歌词', () => { setSheet(null); onShowLyrics?.(); })}
         <Text style={styles.sheetHint}>{lyric.match ? `当前匹配：${lyric.match.title} · ${lyric.match.artist}` : '自动匹配歌词，可搜索歌曲手动替换'}</Text>
         <View style={styles.searchRow}><TextInput accessibilityLabel="歌词搜索" style={styles.input} value={query} onChangeText={setQuery}
           placeholder="歌曲名 / 歌手" placeholderTextColor={colors.text3} onSubmitEditing={searchLyrics} returnKeyType="search" />
           {button('搜索', searchLyrics)}</View>
-        {(candidates || []).map((c) => <TouchableOpacity key={`${c.source}:${c.id || c.songmid}`} disabled={!!busy}
+        <SheetContent loading={busy === 'lyric-search'} minHeight={busy === 'lyric-search' || candidates?.length ? 160 : 0}>{(candidates || []).map((c) => <TouchableOpacity key={`${c.source}:${c.id || c.songmid}`} disabled={!!busy}
           onPress={() => pickLyric(c)} accessibilityLabel={`匹配 ${c.title} ${c.artist}`} style={styles.dlRow}>
           <View style={{ flex: 1 }}><Text style={styles.dlLabel}>{c.title}</Text><Text style={styles.commentName}>{c.artist} · {c.source === 'qq' ? 'QQ 音乐' : '网易云'}</Text></View>
           <Text style={styles.segDur}>{fmtDur(c.duration)}</Text>
         </TouchableOpacity>)}
-        {candidates?.length === 0 ? <Text style={styles.sheetHint}>没有找到候选，换个关键词试试</Text> : null}
+        {candidates?.length === 0 ? <Text style={styles.sheetHint}>没有找到候选，换个关键词试试</Text> : null}</SheetContent>
         <View style={styles.searchRow}>
-          {button('延后 0.5 秒', () => updateLyricSettings(track, { offset: (lyric.offset || 0) - 0.5 }))}
+          {button('延后 0.1 秒', () => updateLyricSettings(track, { offset: Math.round(((lyric.offset || 0) - 0.1) * 10) / 10 }))}
           <Text style={styles.dlLabel}>{(lyric.offset || 0).toFixed(1)}s</Text>
-          {button('提前 0.5 秒', () => updateLyricSettings(track, { offset: (lyric.offset || 0) + 0.5 }))}
+          {button('提前 0.1 秒', () => updateLyricSettings(track, { offset: Math.round(((lyric.offset || 0) + 0.1) * 10) / 10 }))}
         </View>
         {button('恢复自动匹配与时间', () => updateLyricSettings(track, { match: null, lines: null, offset: 0 }))}
       </ScrollView> : null}
@@ -375,13 +355,7 @@ const styles = StyleSheet.create({
   favCheckMark: { color: '#fff', fontSize: 11, fontWeight: '700' },
   favName: { color: colors.text, fontSize: 14, flex: 1, minWidth: 0 },
   favCount: { color: colors.text3, fontSize: 11 },
-  commentRow: { flexDirection: 'row', gap: 10, paddingVertical: 10 },
-  commentAvatar: { width: 34, height: 34, borderRadius: 17, backgroundColor: '#1a1e14' },
-  commentAvatarFallback: { borderWidth: 1, borderColor: colors.cardBorder },
-  commentBody: { flex: 1, minWidth: 0 },
   commentName: { color: colors.text3, fontSize: 11 },
-  commentText: { color: colors.text, fontSize: 13, lineHeight: 19, marginTop: 3 },
-  commentLike: { color: colors.text3, fontSize: 10, marginTop: 4 },
   moreBtn: { alignItems: 'center', paddingVertical: 12 },
   moreText: { color: colors.accent, fontSize: 12, fontWeight: '600' },
   dlRow: {

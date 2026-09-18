@@ -9,9 +9,10 @@ import { colors } from '../theme';
 import { addToPlaylist, createPlaylist, usePlaylists } from '../store/playlists';
 import { IconChevronRight, IconPlus, IconPlaylist } from './icons';
 import RemoteImage from './RemoteImage';
+import SheetContent from './SheetContent';
 
 export default function PlaylistPicker({ track, onClose, onPick, excludeId, title = '加入歌单' }) {
-  const playlists = usePlaylists();
+  const { playlists, ready } = usePlaylists({ withStatus: true });
   const [newName, setNewName] = useState('');
   const [msg, setMsg] = useState('');
   const [busy, setBusy] = useState(false);
@@ -48,7 +49,7 @@ export default function PlaylistPicker({ track, onClose, onPick, excludeId, titl
   return (
     <View style={styles.sheet}>
       {title ? <Text style={styles.title}>{title}</Text> : null}
-      <FlatList
+      <SheetContent loading={!ready} minHeight={160}><FlatList
         data={playlists.filter((playlist) => playlist.id !== excludeId)}
         keyExtractor={(p) => String(p.id)}
         style={styles.list}
@@ -66,7 +67,7 @@ export default function PlaylistPicker({ track, onClose, onPick, excludeId, titl
           </TouchableOpacity>
         )}
         ListEmptyComponent={<Text style={styles.empty}>还没有本地歌单，在下面新建一个</Text>}
-      />
+      /></SheetContent>
       {msg ? <Text style={styles.msg}>{msg}</Text> : null}
       <View style={styles.newRow}>
         <TextInput

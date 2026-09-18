@@ -452,24 +452,31 @@ export async function favDeal(aid, addIds = [], delIds = []) {
   return true;
 }
 
-/* ---------- 评论（桌面端热评预览用 x/v2/reply sort=2；RN 端做完整列表 + 翻页） ---------- */
-export async function replies(aid, page = 1, ps = 12) {
-  const data = await jget(
-    `https://api.bilibili.com/x/v2/reply?type=1&oid=${aid}&sort=2&pn=${page}&ps=${ps}`);
-  const list = (data.replies || []).map((r) => ({
-    rpid: r.rpid,
-    name: (r.member && r.member.uname) || '',
-    avatar: r.member && r.member.avatar ? absImg(r.member.avatar) : null,
-    message: (r.content && r.content.message) || '',
-    like: r.like || 0,
-    ctime: r.ctime || 0,
-  }));
+/* ---------- 评论：默认热度 / 最新，以及楼中楼分页 ---------- */
+function toComment(r, previews = true) {
   return {
-    list,
-    total: (data.page && data.page.count) || 0,
-    // page.num × ps 未到 count 则还有下一页
-    hasMore: !!data.page && (data.page.num || page) * (data.page.size || ps) < (data.page.count || 0),
+    rpid: String(r.rpid_str || r.rpid || ''),
+    name: r.member?.uname || '', avatar: r.member?.avatar ? absImg(r.member.avatar) : null,
+    message: r.content?.message || '', like: r.like || 0, ctime: r.ctime || 0,
+    replyCount: Number(r.rcount ?? r.count) || 0,
+    replies: previews ? (r.replies || []).map(child => toComment(child, false)) : [],
   };
+}
+function commentPage(data, page, ps) {
+  if (!data || typeof data !== 'object') throw new Error('评论响应异常，请重试');
+  const list = (data.replies || []).map(r => toComment(r));
+  const total = Number(data.page?.count) || 0;
+  return { list, total, hasMore: list.length > 0 && (data.page?.num || page) * (data.page?.size || ps) < total };
+}
+export async function replies(aid, page = 1, ps = 12, { sort = 'default', ...options } = {}) {
+  const data = await jget(
+    `https://api.bilibili.com/x/v2/reply?type=1&oid=${encodeURIComponent(aid)}&sort=${sort === 'latest' ? 0 : 2}&pn=${page}&ps=${ps}`, options);
+  return commentPage(data, page, ps);
+}
+export async function commentReplies(aid, root, page = 1, ps = 20, options = {}) {
+  const data = await jget(
+    `https://api.bilibili.com/x/v2/reply/reply?type=1&oid=${encodeURIComponent(aid)}&root=${encodeURIComponent(root)}&pn=${page}&ps=${ps}`, options);
+  return commentPage(data, page, ps);
 }
 
 /* ---------- 下载（移植自 renderer/api.js videoDownloadInfo：type=mp4 整文件流 +

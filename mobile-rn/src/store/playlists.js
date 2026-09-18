@@ -88,8 +88,9 @@ import { trackKeyOf } from '../player/track';
 export { trackKeyOf } from '../player/track';
 
 /** 订阅式钩子：返回本地歌单数组（加载完成前为 []） */
-export function usePlaylists() {
-  const [list, setList] = useState(cache || []);
+const EMPTY_PLAYLISTS = [];
+export function usePlaylists({ withStatus = false } = {}) {
+  const [list, setList] = useState(cache);
   useEffect(() => {
     let mounted = true;
     ensureLoaded().then((v) => { if (mounted) setList(v); });
@@ -97,7 +98,7 @@ export function usePlaylists() {
     listeners.add(onChange);
     return () => { mounted = false; listeners.delete(onChange); };
   }, []);
-  return list;
+  return withStatus ? { playlists: list || EMPTY_PLAYLISTS, ready: list !== null } : list || EMPTY_PLAYLISTS;
 }
 
 export async function createPlaylist(title, tracks = [], metadata = {}) {

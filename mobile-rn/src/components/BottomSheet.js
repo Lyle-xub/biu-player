@@ -4,6 +4,7 @@ import { PanGestureHandler, State } from 'react-native-gesture-handler';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors } from '../theme';
 import Overlay from './Overlay';
+import SheetContent from './SheetContent';
 
 export default function BottomSheet({ visible, onClose, animationType = 'slide', placement = 'bottom', style, children }) {
   const [present, setPresent] = useState(visible);
@@ -39,6 +40,13 @@ function SheetSurface({ visible, placement, onHidden, onClose, animationType, st
   const insets = useSafeAreaInsets();
   const { height: windowHeight } = useWindowDimensions();
   const [height, setHeight] = useState(0);
+  const [entered, setEntered] = useState(false);
+  useLayoutEffect(() => {
+    if (!visible) return undefined;
+    setEntered(false);
+    const timer = setTimeout(() => setEntered(true), 320);
+    return () => clearTimeout(timer);
+  }, [visible]);
   const progress = useRef(new Animated.Value(0)).current;
   const drag = useRef(new Animated.Value(0)).current;
   const dragEvent = React.useMemo(() => Animated.event([{ nativeEvent: { translationY: drag } }],
@@ -50,10 +58,10 @@ function SheetSurface({ visible, placement, onHidden, onClose, animationType, st
     if (visible) { drag.stopAnimation(); drag.setValue(0); }
     const animation = Animated.timing(progress, {
       toValue: visible ? 1 : 0, duration: visible ? 280 : 220,
-      easing: Easing.out(Easing.cubic), useNativeDriver: true,
+      easing: Easing.out(Easing.cubic), useNativeDriver: true, isInteraction: false,
     });
     animation.start(({ finished }) => {
-      if (finished && !cancelled && !visible) onHidden();
+      if (finished && !cancelled) { if (visible) setEntered(true); else onHidden(); }
     });
     return () => { cancelled = true; animation.stop(); };
   }, [visible, progress, drag, onHidden]);
@@ -62,7 +70,7 @@ function SheetSurface({ visible, placement, onHidden, onClose, animationType, st
       if (state !== 'active') return;
       progress.stopAnimation(); progress.setValue(visible ? 1 : 0);
       drag.stopAnimation(); drag.setValue(0);
-      if (!visible) onHidden();
+      if (visible) setEntered(true); else onHidden();
     });
     return () => subscription.remove();
   }, [visible, progress, drag, onHidden]);
@@ -95,7 +103,7 @@ function SheetSurface({ visible, placement, onHidden, onClose, animationType, st
           marginLeft: insets.left, marginRight: insets.right,
           opacity: animationType === 'fade' ? progress : 1,
           transform: [{ translateY: Animated.add(animationType === 'fade' ? 0
-            : progress.interpolate({ inputRange: [0, 1], outputRange: [height || windowHeight, 0] }),
+            : progress.interpolate({ inputRange: [0, 1], outputRange: [windowHeight, 0] }),
           drag.interpolate({ inputRange: [0, windowHeight], outputRange: [0, windowHeight], extrapolate: 'clamp' })) }],
         }]}>
         {!centered && <PanGestureHandler enabled={visible} minDist={4} maxPointers={1}
@@ -107,7 +115,7 @@ function SheetSurface({ visible, placement, onHidden, onClose, animationType, st
             <View accessible={false} style={styles.handle} />
           </Animated.View>
         </PanGestureHandler>}
-        {children}
+        {centered ? children : <SheetContent loading={!entered} fill={!!StyleSheet.flatten(style)?.height}>{children}</SheetContent>}
       </Animated.View>
     </KeyboardAvoidingView>
   );

@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { useNavigation } from '@react-navigation/native';
 import * as FileSystem from 'expo-file-system/legacy';
 import BottomSheet from './BottomSheet';
+import SheetContent from './SheetContent';
 import { colors } from '../theme';
 import * as bili from '../api/bili';
 import { get, streamHeaders } from '../api/client';
@@ -151,7 +152,7 @@ function Editor({ source, onClose }) {
     <View style={styles.header}><Text style={styles.title}>MixSplitR 分切</Text>
       <TouchableOpacity accessibilityRole="button" accessibilityLabel="关闭分切面板" onPress={onClose}><Text style={styles.action}>完成</Text></TouchableOpacity>
     </View>
-    <WebView ref={web} key={generation} source={PAGE} style={styles.web}
+    <SheetContent loading={!ready && !error} fill><WebView ref={web} key={generation} source={PAGE} style={styles.web}
       originWhitelist={['*']} javaScriptEnabled
       allowFileAccess={false} allowFileAccessFromFileURLs={false} allowUniversalAccessFromFileURLs={false}
       setSupportMultipleWindows={false} mixedContentMode="never" textZoom={100}
@@ -172,7 +173,7 @@ function Editor({ source, onClose }) {
       onError={({ nativeEvent }) => setError(nativeEvent.description || '编辑器加载失败')}
       onContentProcessDidTerminate={() => { setReady(false); setError('音频分析进程已退出，请重试'); }}
       onRenderProcessGone={() => { setReady(false); setError('音频分析进程已退出，请重试'); }} />
-    {!ready && !error ? <ActivityIndicator color={colors.accent} style={styles.loading} /> : null}
+    </SheetContent>
     {error ? <View><Text accessibilityRole="alert" style={styles.error}>{error}</Text>
       <TouchableOpacity onPress={() => { setError(''); setReady(false); setGeneration((n) => n + 1); }}><Text style={styles.action}>重试</Text></TouchableOpacity>
     </View> : null}

@@ -5,6 +5,7 @@ import { trackKeyOf } from '../player/track';
 import { addToPlaylist, removeFromPlaylist, transferPlaylistTrack } from '../store/playlists';
 import * as bili from '../api/bili';
 import BottomSheet from './BottomSheet';
+import SheetContent from './SheetContent';
 import PlaylistPicker from './PlaylistPicker';
 import RemoteImage from './RemoteImage';
 import { IconBack, IconCheck, IconChevronDown, IconChevronRight, IconHeart, IconNote, IconPlaylist, IconShare, IconStar, IconTrash } from './icons';
@@ -49,7 +50,7 @@ function TrackActionsSheet({ track, source, playlistId, removeTrack, onClose }) 
   };
   useEffect(() => {
     if (mode !== 'favorites') return;
-    if (!context.account?.isLogin) { setError('请先登录 B 站账号'); return; }
+    if (!context.account?.isLogin) { setLoading(false); setError('请先登录 B 站账号'); return; }
     let current = true;
     setLoading(true); setError('');
     bili.favFolders(context.account.mid).then((items) => { if (current) setFolders(items); })
@@ -91,7 +92,11 @@ function TrackActionsSheet({ track, source, playlistId, removeTrack, onClose }) 
     <Icon size={23} color={selected ? colors.accent : colors.text2} filled={selected} />
     <Text style={[styles.quickLabel, selected && { color: colors.accent }]}>{label}</Text>
   </TouchableOpacity>;
-  const switchMode = (value) => { setError(''); setMode(value); };
+  const switchMode = (value) => {
+    setError('');
+    if (value === 'favorites') { setFolders([]); setLoading(!!context.account?.isLogin); }
+    setMode(value);
+  };
   const liked = context.isLiked(track), inLibrary = context.isInLibrary(track);
   const collectionName = source === 'likes' ? '我的喜欢' : source === 'library' ? '音乐库' : '歌单';
   return <BottomSheet visible onClose={onClose} style={styles.sheet}>
@@ -130,9 +135,8 @@ function TrackActionsSheet({ track, source, playlistId, removeTrack, onClose }) 
             {item(source === 'library' && liked ? '删除并取消喜欢' : '从当前列表删除', () => run(() => removeTrack(track)), IconTrash, { danger: true })}
           </View>
         </> : <>
-          {loading ? <View style={styles.status}><ActivityIndicator color={colors.accent} /><Text style={styles.detail}>正在加载收藏夹</Text></View> :
-            <View style={folders.length ? styles.group : undefined}>{folders.map((folder) => item(folder.title, () => favorite(folder), IconStar,
-              { accessibilityLabel: `加入「${folder.title}」`, detail: Number.isFinite(folder.media_count) ? `${folder.media_count} 个视频` : undefined }))}</View>}
+          <SheetContent loading={loading} minHeight={240}><View style={folders.length ? styles.group : undefined}>{folders.map((folder) => item(folder.title, () => favorite(folder), IconStar,
+              { accessibilityLabel: `加入「${folder.title}」`, detail: Number.isFinite(folder.media_count) ? `${folder.media_count} 个视频` : undefined }))}</View></SheetContent>
           {!loading && !error && !folders.length ? <Text style={styles.empty}>暂无收藏夹，请先在 B 站创建</Text> : null}
           {error && context.account?.isLogin ? item('重新加载收藏夹', () => setRetry((n) => n + 1), IconStar) : null}
         </>}
