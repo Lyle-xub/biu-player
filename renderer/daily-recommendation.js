@@ -134,6 +134,8 @@
       mid: clean(t.mid || t.owner?.mid, 40), pic: /^https?:\/\//.test(t.pic || '') ? clean(t.pic, 2048) : '',
       duration: Math.max(0, Number(t.duration) || 0), tid: Number(t.tid || t.typeid) || 0, tags: labels(t),
       desc: clean(t.desc || t.description, 1500), at: Number(t.at) || Date.now() };
+    if(t.profileId) out.profileId=clean(t.profileId,40);
+    if(t.recommendationScope) out.recommendationScope=clean(t.recommendationScope,20);
     for (const k of ['cid', 'aid']) if (Number.isFinite(Number(t[k]))) out[k] = Number(t[k]);
     if (t.isSegment && Number.isFinite(t.from) && Number.isFinite(t.to) && t.from >= 0 && t.to > t.from) {
       Object.assign(out, { isSegment: true, from: t.from, to: t.to });
@@ -172,7 +174,7 @@
       .map((v) => ({ name: clean(v.name, 40), active: v.active !== false, at: Math.max(0, Number(v.at) || 0) })), (v) => key(v.name)).slice(-200);
     const events = unique((Array.isArray(value.events) ? value.events : []).filter((v) => v && typeof v.id === 'string' && compact(v.track))
       .map((v) => ({ id: clean(v.id, 100), track: compact(v.track), at: Math.max(0, Number(v.at) || 0),
-        seconds: Math.max(0, Math.min(14400, Number(v.seconds) || 0)), manual: !!v.manual, search: !!v.search })), (v) => v.id)
+        profileId: clean(v.profileId || 'auto',40), seconds: Math.max(0, Math.min(14400, Number(v.seconds) || 0)), manual: !!v.manual, search: !!v.search })), (v) => v.id)
       .sort((a, b) => a.at - b.at || compareText(a.id, b.id)).slice(-4000);
     const days = unique((Array.isArray(value.days) ? value.days : []).filter((v) => v && /^\d{4}-\d{2}-\d{2}$/.test(v.date) && typeof v.profileId === 'string')
       .map((v) => ({ date: v.date, profileId: clean(v.profileId, 40), profileName: clean(v.profileName, 40),
@@ -343,7 +345,7 @@
     let session = null, last = null, saved = 0;
     const flush = () => { if (session && session.seconds > saved) { saved = session.seconds; Promise.resolve(record({ ...session })).catch(() => {}); } };
     return {
-      start(track, { manual = false, search = false } = {}) { flush(); const t = compact(track); session = t ? { id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`, track: t, at: Date.now(), seconds: 0, manual, search } : null; last = null; saved = 0; },
+      start(track, { manual = false, search = false, profileId = 'auto' } = {}) { flush(); const t = compact(track); session = t ? { id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`, track: t, at: Date.now(), seconds: 0, manual, search, profileId } : null; last = null; saved = 0; },
       tick(position, playing) {
         const now = Date.now();
         if (session && playing && last?.playing) {

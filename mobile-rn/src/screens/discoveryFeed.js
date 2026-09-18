@@ -1,6 +1,8 @@
 import { yieldToInput as yieldDiscoveryWork } from '../updates/networkGate';
 export { yieldToInput as yieldDiscoveryWork } from '../updates/networkGate';
-import { rank, tags as normalizeTags } from '../../../renderer/recommendation-profile';
+import { rank } from '../../../renderer/recommendation-profile';
+import { interests as profileInterests } from '../../../renderer/profile-interest';
+import { analysis } from '../recommendation/localAnalysis';
 import { videoTags, musicRecommendations } from '../api/bili';
 
 // Public video metadata only; neither profile decisions nor account data are cached.
@@ -53,14 +55,21 @@ export async function filterDiscoveryCandidates(candidates, snapshot, onBatch, i
   if (snapshot.enabled === false) { publish(candidates); return selected; }
   const profile = snapshot.activeId === 'auto' ? snapshot.auto
     : snapshot.profiles?.find((item) => item.id === snapshot.activeId);
-  const interests = normalizeTags(profile?.tags);
+  const interests = profileInterests(profile);
   if (!interests.length) return selected;
+  analysis.observe(candidates,profile);
   const unique = [...new Map(candidates.filter((item) => item?.bvid).map((item) => [item.bvid, item])).values()];
   for (let offset = 0; offset < unique.length && isCurrent(); offset += 4) {
     await yieldDiscoveryWork(options.signal);
     if (!isCurrent()) return selected;
     const failures = [];
+    // Titles and cached analysis are enough to publish a first batch immediately.
+    const slice = unique.slice(offset, offset + 4);
+    const titleMatches = rank(slice.map(item=>({...item,tags:[]})), profile, [...seen], slice.length,{prior:selected,evidence:analysis.evidence(slice,profile)});
+    publish(titleMatches.map(t=>({...t,discoveryVerifiedAt:Date.now()})));
+    const accepted = new Set(titleMatches.map(item=>item.bvid));
     const batch = await Promise.all(unique.slice(offset, offset + 4).map(async (item) => {
+      if(accepted.has(item.bvid)) return null;
       try {
         let verified = metadata.get(item.bvid);
         if (!verified || Date.now() - verified.at > 600000) {
@@ -71,9 +80,9 @@ export async function filterDiscoveryCandidates(candidates, snapshot, onBatch, i
         }
         // Recommendation-card labels are not verified video tags.
         return { ...item, tags: verified.tags, discoveryVerifiedAt: verified.at };
-      } catch (error) { failures.push({ item, error }); return null; }
+      } catch (error) { failures.push({ item, error }); return { ...item, tags: [] }; }
     }));
-    publish(rank(batch.filter(Boolean), profile, [...seen], batch.length, { tagsOnly: true }));
+    publish(rank(batch.filter(Boolean), profile, [...seen], batch.length,{prior:selected,evidence:analysis.evidence(batch.filter(Boolean),profile)}));
     // An unavailable metadata service is not an empty recommendation stream.
     // Keep failed/unprocessed candidates so retry checks the same videos.
     if (failures.length && isCurrent()) {

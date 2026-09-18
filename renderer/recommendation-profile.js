@@ -1,8 +1,8 @@
-/* Shared by desktop and React Native: account-scoped profiles and tag recommendations. */
+/* Shared by desktop and React Native: account-scoped interests and recommendations. */
 (function (root, factory) {
-  if (typeof module === 'object' && module.exports) module.exports = factory(require('./daily-recommendation'), require('./daily-music-source'));
-  else root.BiuRecommendation = factory(root.BiuDaily, root.BiuDailyMusic);
-})(typeof window === 'object' ? window : this, function (D, M) {
+  if (typeof module === 'object' && module.exports) module.exports = factory(require('./daily-recommendation'), require('./daily-music-source'), require('./profile-interest'));
+  else root.BiuRecommendation = factory(root.BiuDaily, root.BiuDailyMusic, root.BiuProfileInterest);
+})(typeof window === 'object' ? window : this, function (D, M, I) {
   // Hermes delegates localeCompare to Android ICU. Reuse its native collator
   // instead of allocating one per comparison during large sync/profile sorts.
   const compareText = typeof Intl !== 'undefined' && Intl.Collator
@@ -29,15 +29,18 @@
       if (!item || typeof item.bvid !== 'string' || !item.bvid || item.bvid.length > 40
         || !Object.hasOwn(SOURCE_WEIGHT, item.source)) continue;
       const next = { bvid: item.bvid, source: item.source, owner: clean(item.owner || item.bvid),
+        profileId: clean(item.profileId), pic: String(item.pic || '').slice(0,2048), up: String(item.up || '').slice(0,100),
         title: String(item.title || '').slice(0, 500), desc: String(item.desc || '').slice(0, 1500),
         at: Math.max(0, Number(item.at) || 0),
         ...(Array.isArray(item.tags) ? { tags: tags(item.tags).map((t) => t.name).sort() }
           : item.retryAt ? { retryAt: Math.max(0, Number(item.retryAt) || 0) } : {}) };
-      const old = byVideo.get(next.bvid);
-      if (!old) { byVideo.set(next.bvid, next); continue; }
+      const evidenceKey=next.bvid+':'+(next.profileId || 'auto');
+      const old = byVideo.get(evidenceKey);
+      if (!old) { byVideo.set(evidenceKey, next); continue; }
       const labels = old.tags && next.tags
         ? (JSON.stringify(old.tags) < JSON.stringify(next.tags) ? old.tags : next.tags) : old.tags || next.tags;
-      byVideo.set(next.bvid, { bvid: next.bvid,
+      byVideo.set(evidenceKey, { bvid: next.bvid,
+        profileId: old.profileId || next.profileId, pic: [old.pic,next.pic].filter(Boolean).sort()[0] || '', up: [old.up,next.up].filter(Boolean).sort()[0] || '',
         title: [old.title, next.title].filter(Boolean).sort()[0] || '', desc: [old.desc, next.desc].filter(Boolean).sort()[0] || '',
         source: SOURCE_WEIGHT[old.source] >= SOURCE_WEIGHT[next.source] ? old.source : next.source,
         owner: old.owner === old.bvid ? next.owner : next.owner === next.bvid ? old.owner : old.owner < next.owner ? old.owner : next.owner,
@@ -64,9 +67,10 @@
     for (const p of Array.isArray(value?.profiles) ? value.profiles.slice(0, 20) : []) {
       const id = clean(p?.id), name = clean(p?.name);
       if (!id || !name || ids.has(id)) continue;
-      ids.add(id); profiles.push({ id, name, tags: tags(p.tags) });
+      ids.add(id); profiles.push({ id, name, tags: tags(p.tags), ...(p.interests ? { interests: I.normalize(p.interests) } : {}), ...(p.learned ? { learned: I.learned(p.learned) } : {}) });
     }
     const auto = { id: 'auto', name: '近期画像', tags: tags(value?.auto?.tags),
+      ...(value?.auto?.interests ? { interests: I.normalize(value.auto.interests) } : {}), ...(value?.auto?.learned ? { learned: I.learned(value.auto.learned) } : {}),
       updatedAt: Number(value?.auto?.updatedAt) || 0, fingerprint: String(value?.auto?.fingerprint || '').slice(0, 2000),
       samples: Math.max(0, Number(value?.auto?.samples) || 0), failures: Math.max(0, Number(value?.auto?.failures) || 0),
       sources: Object.fromEntries(['likes', 'playlists', 'feed'].map((key) => [key,
@@ -80,8 +84,14 @@
     }
     const daily = D.normalize(value?.daily);
     if (!ids.has(daily.profileId)) daily.profileId = 'auto';
-    if (auto.evidence && learn) auto.tags = D.taste(auto.evidence, daily).tags;
-    else auto.tags = auto.tags.filter((v) => !['noise', 'format'].includes(D.category(v.name)) && !D.activeRules(daily.ignored).includes(v.name));
+    if (learn) {
+      for (const p of [auto,...profiles]) {
+        const learned = I.learn(auto.evidence || [], daily.events, p.id);
+        if(learned.tags.length || learned.authors.length || learned.samples.length) p.learned=learned;
+        if(p.id==='auto' && (auto.evidence || daily.events.length)) p.tags = tags([...D.taste((auto.evidence || []).filter(e=>!e.profileId || e.profileId==='auto'),{...daily,events:daily.events.filter(e=>!e.profileId || e.profileId==='auto')}).tags,...learned.tags]);
+      }
+    }
+    auto.tags = auto.tags.filter(v => D.category(v.name)!=='noise' && !D.activeRules(daily.ignored).includes(v.name));
     return { version: 1, enabled: value?.enabled !== false, activeId: ids.has(value?.activeId) ? value.activeId : 'auto', auto, profiles, daily };
   }
   const activeProfile = (state) => state.profiles.find((p) => p.id === state.activeId) || state.auto;
@@ -90,7 +100,7 @@
   // Background learning must not invalidate an already visible feed. Only a
   // changed selection or custom filter requires removing the previous results.
   const feedSelection = (state) => JSON.stringify([state.enabled,
-    state.enabled ? state.activeId : null, isStrict(state) ? activeProfile(state).tags : null]);
+    state.enabled ? state.activeId : null, isStrict(state) ? activeProfile(state).tags : null, state.enabled ? I.selection(activeProfile(state).interests) : null]);
   const feedChanged = (before, after) => feedSelection(before) !== feedSelection(after);
   // Missing data means an older peer, not a request to delete its profiles.
   function syncState(value) {
@@ -112,6 +122,7 @@
           || v.tags.some((name) => typeof name !== 'string' || !name || name.length > 40)))))) {
       throw new Error('画像累计分析记录无效');
     }
+    [value.auto,...value.profiles].forEach(p=>I.validate(p.interests));
     D.validate(value.daily);
     return normalize(value, false);
   }
@@ -126,15 +137,15 @@
       if (before.has(id) && (!left.has(id) || !right.has(id))) return [];
       const l = left.get(id), r = right.get(id), b = before.get(id);
       if (!l || !r) return [l || r];
-      if (!b) return [l];
+      if (!b) return [{...l,interests:I.merge(l.interests,r.interests)}];
       return [{ id, name: same(b.name, r.name) ? l.name : r.name,
-        tags: same(b.tags, r.tags) ? l.tags : r.tags }];
+        tags: same(b.tags, r.tags) ? l.tags : r.tags, interests:I.merge(l.interests,r.interests), learned:l.learned || r.learned }];
     });
     if (profiles.length > 20) throw new Error('合并后超过 20 份推荐画像，请先删除不需要的画像');
     const initial = local.profiles.length || local.auto.updatedAt || !local.enabled ? local : remote;
     const remoteNewer = remote.auto.updatedAt > local.auto.updatedAt || (remote.auto.updatedAt === local.auto.updatedAt
       && JSON.stringify(remote.auto.tags) > JSON.stringify(local.auto.tags));
-    const result = { ...initial, profiles, auto: remoteNewer ? remote.auto : local.auto };
+    const result = { ...initial, profiles, auto: {...(remoteNewer ? remote.auto : local.auto), interests:I.merge(local.auto.interests,remote.auto.interests)} };
     if (local.auto.evidence || remote.auto.evidence) {
       result.auto = { ...result.auto, evidence: mergeEvidence(local.auto.evidence || [], remote.auto.evidence || []) };
     }
@@ -222,7 +233,7 @@
     });
     const evidence = mergeEvidence(previous.evidence || legacy, recent.map(({ track, source }) => ({
       bvid: track.bvid, owner: String(track.mid || track.up || track.bvid), source, at: Date.now(),
-      title: track.title, desc: track.desc || track.description,
+      title: track.title, desc: track.desc || track.description, pic:track.pic, up:track.up, profileId:track.profileId,
     })));
     const pending = evidence.filter((v) => !Array.isArray(v.tags) && (force || !v.retryAt || v.retryAt <= Date.now()));
     // Bound work per turn, not the number of videos retained. Continue the queue in the background.
@@ -245,9 +256,15 @@
     return compute ? compute('profileBuildFinish', evidence, batch, results, previous, !!recent.length)
       : finishBuild(evidence, batch, results, previous, !!recent.length);
   }
+  function recordEvidence(state,track,source,profileId) {
+    if(!track?.bvid || !['likes','playlists'].includes(source)) return state;
+    if(profileId!=='auto'&&!state.profiles.some(p=>p.id===profileId))return state;
+    const value={bvid:track.bvid,owner:String(track.mid || track.up || track.bvid),up:track.up,pic:track.pic,title:track.title,desc:track.desc,source,profileId,at:Date.now(),...(Array.isArray(track.tags)?{tags:tags(track.tags).map(t=>t.name)}:{})};
+    return {...state,auto:{...state.auto,evidence:mergeEvidence(state.auto.evidence||[],[value])}};
+  }
   // Weighted round robin: strong interests recur more often; weaker ones still get discovery slots.
   function queries(profile, page = 0, batchSize) {
-    const list = tags(profile?.tags).sort((a, b) => b.weight - a.weight).slice(0, 12);
+    const list = tags(I.interests(profile)).sort((a, b) => b.weight - a.weight).slice(0, 12);
     if (!list.length) return [];
     const counts = list.map(() => 0), selected = [];
     const batch = batchSize || Math.min(3, list.length), offset = Math.max(0, Math.min(1000, Math.floor(page))) * batch;
@@ -267,32 +284,32 @@
     return /^[a-z0-9]/i.test(word) || /[a-z0-9]$/i.test(word)
       ? new RegExp(`(^|[^a-z0-9])${escaped}($|[^a-z0-9])`, 'i').test(title) : title.includes(word);
   }
-  function rank(candidates, profile, excluded = [], limit = 18, { tagsOnly = false } = {}) {
-    const seen = new Set(excluded), selected = [], owners = new Map(), interests = tags(profile?.tags);
-    const pool = candidates.filter((track) => {
-      if (!track.bvid || seen.has(track.bvid)) return false;
+  function rank(candidates, profile, excluded = [], limit = 18, { tagsOnly = false, evidence = {}, prior = [] } = {}) {
+    const seen = new Set(excluded), selected = [], owners = new Map();
+    const pool = candidates.filter(track => {
+      if (!track?.bvid || seen.has(track.bvid)) return false;
       seen.add(track.bvid); return true;
-    }).map((track) => {
-      const names = new Set(tags(track.tags).map((tag) => interestKey(tag.name)));
-      const title = String(track.title || '').normalize('NFKC').toLowerCase();
-      const matches = interests.filter((tag) => names.has(interestKey(tag.name))
-        // A broad hosiery interest includes its specific types, not vice versa.
-        || (keyOf(tag.name) === '丝袜' && ['黑丝', '白丝', '肉丝', '连裤袜', '长筒袜'].some((name) => names.has(name)))
-        || (!tagsOnly && titleMatches(title, tag.name)));
-      const score = matches.reduce((sum, tag) => sum + tag.weight, 0);
-      return { track, score, matches };
-    }).filter((item) => item.score > 0);
-    while (pool.length && selected.length < limit) {
-      pool.sort((a, b) => b.score / (1 + (owners.get(b.track.mid || b.track.up) || 0) * 0.7)
-        - a.score / (1 + (owners.get(a.track.mid || a.track.up) || 0) * 0.7));
-      const { track, matches } = pool.shift();
-      const owner = track.mid || track.up;
-      owners.set(owner, (owners.get(owner) || 0) + 1);
-      selected.push({ ...track, recommendationReason: `画像 · ${matches.slice(0, 2).map((tag) => tag.name).join(' / ')}` });
+    }).map(track => {
+      // Preserve explicit aliases while sharing the same general theme gate.
+      const labels=tags(track.tags).map(t=>t.name);
+      if(labels.some(n=>interestKey(n)==='cosplay') || !tagsOnly && !/(cos(?:play|er)?|丝袜)(软件|应用|插件|代码)/i.test(track.title||'') && /(^|[^a-z0-9])cos(?:play|er)?($|[^a-z0-9])/i.test(track.title||'')) labels.push('cos','cosplay','coser');
+      if(labels.some(n=>['黑丝','白丝','肉丝','连裤袜','长筒袜'].includes(n))) labels.push('丝袜');
+      const value=I.evaluate({...track,title:tagsOnly?'':track.title,tags:labels},profile,evidence[track.bvid]);
+      return {track,...value};
+    }).filter(v=>v.eligible);
+    let visualCount=prior.filter(t=>t.recommendationVisualOnly===true).length;
+    while(pool.length && selected.length<limit) {
+      pool.sort((a,b)=>b.score/(1+(owners.get(b.track.mid || b.track.up)||0)*0.7)-a.score/(1+(owners.get(a.track.mid || a.track.up)||0)*0.7));
+      const index=pool.findIndex(v=>!v.visualOnly || visualCount<Math.floor((prior.length+selected.length+1)*0.2));
+      if(index<0) break;
+      const [next]=pool.splice(index,1);
+      if(next.visualOnly) visualCount++;
+      const owner=next.track.mid || next.track.up; owners.set(owner,(owners.get(owner)||0)+1);
+      selected.push({...next.track,recommendationVisualOnly:next.visualOnly,recommendationReason:next.reasons.join(' · ')});
     }
     return selected;
   }
-  async function recommend(profile, { get, page = 0, mode = 'music', exclude = [], strict = false, onBatch, daily = false }) {
+  async function recommend(profile, { get, page = 0, mode = 'music', exclude = [], strict = false, onBatch, daily = false, analyze = null }) {
     // Stream three distinct comprehensive-search pages per round.
     const dailyPage = Math.max(0, Math.floor(page));
     const searches = daily ? [0, 1, 2].map((offset) => ({ name: '日推', page: dailyPage * 3 + offset + 1, order: 'totalrank' }))
@@ -312,7 +329,7 @@
         if (!detail || (mode === 'music' && !MUSIC.has(Number(detail.tid)))) return null;
         let labels = tags(typeof v.tag === 'string' ? v.tag.split(',') : v.tags);
         if (v.tag == null && v.tags == null && !rank([{ ...detail, bvid: v.bvid }], profile).length) {
-          labels = await videoTags(get, v.bvid);
+          try { labels = await videoTags(get, v.bvid); } catch(error) { failure=error; }
         }
         return { bvid: v.bvid, aid: detail.aid, cid: detail.cid, title: String(detail.title || '').replace(/<[^>]*>/g, '').slice(0, 500),
           up: detail.owner?.name || v.author || '', mid: detail.owner?.mid || v.mid,
@@ -334,6 +351,7 @@
           });
       } catch (error) { failure = error; return; }
       const details = (await mapLimit(videos, resolveTrack)).filter(Boolean);
+      analyze?.observe?.(details,profile);
       if (daily) {
         candidates.push(...details);
         if (details.length) onBatch?.(details, { order: 'totalrank' });
@@ -341,14 +359,14 @@
       }
       if (!strict) { candidates.push(...details); return; }
       // Publish completed pages without reordering the cards already shown.
-      const batch = rank(details, profile, exclude, Math.max(0, 48 - result.length));
+      const batch = rank(details, profile, exclude, Math.max(0, 48 - result.length), {evidence:analyze?.evidence?.(details,profile) || {},prior:result});
       if (batch.length) {
         result.push(...batch);
         onBatch?.(batch);
       }
     });
     if (daily) result.push(...candidates);
-    else if (!strict) result.push(...rank(candidates, profile, exclude));
+    else if (!strict) result.push(...rank(candidates, profile, exclude,18,{evidence:analyze?.evidence?.(candidates,profile) || {}}));
     if (!result.length && failure) throw failure;
     return result;
   }
@@ -379,7 +397,7 @@
     });
     return out;
   }
-  function createManager({ read, write, get, getLikes, getPlaylists = () => [], compute, beginDaily = () => () => {} }) {
+  function createManager({ read, write, get, getLikes, getPlaylists = () => [], compute, analysis = null, beginDaily = () => () => {} }) {
     let snapshot = { ...normalize(null), ready: false, busy: false, error: '', revision: 0 };
     let initial, building, dailyBuilding, dailyEpoch = 0, writes = Promise.resolve(), edits = Promise.resolve();
     let refreshTimer, disposed = false, syncValue;
@@ -406,7 +424,7 @@
     // Syncing exposure history or learned interests must not cancel a running
     // daily queue. Only an explicit selection/filter change invalidates it.
     const dailySelection = (state) => JSON.stringify([state.daily.profileId,
-      state.profiles.find(p => p.id === state.daily.profileId)?.tags,
+      state.profiles.find(p => p.id === state.daily.profileId)?.tags, I.selection((state.daily.profileId==='auto'?state.auto:state.profiles.find(p => p.id === state.daily.profileId))?.interests),
       ...['ignored', 'muted', 'blocked'].map(key => D.activeRules(state.daily[key]))]);
     const commit = (next, refresh, normalizedInput = false) => {
       let normalized, resetFeed;
@@ -433,11 +451,11 @@
         const source = recentSamples(getLikes(), playlists, []);
         const knownSource = new Set(source.map((v) => v.track.bvid));
         snapshot.daily.events.filter(D.qualified).forEach((event) => {
-          if (!knownSource.has(event.track.bvid)) { knownSource.add(event.track.bvid); source.push({ track: event.track, source: 'listens' }); }
+          if (!knownSource.has(event.track.bvid)) { knownSource.add(event.track.bvid); source.push({ track: {...event.track,profileId:event.profileId || 'auto'}, source: 'listens' }); }
         });
-        const known = new Map((snapshot.auto.evidence || []).map((v) => [v.bvid, v]));
-        const changed = source.some((s) => !known.has(s.track.bvid)
-          || SOURCE_WEIGHT[s.source] > SOURCE_WEIGHT[known.get(s.track.bvid).source]);
+        const known = new Map((snapshot.auto.evidence || []).map((v) => [v.bvid+':'+(v.profileId||'auto'), v]));
+        const changed = source.some((s) => !known.has(s.track.bvid+':'+(s.track.profileId||'auto'))
+          || SOURCE_WEIGHT[s.source] > SOURCE_WEIGHT[known.get(s.track.bvid+':'+(s.track.profileId||'auto')).source]);
         if (!force && !changed && snapshot.auto.evidence
           && !snapshot.auto.evidence.some((v) => !v.tags && (!v.retryAt || v.retryAt <= Date.now()))) {
           await commit(current => normalizeAsync(current, true), false, true);
@@ -470,13 +488,17 @@
       else if (action.type === 'delete') {
         next.profiles = next.profiles.filter((p) => p.id !== action.id);
         if (next.activeId === action.id) next.activeId = 'auto';
+      } else if (action.type === 'interests') {
+        const p = action.id==='auto' ? next.auto : next.profiles.find(p=>p.id===action.id);
+        if (!p) throw Error('画像不存在');
+        p.interests=I.normalize({...p.interests,...action.patch,at:Date.now()});
       } else if (action.type === 'save') {
         const name = clean(action.name), labels = tags(action.tags);
-        if (!name || !labels.length) throw new Error('请填写画像名称并添加至少一个标签');
+        if (!name || (!labels.length && !String(action.interests?.description ?? next.profiles.find(p=>p.id===action.id)?.interests?.description ?? '').trim())) throw new Error('请填写画像名称，并添加兴趣主题或描述');
         const old = next.profiles.find((p) => p.id === action.id);
         if (!old && next.profiles.length >= 20) throw new Error('最多保存 20 份画像，请先删除不需要的画像');
         const id = old?.id || `p${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
-        const profile = { id, name, tags: labels };
+        const profile = { ...old, id, name, tags: labels, interests:I.normalize({...old?.interests,...action.interests,at:Date.now()}) };
         next.profiles = old ? next.profiles.map((p) => p.id === id ? profile : p) : [...next.profiles, profile];
         next.activeId = id;
       }
@@ -496,9 +518,11 @@
         const profileId = snapshot.profiles.some(p => p.id === snapshot.daily.profileId) ? snapshot.daily.profileId : 'auto';
         const strict = profileId === 'auto' ? null : snapshot.profiles.find(p => p.id === profileId);
         const ignored = new Set(D.activeRules(snapshot.daily.ignored).map(D.canonical));
-        const searchProfile = { tags: (strict?.tags || snapshot.auto.tags).filter(t => !ignored.has(D.canonical(t.name))) };
+        const chosenProfile=strict || snapshot.auto;
+        const searchProfile = {tags:tags([...I.interests(chosenProfile),...D.semantic({title:chosenProfile.interests?.description}).map(t=>({name:t.name,weight:40}))]).filter(t=>!ignored.has(D.canonical(t.name)))};
         const epoch = dailyEpoch, deadline = Date.now() + 90000;
         const stopped = () => disposed || epoch !== dailyEpoch || snapshot.daily.profileId !== profileId;
+        if(!M.plans(searchProfile).length) throw Error('这份画像没有明确的音乐兴趣，请为每日歌曲推荐选择音乐相关画像');
         const source = M.create({ get, cache: dailyCache, profile: searchProfile, state: () => snapshot.daily, stopped: () => stopped() || Date.now() >= deadline,
           decode: compute ? (body,kind) => compute('dailySourceDecode',body,kind) : M.decode });
         let entry = !force && old && old.profileId === profileId ? { ...old } : {
@@ -548,6 +572,9 @@
               failures = batch.every(v=>v.error) ? failures+1 : 0;
               if (stopped()) break;
               const items = batch.map(v=>v.value).filter(Boolean);
+              analysis?.observe?.(items,chosenProfile);
+              const evidence=analysis?.evidence?.(items,chosenProfile) || {};
+              items.sort((a,b)=>I.evaluate(b,chosenProfile,evidence[b.bvid]).score-I.evaluate(a,chosenProfile,evidence[a.bvid]).score);
               entry.tracks = await selectSongs(items,snapshot.daily,entry.tracks,24,artistLimit);
               await save();
               if(failures>=2) throw batch.find(v=>v.error).error;
@@ -566,7 +593,11 @@
       })().catch((e) => { emit({ dailyError: e.message }); }).finally(() => { dailyBuilding = null; emit({ dailyBusy: false }); finishDaily(); });
       return dailyBuilding;
     }
-    return { ready, refresh, edit: (action) => enqueue(() => edit(action)),
+    return { ready, refresh, analysis,
+      async recordPreference(track,source='playlists',profileId=snapshot.activeId) {
+        await ready(); if(disposed)return;
+        return commit(s=>compute?compute('profileEvidence',s,track,source,profileId):recordEvidence(s,track,source,profileId),false);
+      }, edit: (action) => enqueue(() => edit(action)),
       generateDaily,
       async dailyAction(action) {
         await ready();
@@ -580,7 +611,9 @@
         }, false);
       },
       async recordListening(event) {
+        const profileId=event.profileId || snapshot.activeId;
         await ready();
+        event={...event,profileId};
         if (disposed || !D.compact(event.track)) return;
         await commit(() => compute ? compute('profileListening', syncValue, event)
           : { ...syncValue, daily: D.feedback(syncValue.daily, event) }, false, true);
@@ -638,7 +671,7 @@
         const exclude = [...(options?.exclude || []), ...(getLikes() || []).filter((t) => t?.bvid).map((t) => t.bvid)];
         let page = options?.page || 0, feed;
         if (strict) {
-          const key = JSON.stringify([profile.id, profile.tags, options?.mode || 'music']);
+          const key = JSON.stringify([profile.id, profile.tags, I.selection(profile.interests), options?.mode || 'music']);
           if (!strictFeeds.has(key)) {
             if (strictFeeds.size >= 40) strictFeeds.delete(strictFeeds.keys().next().value);
             strictFeeds.set(key, { page: 0, seen: new Set() });
@@ -658,7 +691,7 @@
           if (fresh.length) options?.onBatch?.(fresh);
         };
         let result;
-        try { result = await recommend(profile, { ...options, page, strict, get, exclude, onBatch: strict ? onBatch : undefined }); }
+        try { result = await recommend(profile, { ...options, analyze:analysis, page, strict, get, exclude, onBatch: strict ? onBatch : undefined }); }
         catch (error) {
           if (feed && feed.page === page + 1) feed.page = page;
           throw error;
@@ -679,5 +712,5 @@
     }));
   }
   const tagsText = (labels) => tags(labels).map((tag) => `${tag.name}:${tag.weight}`).join('\n');
-  return { prepareBuild, finishBuild, parseTagsText, tagsText, tags, normalize, syncState, reconcile, infer, recentLikes, recentSamples, activeProfile, isStrict, queries, rank, blend, createManager };
+  return { recordEvidence, prepareBuild, finishBuild, parseTagsText, tagsText, tags, normalize, syncState, reconcile, infer, recentLikes, recentSamples, activeProfile, isStrict, queries, rank, blend, createManager };
 });

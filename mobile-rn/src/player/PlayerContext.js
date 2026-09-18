@@ -1,3 +1,4 @@
+import { setAnalysisPlaybackBusy } from '../recommendation/localAnalysis';
 /* Biu Player RN · 全局播放状态（一个前台播放器，发现队列可接管预加载实例）
  * 点播与直播共用当前前台 VideoPlayer；发现页可把已预热的实例提升为前台：
  *   点播：progressive mp4 整文件流（bili.videoUrl，含音轨）——播放页歌词模式只是
@@ -79,6 +80,7 @@ export function PlayerProvider({ children }) {
   // useEvent retains its previous value when its emitter changes. Native reads
   // give the adopted player's actual state even when readiness happened offscreen.
   const isPlaying = player.playing, status = player.status;
+  useEffect(()=>setAnalysisPlaybackBusy(status==='loading'),[status]);
   const [currentTime, setCurrentTime] = useState(0);
   const pendingSeek = useRef(null);
 
@@ -640,14 +642,17 @@ export function PlayerProvider({ children }) {
     collectionWrites.current = operation.catch(() => {});
     return operation;
   }, []);
+  const profileManagersRef=useRef({});
   const toggleLike = useCallback((t) => {
     if (!t) return;
+    const scope=t.recommendationScope || (t.discoveryOrigin?'discovery':'home');
+    const profileId=profileManagersRef.current[scope]?.getSnapshot().activeId || 'auto';
     return changeCollections((before) => {
       const list = before.likes;
       const k = trackKeyOf(t);
       const nextL = list.some((x) => trackKeyOf(x) === k)
         ? list.filter((x) => trackKeyOf(x) !== k)
-        : [{ ...t, addedAt: Date.now() }, ...list];
+        : [{ ...t, recommendationScope: scope, profileId, addedAt: Date.now() }, ...list];
       return { ...before, likes: nextL };
     });
   }, [changeCollections]);
@@ -659,6 +664,8 @@ export function PlayerProvider({ children }) {
   );
   const toggleLibrary = useCallback((t) => {
     if (!t) return;
+    const scope=t.recommendationScope || (t.discoveryOrigin?'discovery':'home');
+    const profileId=profileManagersRef.current[scope]?.getSnapshot().activeId || 'auto';
     return changeCollections((before) => {
       const list = before.library;
       const key = trackKeyOf(t);
@@ -666,7 +673,7 @@ export function PlayerProvider({ children }) {
         && !list.some((x) => trackKeyOf(x) === key)) return before;
       const next = list.some((x) => trackKeyOf(x) === key)
         ? list.filter((x) => trackKeyOf(x) !== key)
-        : [{ ...t, addedAt: Date.now() }, ...list];
+        : [{ ...t, recommendationScope: scope, profileId, addedAt: Date.now() }, ...list];
       return { ...before, library: next };
     });
   }, [changeCollections]);
@@ -753,6 +760,7 @@ export function PlayerProvider({ children }) {
     recommendationProfile: discoveryRecommendationProfile } = useRecommendationProfile(
     account, likes, libraryReady, 'biu.discovery-recommendation-profiles',
   );
+  profileManagersRef.current={home:recommendationManager,discovery:discoveryRecommendationManager};
   const listening = useMemo(() => {
     const main = tracker((event) => recommendationManager.recordListening(event));
     const discovery = tracker((event) => discoveryRecommendationManager.recordListening(event));
@@ -760,8 +768,8 @@ export function PlayerProvider({ children }) {
       start(track, options) {
         // Each tracker flushes its previous session before starting the next.
         // Capture the source at selection, not when delayed ticks are persisted.
-        main.start(queueSourceRef.current === 'discovery' ? null : track, options);
-        discovery.start(queueSourceRef.current === 'discovery' ? track : null, options);
+        main.start(queueSourceRef.current === 'discovery' ? null : track, {...options,profileId:recommendationManager.getSnapshot().activeId});
+        discovery.start(queueSourceRef.current === 'discovery' ? track : null, {...options,profileId:discoveryRecommendationManager.getSnapshot().activeId});
       },
       tick(position, playing) { main.tick(position, playing); discovery.tick(position, playing); },
       flush() { main.flush(); discovery.flush(); },

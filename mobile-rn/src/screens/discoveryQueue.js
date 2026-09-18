@@ -1,4 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { interests, selection as interestSelection } from '../../../renderer/profile-interest';
 import { rank } from '../../../renderer/recommendation-profile';
 
 export const DISCOVERY_TARGET = 24;
@@ -7,8 +8,8 @@ const MAX_AGE = 600000;
 const profileKey = (snapshot) => {
   if (!snapshot || snapshot.ready === false) return '';
   const profile = snapshot.activeId === 'auto' ? snapshot.auto : snapshot.profiles?.find((item) => item.id === snapshot.activeId);
-  return snapshot.enabled === false ? 'native' : profile?.tags?.length
-    ? JSON.stringify([snapshot.activeId, profile.tags]) : '';
+  return snapshot.enabled === false ? 'native' : interests(profile).length
+    ? JSON.stringify([snapshot.activeId, profile.tags,interestSelection(profile.interests)]) : '';
 };
 // Keep the old App feed's pending cards out of the Web recommendation session.
 const key = (scope) => `biu.discovery-queue.web@${scope}`;
@@ -29,7 +30,7 @@ export async function readDiscoveryQueue(scope, snapshot, mode = 'all') {
     });
     const profile = snapshot.activeId === 'auto' ? snapshot.auto : snapshot.profiles?.find((item) => item.id === snapshot.activeId);
     if (snapshot.enabled === false) return tracks;
-    const allowed = new Set(rank(tracks, profile, [], tracks.length, { tagsOnly: true }).map((track) => track.bvid));
+    const allowed = new Set(rank(tracks, profile, [], tracks.length).map((track) => track.bvid));
     return tracks.filter((track) => allowed.has(track.bvid)); // Preserve explicitly arranged related runs.
   } catch { return []; }
 }

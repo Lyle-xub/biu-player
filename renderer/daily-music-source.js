@@ -43,7 +43,7 @@
     return (profile.tags || []).filter(t => !nonmusic.test(t.name)).sort((a,b) => b.weight-a.weight).flatMap(t => {
       const name = D.canonical(t.name), category = categories[name] || categories[t.name];
       const key = category || name;
-      if (seen.has(key) || D.category(name) === 'noise' || D.category(name) === 'format') return [];
+      if (seen.has(key) || (!category && D.category(name)!=='artist')) return [];
       seen.add(key); return [{ name:t.name, category, weight:t.weight || 1 }];
     }).slice(0, 8);
   }

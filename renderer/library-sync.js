@@ -8,7 +8,7 @@
   function track(v) {
     if (!object(v) || (v.isLive ? !(Number(v.roomid) > 0) : !/^BV\w+$/.test(v.bvid || ''))) throw new Error('歌曲数据无效');
     const out = {};
-    for (const k of ['bvid', 'aid', 'cid', 'mid', 'title', 'up', 'duration', 'roomid', 'area', 'online', 'parentBvid', 'parentTitle', 'parentUp', 'parentMid', 'addedAt']) {
+    for (const k of ['bvid', 'aid', 'cid', 'mid', 'title', 'up', 'duration', 'roomid', 'area', 'online', 'parentBvid', 'parentTitle', 'parentUp', 'parentMid', 'addedAt', 'profileId', 'recommendationScope']) {
       if (text(v[k]) || Number.isFinite(v[k])) out[k] = v[k];
     }
     if (text(v.pic, 8192) && /^https?:\/\//i.test(v.pic)) out.pic = v.pic;

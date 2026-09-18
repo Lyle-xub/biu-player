@@ -1,3 +1,4 @@
+import { pauseAnalysis } from '../recommendation/analysisGate';
 // Bounded metadata-only diagnostics. No titles, account IDs, library or keys.
 const events = [];
 const now = () => performance.now();
@@ -9,7 +10,7 @@ export function recordTiming(name, milliseconds, phase = 'js') {
   if (milliseconds >= 100) console.info('[BiuTiming]', JSON.stringify(event));
 }
 export const readTimings = () => events.slice();
-export function navigationPressed(target) { navigation = { target, started: now() }; }
+export function navigationPressed(target) { pauseAnalysis(); navigation = { target, started: now() }; }
 export function navigationCommitted(target) {
   const request = navigation;
   if (!request || request.target !== target) return;

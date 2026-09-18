@@ -12,7 +12,9 @@ const compute = require('../mobile-rn/scripts/build-compute.cjs');
 const runCompute = require(compute())();
 
 function loader(mocks = {}) {
+  const emptyAI={};
   mocks = {
+    'src/recommendation/localAnalysis': {analysis:{observe(){},evidence(){return {};},pause(){}},setAnalysisPlaybackBusy(){},modelManager:{ready:async()=>{},subscribe:()=>()=>{},getSnapshot:()=>emptyAI}},
     'src/performance/backgroundCompute': { backgroundCompute: async (operation, ...args) => runCompute(operation, ...args) },
     '@react-native-async-storage/async-storage': { getItem: async () => null, setItem: async () => {} },
     'biu-lyric-monet': {},
@@ -4199,7 +4201,7 @@ test('discovery verifies App labels, bounds classification and caches public tag
     if (gates.size === 6) secondStarted.resolve();
     try { return await gate.promise; } finally { pending--; }
   } } })('src/screens/discoveryFeed.js');
-  const candidates = Array.from({ length: 6 }, (_, i) => ({ bvid: `BVtag${i}`, title: `钢琴 ${i}`, tags: ['钢琴'] }));
+  const candidates = Array.from({ length: 6 }, (_, i) => ({ bvid: `BVtag${i}`, title: `作品 ${i}`, tags: ['钢琴'] }));
   const state = R.normalize({ auto: { tags: ['钢琴'] }, profiles: [{ id: 'piano', name: '钢琴', tags: ['钢琴'] }] });
   const result = filterDiscoveryCandidates(candidates, state, (items) => batches.push(items.map((v) => v.bvid)), () => true);
   assert.deepEqual(batches, [], 'App card tags never publish before verification');
@@ -5024,8 +5026,8 @@ test('discovery viewing and autoplay never enter the main taste, while ordinary 
   let now = 100000, context, tree;
   t.mock.method(Date, 'now', () => now);
   const events = {}, mainEvents = [], discoveryEvents = [];
-  const main = { recordListening: (event) => mainEvents.push(event) };
-  const discovery = { recordListening: (event) => discoveryEvents.push(event) };
+  const main = { getSnapshot:()=>({activeId:'auto'}), recordListening: (event) => mainEvents.push(event) };
+  const discovery = { getSnapshot:()=>({activeId:'auto'}), recordListening: (event) => discoveryEvents.push(event) };
   const player = { playing: false, status: 'readyToPlay', duration: 180, currentTime: 0,
     play() { this.playing = true; }, pause() { this.playing = false; },
     async replaceAsync(source) { this.source = source; events.sourceLoad({ videoSource: source }); } };

@@ -3,12 +3,18 @@ import library from '../../../renderer/library-sync';
 import profile from '../../../renderer/recommendation-profile';
 import daily from '../../../renderer/daily-recommendation';
 import dailyMusic from '../../../renderer/daily-music-source';
+import tokenizer from '../../../renderer/profile-tokenizer';
+let vocabulary;
 import md5 from 'js-md5';
 import { Buffer } from 'buffer';
 import { seal, unseal, hash } from '../cloud/envelope';
 
 export function compute(operation, ...args) {
   switch (operation) {
+    case 'profileTokenize':
+      if(args[1]) vocabulary=JSON.parse(args[1]).model.vocab;
+      if(!vocabulary) throw Error('分词器未加载');
+      return tokenizer.encode(args[0],vocabulary);
     case 'parse': return JSON.parse(args[0]);
     case 'lanParse': return JSON.parse(Buffer.concat(args[0].map(part => Buffer.from(part, 'base64'))).toString('utf8'));
     case 'lanReply': {
@@ -38,6 +44,7 @@ export function compute(operation, ...args) {
     }
     case 'libraryFingerprint': return hash(JSON.stringify(library.normalize(...args)));
     case 'libraryPreview': return JSON.stringify(library.normalize(...args), null, 2).slice(0, 32000);
+    case 'profileEvidence': return profile.recordEvidence(...args);
     case 'profileBuildPrepare': return profile.prepareBuild(...args);
     case 'profileBuildFinish': return profile.finishBuild(...args);
     case 'profileNormalize': return profile.normalize(args[0], args[1]);

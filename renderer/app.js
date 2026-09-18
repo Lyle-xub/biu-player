@@ -1533,7 +1533,7 @@ function toggleTrackInPlaylist(index) {
     pl.tracks.splice(at, 1);
     toast(`已从「${pl.title}」移除`);
   } else {
-    pl.tracks.unshift(trackCopy(t));
+    pl.tracks.unshift({...trackCopy(t),recommendationScope:'home',profileId:recommendationProfiles.manager().getSnapshot().activeId});
     toast(`已加入「${pl.title}」`);
   }
   saveCustomPlaylists();
@@ -2091,7 +2091,7 @@ function toggleLike(t) {
     likes = likes.filter((l) => trackKey(l) !== trackKey(t));
     toast('已取消喜欢');
   } else {
-    likes.unshift({ ...trackCopy(t), addedAt: Date.now() });
+    likes.unshift({ ...trackCopy(t), recommendationScope:'home', profileId:recommendationProfiles.manager().getSnapshot().activeId, addedAt: Date.now() });
     toast('已加入我喜欢');
   }
   saveLikes();

@@ -47,7 +47,8 @@
     "react-native-view-shot": "5.1.0",
     "react-native-webview": "13.16.1",
     "react-native-worklets": "^0.10.1",
-    "react-native-zeroconf": "^0.14.0"
+    "react-native-zeroconf": "^0.14.0",
+    "biu-profile-ai": "file:modules/biu-profile-ai"
   },
   "scripts": {
     "start": "expo start --dev-client --lan",

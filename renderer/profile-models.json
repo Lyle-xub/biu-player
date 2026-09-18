@@ -1,0 +1,42 @@
+{
+  "text": {
+    "id": "text-75c43b069aac4d136ba6bc1122f995fedcfd2781",
+    "label": "标题语义",
+    "files": [
+      {
+        "name": "model_quantized.onnx",
+        "url": "https://huggingface.co/Xenova/bge-small-zh-v1.5/resolve/75c43b069aac4d136ba6bc1122f995fedcfd2781/onnx/model_quantized.onnx",
+        "bytes": 24010842,
+        "sha256": "15b717c382bcb518ba457b93ea6850ede7f4f1cd8937454aa06972366cd19bcc"
+      },
+      {
+        "name": "tokenizer.json",
+        "url": "https://huggingface.co/Xenova/bge-small-zh-v1.5/resolve/75c43b069aac4d136ba6bc1122f995fedcfd2781/tokenizer.json",
+        "bytes": 439125,
+        "sha256": "48cea5d44424912a6fd1ea647bf4fe50b55ab8b1e5879c3275f80e339e8fae26"
+      }
+    ],
+    "source": "https://huggingface.co/BAAI/bge-small-zh-v1.5",
+    "conversion": "https://huggingface.co/Xenova/bge-small-zh-v1.5",
+    "license": "MIT",
+    "licenseUrl": "https://huggingface.co/BAAI/bge-small-zh-v1.5",
+    "pipeline": "bert-case-sensitive-128-cls-l2-v1"
+  },
+  "image": {
+    "id": "image-99ca0cde6c76c0c56fcfeace07eb3a340ba17fc0",
+    "label": "封面视觉",
+    "files": [
+      {
+        "name": "vision_model_quantized.onnx",
+        "url": "https://huggingface.co/felixhrdyn/mobileclip2-s0-onnx/resolve/99ca0cde6c76c0c56fcfeace07eb3a340ba17fc0/vision_model_quantized.onnx",
+        "bytes": 11866678,
+        "sha256": "8ec2d4cd7caef777ab863f2b3ad34624a5416dcc9d4571eedeec70d491eb3c5d"
+      }
+    ],
+    "source": "https://huggingface.co/apple/MobileCLIP2-S0",
+    "conversion": "https://huggingface.co/felixhrdyn/mobileclip2-s0-onnx",
+    "license": "Apple AMLR",
+    "licenseUrl": "https://github.com/apple-aiml-research/ml-mobileclip/blob/main/LICENSE_MODELS",
+    "pipeline": "center-rgb-256-clip-normalize-l2-v1"
+  }
+}

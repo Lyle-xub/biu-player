@@ -1,3 +1,4 @@
+import { interests as profileInterests } from '../../../renderer/profile-interest';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, AppState, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useIsFocused } from '@react-navigation/native';
@@ -368,7 +369,7 @@ export default function DiscoveryScreen({ navigation }) {
       const snapshot = manager?.getSnapshot();
       if (!snapshot || snapshot.ready === false) throw new Error('画像尚未就绪，请稍后重试');
       const selectedProfile = snapshot.activeId === 'auto' ? snapshot.auto : snapshot.profiles?.find((item) => item.id === snapshot.activeId);
-      if (snapshot.enabled !== false && !selectedProfile?.tags?.length) throw new Error('当前画像没有可用标签，请先编辑画像或选择原生推荐');
+      if (snapshot.enabled !== false && !profileInterests(selectedProfile).length) throw new Error('当前画像没有可用主题或描述，请先编辑画像或选择原生推荐');
       const isValid = () => !controller.signal.aborted && generation === feed.generation && mounted.current
         && manager?.getSnapshot()?.revision === snapshot.revision;
       const isCurrent = () => isValid() && latest.current.active;
@@ -688,6 +689,9 @@ export default function DiscoveryScreen({ navigation }) {
 
   const save = async (target, item) => {
     const c = latest.current.context;
+    const manager=c.discoveryRecommendationManager;
+    const profileId=manager?.getSnapshot?.().activeId || 'auto';
+    item={...item,recommendationScope:'discovery',profileId};
     if (target.kind === 'library') { if (!c.isInLibrary(item)) await c.toggleLibrary(item); }
     else if (target.kind === 'likes') { if (!c.isLiked(item)) await c.toggleLike(item); }
     else if (target.kind === 'playlist') {
@@ -712,6 +716,7 @@ export default function DiscoveryScreen({ navigation }) {
         }
       }
     }
+    if(target.kind!=='library') manager?.recordPreference?.(item,target.kind==='likes'?'likes':'playlists',profileId).catch(()=>{});
     notify(`已加入「${target.title}」`);
   };
   actions.current = {

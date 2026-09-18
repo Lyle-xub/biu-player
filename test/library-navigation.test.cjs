@@ -52,7 +52,7 @@ function harness(file) {
     playHistory: [], console: { error() {} }, URL,
     location: { href: 'http://localhost/' }, history: { replaceState() {} },
     window: { scrollTo() {}, matchMedia: () => ({ matches: false }), BiuRecommendation: require('../renderer/recommendation-profile') },
-    recommendationProfiles: { isStrict: async () => false, recommend: async () => [], observeFeed() {} },
+    recommendationProfiles: { manager:()=>({getSnapshot:()=>({activeId:'auto'})}), isStrict: async () => false, recommend: async () => [], observeFeed() {} },
     document: {
       body,
       querySelector: node,

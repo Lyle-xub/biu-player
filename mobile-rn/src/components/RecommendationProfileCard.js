@@ -3,6 +3,7 @@ import { ActivityIndicator, Animated, Easing, StyleSheet, Text, TextInput, Touch
 import { usePlayer } from '../player/PlayerContext';
 import { activeProfile, parseTagsText, tagsText } from '../../../renderer/recommendation-profile';
 import { colors } from '../theme';
+import LocalAISettings from './LocalAISettings';
 import ProfilePortrait from './ProfilePortrait';
 
 function StatusDot() {
@@ -64,8 +65,22 @@ const Editor = React.memo(function Editor({ manager, state, ready, source }) {
         () => run(() => manager.edit({ type: 'select', id: p.id })), state.activeId === p.id)}</React.Fragment>)}
     </View>
     <Text style={styles.hint}>{profile.id === 'auto' ? `累计分析 ${state.auto.samples} 个视频${state.auto.pending ? ` · ${state.auto.pending} 个待分析` : ''} · 喜欢 ${state.auto.sources?.likes || 0} / 歌单 ${state.auto.sources?.playlists || 0} / 信息流 ${state.auto.sources?.feed || 0}`
-      : source === 'discovery' ? '自定义画像 · 仅按视频真实标签匹配，不限制分区；任一标签命中即可，权重影响排序'
-      : '自定义画像 · 仅推荐标题或标签匹配的视频，不混入其他推荐；多个标签匹配任意一个，权重影响排序'}{!state.enabled ? ` · 当前未用于${source === 'discovery' ? '卡片流' : '首页'}推荐` : ''}</Text>
+      : source === 'discovery' ? '自定义画像 · 标题、标签与本地分析共同匹配；主题优先，UP 主偏好辅助排序'
+      : '自定义画像 · 根据兴趣主题与描述匹配；排除主题优先'}{!state.enabled ? ` · 当前未用于${source === 'discovery' ? '卡片流' : '首页'}推荐` : ''}</Text>
+    {!!profile.interests?.description && <Text style={styles.hint}>{profile.interests.description}</Text>}
+    {!!profile.interests?.avoid?.length && <Text style={styles.hint}>避开：{profile.interests.avoid.join('、')}</Text>}
+    <Text style={styles.heading}>UP 主偏好</Text>
+    <View style={styles.wrap}>{(profile.learned?.authors || []).slice(0,8).map(author => button(`忽略 ${author.name}`,()=>run(()=>manager.edit({type:'interests',id:profile.id,patch:{authors:[...(profile.interests?.authors || []).filter(a=>a.mid!==author.mid),{mid:author.mid,name:author.name,mode:'ignore',at:Date.now()}]}}))))}</View>
+    <View style={styles.wrap}>{(profile.learned?.authors || []).slice(0,8).map(author => button(`不推荐 ${author.name}`,()=>run(()=>manager.edit({type:'interests',id:profile.id,patch:{authors:[...(profile.interests?.authors || []).filter(a=>a.mid!==author.mid),{mid:author.mid,name:author.name,mode:'block',at:Date.now()}]}}))))}
+      {(profile.interests?.authors || []).filter(a=>a.mode!=='normal').map(author=>button(`恢复 ${author.name}`,()=>run(()=>manager.edit({type:'interests',id:profile.id,patch:{authors:(profile.interests.authors).map(a=>a.mid===author.mid?{...a,mode:'normal',at:Date.now()}:a)}}))))}</View>
+    <LocalAISettings />
+    <Text style={styles.heading}>封面偏好</Text>
+    <View style={styles.wrap}>
+      {button(profile.interests?.visualEnabled===false?'开启封面推荐':'关闭封面推荐',()=>run(()=>manager.edit({type:'interests',id:profile.id,patch:{visualEnabled:profile.interests?.visualEnabled===false}})))}
+      {button('清除封面学习记录',()=>run(()=>manager.edit({type:'interests',id:profile.id,patch:{visualResetAt:Date.now()}})))}
+    </View>
+    <View style={styles.wrap}>{(profile.learned?.samples || []).filter(a=>a.at>(profile.interests?.visualResetAt||0)&&!(profile.interests?.removedSamples||[]).some(r=>r.bvid===a.bvid)).slice(0,6).map(sample=>button(`移除样本 ${sample.title || sample.bvid}`,()=>run(()=>manager.edit({type:'interests',id:profile.id,patch:{removedSamples:[...(profile.interests?.removedSamples||[]),{bvid:sample.bvid,at:Date.now()}]}}))))}</View>
+    <Text style={styles.hint}>封面用于学习你收藏内容的视觉风格；样本不足或模型未就绪时继续使用文字推荐。</Text>
     {state.busy && <ActivityIndicator color={colors.accent} />}
     <Text style={styles.heading}>画像忽略标签</Text>
     <Text style={styles.hint}>已自动过滤音乐推荐、音乐分享官、征集令等平台标签。歌单、合集、MV 等只识别为内容形式，不参与音乐兴趣。</Text>
@@ -81,7 +96,7 @@ const Editor = React.memo(function Editor({ manager, state, ready, source }) {
       {button('更新近期画像', () => run(() => manager.refresh(true)))}
       {button('新建画像', () => { setDraft({ name: '', text: '' }); setConfirmDelete(false); })}
       {button(profile.id === 'auto' ? '编辑并另存' : '编辑画像', () => {
-        setDraft({ id: profile.id === 'auto' ? undefined : profile.id, name: profile.id === 'auto' ? '我的兴趣' : profile.name, text: tagsText(profile.tags) });
+        setDraft({ id: profile.id === 'auto' ? undefined : profile.id, name: profile.id === 'auto' ? '我的兴趣' : profile.name, text: tagsText(profile.tags), description: profile.interests?.description || '', avoid: (profile.interests?.avoid || []).join('、') });
         setConfirmDelete(false);
       })}
       {profile.id !== 'auto' && button('删除画像', () => setConfirmDelete(true))}
@@ -94,12 +109,16 @@ const Editor = React.memo(function Editor({ manager, state, ready, source }) {
     {draft && <View style={styles.form}>
       <TextInput accessibilityLabel="画像名称" placeholder="画像名称" placeholderTextColor={colors.text3}
         maxLength={40} value={draft.name} style={styles.input} onChangeText={(name) => setDraft({ ...draft, name })} />
-      <Text style={styles.hint}>每行一个标签，可写「古典:80」。权重为 1–100，不填默认 50，最多 30 个。</Text>
+      <TextInput accessibilityLabel="兴趣描述" multiline maxLength={500} placeholder="例如：喜欢摄影实拍教学、旅行记录" placeholderTextColor={colors.text3}
+        value={draft.description || ''} style={[styles.input,{minHeight:80}]} onChangeText={description=>setDraft({...draft,description})} />
+      <TextInput accessibilityLabel="避开主题" maxLength={1200} placeholder="避开主题，用顿号分隔" placeholderTextColor={colors.text3}
+        value={draft.avoid || ''} style={styles.input} onChangeText={avoid=>setDraft({...draft,avoid})} />
+      <Text style={styles.hint}>兴趣不限于音乐。每行一个主题，可写「摄影:80」。权重为 1–100，最多 30 个。</Text>
       <TextInput accessibilityLabel="画像标签与权重" multiline textAlignVertical="top" placeholder={'古典:80\n钢琴:60'}
         placeholderTextColor={colors.text3} value={draft.text} style={[styles.input, { minHeight: 120 }]} onChangeText={(text) => setDraft({ ...draft, text })} />
       <View style={styles.wrap}>
-        {button('保存并使用', () => run(() => manager.edit({ type: 'save', id: draft.id, name: draft.name, tags: parseTagsText(draft.text) })))}
-        {draft.id && button('另存为新画像', () => run(() => manager.edit({ type: 'save', name: draft.name + ' 副本', tags: parseTagsText(draft.text) })))}
+        {button('保存并使用', () => run(() => manager.edit({ type: 'save', id: draft.id, name: draft.name, tags: parseTagsText(draft.text), interests: { description: draft.description || '', avoid: (draft.avoid || '').split(/[、,，\n]/).map(v=>v.trim()).filter(Boolean) } })))}
+        {draft.id && button('另存为新画像', () => run(() => manager.edit({ type: 'save', name: draft.name + ' 副本', tags: parseTagsText(draft.text), interests: { description: draft.description || '', avoid: (draft.avoid || '').split(/[、,，\n]/).map(v=>v.trim()).filter(Boolean) } })))}
         {button('取消编辑', () => setDraft(null))}
       </View>
     </View>}
