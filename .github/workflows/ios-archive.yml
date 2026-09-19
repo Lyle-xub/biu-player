@@ -28,7 +28,8 @@ jobs:
           cache-dependency-path: mobile-rn/package-lock.json
       - name: Verify release toolchain
         run: xcodebuild -version
-      - run: npm ci
+      # The mobile lockfile was resolved with legacy peer dependency handling.
+      - run: npm ci --legacy-peer-deps
         working-directory: mobile-rn
       - name: Generate iOS project
         run: npx expo prebuild --platform ios --no-install
