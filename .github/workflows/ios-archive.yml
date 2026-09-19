@@ -1,0 +1,62 @@
+name: iOS release archive
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Release tag or commit to archive
+        required: true
+        default: v0.6.7
+
+permissions:
+  contents: read
+
+jobs:
+  archive:
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: mobile-rn/package-lock.json
+      - name: Verify release toolchain
+        run: xcodebuild -version
+      - run: npm ci
+        working-directory: mobile-rn
+      - name: Generate iOS project
+        run: npx expo prebuild --platform ios --no-install
+        working-directory: mobile-rn
+      - run: pod install
+        working-directory: mobile-rn/ios
+      - name: Archive without signing credentials
+        working-directory: mobile-rn
+        run: |
+          set -o pipefail
+          xcodebuild -workspace ios/BiuPlayer.xcworkspace -scheme BiuPlayer \
+            -configuration Release -destination 'generic/platform=iOS' \
+            -archivePath build/BiuPlayer.xcarchive -jobs 4 \
+            CODE_SIGNING_ALLOWED=NO archive > build-archive.log 2>&1 || {
+              tail -100 build-archive.log
+              exit 1
+            }
+          tar -czf build/BiuPlayer-archive.tar.gz -C build BiuPlayer.xcarchive
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-unsigned-archive
+          path: mobile-rn/build/BiuPlayer-archive.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-archive-log
+          path: mobile-rn/build-archive.log
+          if-no-files-found: ignore
+          retention-days: 7
