@@ -2637,13 +2637,25 @@ function syncToggleIcon() {
 const DEFAULT_NP_COVER = $('npCover').innerHTML;
 const DEFAULT_PL_COVER = $('plCover').innerHTML;
 const DEFAULT_MC_ART = $('mcArtHolder').innerHTML;
-// 歌单详情封面右上角的内联编辑角标（常驻元素，openPlaylist 每次渲染后重新挂载）
-const plCoverEditBtn = document.createElement('span');
+// 歌单详情封面的上传按钮（常驻元素，openPlaylist 每次渲染后重新挂载）
+const plCoverEditBtn = document.createElement('button');
+plCoverEditBtn.type = 'button';
+plCoverEditBtn.setAttribute('aria-label', '上传歌单封面');
 plCoverEditBtn.className = 'pl-cover-edit';
 plCoverEditBtn.id = 'plCoverEdit';
 plCoverEditBtn.hidden = true;
-plCoverEditBtn.title = '更换封面';
-plCoverEditBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
+plCoverEditBtn.title = '上传封面';
+plCoverEditBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg><span>上传封面</span>';
+const plCoverResetBtn = document.createElement('button');
+plCoverResetBtn.type = 'button';
+plCoverResetBtn.className = 'pl-cover-edit';
+plCoverResetBtn.textContent = '恢复默认';
+plCoverResetBtn.setAttribute('aria-label', '恢复默认封面');
+plCoverResetBtn.addEventListener('click', (e) => { e.stopPropagation(); resetInlineCover(); });
+const plCoverActions = document.createElement('div');
+plCoverActions.className = 'pl-cover-actions';
+plCoverActions.hidden = true;
+plCoverActions.append(plCoverResetBtn, plCoverEditBtn);
 function syncPlayingHeaderLayout() {
   const left = document.querySelector('.np-left');
   const heading = $('npHeading');
@@ -4061,7 +4073,9 @@ function openPlaylist(pl) {
   const coverImage = $('plCover').querySelector('img');
   if (coverImage) coverImage.loading = 'eager';
   // 封面编辑角标常驻（innerHTML 会清掉它，每次重新挂回）
-  $('plCover').appendChild(plCoverEditBtn);
+  $('plCover').appendChild(plCoverActions);
+  plCoverEditBtn.hidden = !pl.customId;
+  plCoverResetBtn.hidden = !pl.customId || !pl.customCover;
   // 自建歌单 / B 站收藏夹：详情页提供内联编辑入口
   const actions = document.querySelector('.pl-actions');
   actions.querySelectorAll('[data-custom-act]').forEach((el) => el.remove());
@@ -4207,9 +4221,12 @@ const saveCustomPlaylists = () => {
 let plDialogMode = 'create'; // 'create' | 'delete'
 let plDialogTarget = -1;
 let plDialogCover; // create 模式：undefined=未选封面，string=封面 dataURL
+let coverPickRevision = 0;
+let coverPickPlaylist = null;
 let coverPickTarget = 'dialog'; // 文件选择去向：'dialog' 新建弹窗 / 'inline' 详情页内联
 
 function openPlDialog(mode, index = -1) {
+  coverPickRevision++;
   plDialogMode = mode;
   plDialogTarget = index;
   plDialogCover = undefined;
@@ -4231,32 +4248,40 @@ function openPlDialog(mode, index = -1) {
   $('plDialogMask').hidden = false;
   if (isCreate) setTimeout(() => input.focus(), 60);
 }
-function closePlDialog() { $('plDialogMask').hidden = true; }
+function closePlDialog() { coverPickRevision++; window.BiuCoverEditor.close(); $('plDialogMask').hidden = true; }
 
 // 新建弹窗的封面卡片预览：封面图 + 实时联动的歌单名
 function renderPlDialogPreview() {
+  $('plDialogCoverReset').hidden = !plDialogCover;
   $('plDialogCoverImg').innerHTML = plDialogCover
     ? `<img src="${esc(plDialogCover)}" alt="">`
     : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="1.6"/><path d="M21 15l-4.5-4.5L6 21"/></svg>';
   $('plDialogCoverName').textContent = $('plDialogInput').value.trim() || '歌单';
 }
 
-// 图片文件 → 压缩到 320px JPEG dataURL，避免撑爆 localStorage
+// 保存前交给共享裁切窗口，取消时保留原封面。
 function compressCoverFile(file, cb) {
   if (!file) return;
-  const url = URL.createObjectURL(file);
-  const img = new Image();
-  img.onload = () => {
-    const scale = Math.min(1, 320 / Math.max(img.width, img.height));
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.round(img.width * scale);
-    canvas.height = Math.round(img.height * scale);
-    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
-    URL.revokeObjectURL(url);
-    cb(canvas.toDataURL('image/jpeg', .85));
-  };
-  img.onerror = () => { URL.revokeObjectURL(url); toast('图片读取失败'); };
-  img.src = url;
+  window.BiuCoverEditor.open(file).then((dataUrl) => {
+    if (dataUrl) cb(dataUrl);
+  }).catch((error) => toast(error.message || '封面处理失败，请重试'));
+}
+
+function resetInlineCover() {
+  const pl = currentCustomPlaylist();
+  if (!pl || !pl.cover) return;
+  coverPickRevision++;
+  window.BiuCoverEditor.close();
+  delete pl.cover;
+  saveCustomPlaylists();
+  refreshCustomPlaylist(pl);
+  toast('已恢复默认封面');
+}
+function resetDialogCover() {
+  coverPickRevision++;
+  window.BiuCoverEditor.close();
+  plDialogCover = undefined;
+  renderPlDialogPreview();
 }
 
 function refreshCustomPlaylist(pl) {
@@ -4309,6 +4334,7 @@ function currentFavFolder() {
 
 function resetPlEditingUI() {
   plEditing = false;
+  plCoverActions.hidden = true;
   document.querySelector('.pl-head').classList.remove('editing');
   const tl = document.querySelector('.view-playlist .tlist');
   if (tl) tl.classList.remove('editing');
@@ -4327,8 +4353,9 @@ function setPlEditing(on, focus = true) {
   if (tl) tl.classList.toggle('editing', on && !!(state.playlist && state.playlist.customId));
   const btn = document.querySelector('[data-custom-act="edit"]');
   if (btn) btn.textContent = on ? '完成' : '编辑';
-  // 封面角标仅本地歌单可用（B 站收藏夹封面不支持本地修改）
-  plCoverEditBtn.hidden = !on || !state.playlist.customId;
+  // 封面操作仅在自建歌单的编辑模式下显示。
+  plCoverActions.hidden = !on || !state.playlist.customId;
+  plCoverEditBtn.hidden = !state.playlist.customId;
   $('plTitle').style.display = on ? 'none' : '';
   $('plDesc').style.display = on ? 'none' : '';
   $('plTitleEdit').hidden = !on;
@@ -4411,6 +4438,8 @@ async function togglePlEditing() {
 function initPlaylistInlineEdit() {
   plCoverEditBtn.addEventListener('click', (e) => {
     e.stopPropagation();
+    coverPickRevision++;
+    coverPickPlaylist = currentCustomPlaylist();
     coverPickTarget = 'inline';
     $('plCoverFile').click();
   });
@@ -4435,23 +4464,34 @@ function initPlaylistDialog() {
     e.stopPropagation();
   });
   $('plDialogInput').addEventListener('input', renderPlDialogPreview);
+  $('plDialogCoverCard').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click(); }
+  });
   $('plDialogCoverCard').addEventListener('click', () => {
+    coverPickRevision++;
     coverPickTarget = 'dialog';
     $('plCoverFile').click();
   });
+  $('plDialogCoverReset').addEventListener('click', resetDialogCover);
   $('plCoverFile').addEventListener('change', (e) => {
     const file = e.target.files[0];
     e.target.value = '';
+    const revision = coverPickRevision, target = coverPickTarget, selectedPlaylist = coverPickPlaylist;
     compressCoverFile(file, (dataUrl) => {
-      if (coverPickTarget === 'inline') {
-        const pl = currentCustomPlaylist();
-        if (!pl) return;
+      if (revision !== coverPickRevision) return;
+      if (target === 'inline') {
+        const pl = selectedPlaylist;
+        if (!pl || !customPlaylists.includes(pl)) return;
         pl.cover = dataUrl;
         saveCustomPlaylists();
         // 原地更新封面，保留编辑态；网格卡片同步刷新
-        $('plCover').innerHTML = `<img src="${esc(dataUrl)}" alt="">`;
-        $('plCover').appendChild(plCoverEditBtn);
-        if (state.playlist) state.playlist.cover = { pic: dataUrl };
+        if (state.playlist?.customId === pl.id) {
+          $('plCover').innerHTML = `<img src="${esc(dataUrl)}" alt="">`;
+          $('plCover').appendChild(plCoverActions);
+          state.playlist.cover = { pic: dataUrl };
+          state.playlist.customCover = true;
+          plCoverResetBtn.hidden = false;
+        }
         renderMyPlaylists();
         toast('封面已更新');
       } else {
@@ -4466,6 +4506,7 @@ function initPlaylistDialog() {
 function customPlaylistDetail(p) {
   return {
     customId: p.id,
+    customCover: !!p.cover,
     label: '歌单 · 本地',
     title: p.title,
     desc: p.desc || '本地创建的歌单，保存在这台设备上。',
@@ -5692,8 +5733,8 @@ function init() {
   $('lyricMatchInput').addEventListener('keydown', (event) => {
     if (event.key === 'Enter') runLyricMatchSearch();
   });
-  $('lyricOffDown').addEventListener('click', () => setLyricOffset(lyricMatchTrack, lyricOffsetOf(lyricMatchTrack) - 0.5));
-  $('lyricOffUp').addEventListener('click', () => setLyricOffset(lyricMatchTrack, lyricOffsetOf(lyricMatchTrack) + 0.5));
+  $('lyricOffDown').addEventListener('click', () => setLyricOffset(lyricMatchTrack, lyricOffsetOf(lyricMatchTrack) - 0.1));
+  $('lyricOffUp').addEventListener('click', () => setLyricOffset(lyricMatchTrack, lyricOffsetOf(lyricMatchTrack) + 0.1));
   $('lyricOffReset').addEventListener('click', () => setLyricOffset(lyricMatchTrack, 0));
   $('lyricClose').addEventListener('click', closeLyricMatch);
   $('lyricAuto').addEventListener('click', () => {

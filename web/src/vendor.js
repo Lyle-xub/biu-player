@@ -1,3 +1,5 @@
+import BiuCoverEditor from '../../renderer/playlist-cover-editor.js';
+window.BiuCoverEditor = BiuCoverEditor;
 /* 共享模块装载：把旧版经典脚本挂到 window，供 ES 模块化的 controller 解析全局标识符。
  * - renderer/api.js：末尾已追加 window.api / window.coverSVG
  * - renderer/playback-session.js：UMD 在 Vite 下会走 CJS 分支（module.exports = factory()），

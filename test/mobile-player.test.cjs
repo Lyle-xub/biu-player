@@ -25,6 +25,9 @@ function loader(mocks = {}) {
     'expo-application': { nativeApplicationVersion: '1.0.6', nativeBuildVersion: '20' },
     'biu-lyrics-pip': { setLyricsPiPEnabled() {}, updateLyricsPiP() {}, extractCoverColor: async () => null },
     'src/widgets/LyricsWidgets': { LyricsLiveActivity: { getInstances: () => [], start() {} }, LyricsWidget: { updateSnapshot() {} } },
+    'expo-image-picker': { launchImageLibraryAsync: async () => ({ canceled: true }) },
+    'expo-image-manipulator': { ImageManipulator: {}, SaveFormat: { JPEG: 'jpeg' } },
+    'expo-file-system': { File: class { delete() {} } },
     'expo-sharing': { isAvailableAsync: async () => false, shareAsync: async () => {} },
     'react-native-gesture-handler/ReanimatedSwipeable': (props) => React.createElement('Swipeable', props, props.children, props.renderRightActions?.()),
     'react-native-view-shot': { captureRef: async () => 'fixture.png' },
@@ -1972,8 +1975,8 @@ test('Android media session publishes one standard previous/next pair without du
   for (const command of ['PREVIOUS', 'PREVIOUS_MEDIA_ITEM', 'NEXT', 'NEXT_MEDIA_ITEM']) {
     assert.ok(additions.includes(`Player.COMMAND_SEEK_TO_${command}`), `standard ${command} remains available`);
   }
-  assert.match(additions, /override fun seekToPrevious\(\) = videoPlayer.emitRemotePrevious\(\)/);
-  assert.match(additions, /override fun seekToNext\(\) = videoPlayer.emitRemoteNext\(\)/);
+  assert.match(additions, /override fun seekToPrevious\(\)[^\n]*videoPlayer.emitRemotePrevious\(\)/);
+  assert.match(additions, /override fun seekToNext\(\)[^\n]*videoPlayer.emitRemoteNext\(\)/);
 });
 
 test('iOS transport has one application owner and keeps targets across item changes', () => {
@@ -6393,4 +6396,67 @@ test('comment content stalls are bounded, transient overlaps recover, and failed
     assert.equal(requests, 8);
     assert.deepEqual(list().props.data.map(c => c.rpid), ['a', 'b', 'c']);
   } finally { if (tree) await act(async () => tree.unmount()); }
+});
+
+test('uploaded playlist cover is cropped, compressed, portable and releases native image resources', async () => {
+  const calls = [];
+  let result = { canceled: false, assets: [{ uri: 'file:///original.heic', width: 1600, height: 900 }] };
+  const context = {
+    crop: value => calls.push(['crop', value]), resize: value => calls.push(['resize', value]),
+    renderAsync: async () => ({ saveAsync: async options => { calls.push(['save', options]); return { uri: 'file:///resized.jpg', base64: 'aGVsbG8=' }; }, release: () => calls.push('image released') }),
+    release: () => calls.push('context released'),
+  };
+  const load = loader({
+    'expo-image-picker': { launchImageLibraryAsync: async options => { calls.push(['picker', options]); return result; } },
+    'expo-image-manipulator': { ImageManipulator: { manipulate: () => context }, SaveFormat: { JPEG: 'jpeg' } },
+    'expo-file-system': { File: class { constructor(uri) { this.uri = uri; } delete() { calls.push(['delete', this.uri]); } } },
+  });
+  const { pickPlaylistCover } = load('src/media/playlistCover');
+  const cover = await pickPlaylistCover();
+  assert.equal(cover, 'data:image/jpeg;base64,aGVsbG8=');
+  assert.deepEqual(calls.find(c => c[0] === 'crop')[1], { originX: 350, originY: 0, width: 900, height: 900 });
+  assert.deepEqual(calls.find(c => c[0] === 'resize')[1], { width: 512, height: 512 });
+  assert.ok(calls.includes('image released') && calls.includes('context released'));
+  assert.deepEqual(calls.find(c => c[0] === 'delete'), ['delete', 'file:///resized.jpg']);
+  const sync = require('../renderer/library-sync');
+  const payload = { version: 1, likes: [], library: [], playlists: [{ id: 'uploaded', title: '封面', tracks: [], cover }] };
+  assert.equal(sync.normalize(JSON.parse(JSON.stringify(payload))).playlists[0].cover, cover);
+  calls.length = 0; result = { canceled: true };
+  assert.equal(await pickPlaylistCover(), null);
+  assert.equal(calls.length, 1, 'cancel does not decode an image');
+  result = { canceled: false, assets: [{ uri: 'file:///broken', width: 0, height: 0 }] };
+  await assert.rejects(pickPlaylistCover(), /无法读取/);
+});
+
+test('playlist cover editor preserves cancellation and rejects late results for another playlist', async () => {
+  let next = Promise.resolve(null), saved;
+  const load = loader({
+    'src/media/playlistCover': { pickPlaylistCover: () => next },
+    'src/components/RemoteImage': { __esModule: true, default: 'RemoteImage' },
+    'src/components/DefaultCover': { __esModule: true, default: 'DefaultCover', defaultCoverSeed: () => 1 },
+  });
+  const Editor = load('src/components/PlaylistEditor').default;
+  const original = { id: 'a', title: 'A', cover: 'https://cdn/old.jpg', tracks: [] };
+  const props = { visible: true, editCover: true, playlist: original, onClose: () => {}, onSave: async changes => { saved = changes; } };
+  let tree;
+  await act(async () => { tree = create(React.createElement(Editor, props)); });
+  await click(tree, '从相册选择'); await click(tree, '保存修改');
+  assert.equal(saved.cover, original.cover, 'cancel keeps the old cover');
+  next = Promise.resolve('data:image/jpeg;base64,bmV3');
+  await click(tree, '从相册选择'); await click(tree, '保存修改');
+  assert.equal(saved.cover, 'data:image/jpeg;base64,bmV3');
+  const pending = deferred(); next = pending.promise;
+  let picking;
+  await act(async () => { picking = tree.root.findAllByType('TouchableOpacity').find(n => n.props.accessibilityLabel === '从相册选择').props.onPress(); });
+  assert.ok(tree.root.findAllByType('TouchableOpacity').find(n => n.props.accessibilityLabel === '保存修改').props.disabled);
+  await act(async () => { tree.update(React.createElement(Editor, { ...props, playlist: { id: 'b', title: 'B', cover: 'https://cdn/b.jpg' } })); });
+  await act(async () => { pending.resolve('data:image/jpeg;base64,c3RhbGU='); await picking; });
+  await click(tree, '保存修改');
+  assert.equal(saved.cover, 'https://cdn/b.jpg', 'late image cannot overwrite another playlist');
+  next = Promise.reject(new Error('选图失败'));
+  await click(tree, '从相册选择');
+  assert.ok(tree.root.findAllByType('Text').some(n => n.props.children === '选图失败'));
+  await click(tree, '恢复默认封面'); await click(tree, '保存修改');
+  assert.equal(saved.cover, null);
+  await act(async () => tree.unmount());
 });

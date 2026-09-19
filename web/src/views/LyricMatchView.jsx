@@ -32,9 +32,9 @@ export function LyricMask() {
         </div>
         <div className="lyric-off-row">
           <span className="lyric-off-label">歌词偏移</span>
-          <button className="btn-ghost" id="lyricOffDown" type="button" onClick={() => A().lyricOffAdjust(-0.5)}>− 0.5s</button>
+          <button className="btn-ghost" id="lyricOffDown" type="button" onClick={() => A().lyricOffAdjust(-0.1)}>− 0.1s</button>
           <b className="num" id="lyricOffVal">{m.offVal}</b>
-          <button className="btn-ghost" id="lyricOffUp" type="button" onClick={() => A().lyricOffAdjust(0.5)}>+ 0.5s</button>
+          <button className="btn-ghost" id="lyricOffUp" type="button" onClick={() => A().lyricOffAdjust(0.1)}>+ 0.1s</button>
           <button className="btn-ghost" id="lyricOffReset" type="button" onClick={() => A().lyricOffReset()}>重置</button>
         </div>
         <div className="pl-dialog-actions">

@@ -60,7 +60,7 @@ export function PlayerProvider({ children }) {
     p.bufferOptions = { preferredForwardBufferDuration: 12, minBufferForPlayback: 0.5, waitsToMinimizeStalling: false };
     p.staysActiveInBackground = true; // 退后台继续出声（音频不中断）
     p.showNowPlayingNotification = true; // 通知栏 / 锁屏媒体控件，由原生播放器同步播放状态
-    p.audioMixingMode = 'doNotMix'; // 系统播放其他媒体时正常让出，用户再次播放时由同一模块恢复会话
+    p.audioMixingMode = 'doNotMix'; // 原生层让出音频焦点，并在打断结束后恢复有播放意图的当前曲目
   });
   const [adoptedPlayer, setAdoptedPlayer] = useState(null);
   const player = adoptedPlayer || basePlayer;

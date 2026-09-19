@@ -662,11 +662,12 @@
   <div class="pl-dialog" role="dialog" aria-modal="true">
     <h3 id="plDialogTitle">新建歌单</h3>
     <p id="plDialogMsg"></p>
-    <div class="pl-cpicker" id="plDialogCoverCard" role="button" aria-label="选择歌单封面" hidden>
+    <div class="pl-cpicker" id="plDialogCoverCard" role="button" tabindex="0" aria-label="选择歌单封面" hidden>
       <span class="pl-cpicker-cover" id="plDialogCoverImg"></span>
       <b class="pl-cpicker-name" id="plDialogCoverName">歌单</b>
       <small class="pl-cpicker-hint">点击卡片，选择封面图片</small>
     </div>
+    <button type="button" class="btn-ghost pl-dialog-cover-reset" id="plDialogCoverReset" hidden>恢复默认封面</button>
     <input id="plDialogInput" maxlength="40" placeholder="歌单名称" autocomplete="off">
     <input type="file" id="plCoverFile" accept="image/*" hidden>
     <div class="pl-dialog-actions">
@@ -720,9 +721,9 @@
     <div class="lyric-cands" id="lyricCands"></div>
     <div class="lyric-off-row">
       <span class="lyric-off-label">歌词偏移</span>
-      <button class="btn-ghost" id="lyricOffDown" type="button">− 0.5s</button>
+      <button class="btn-ghost" id="lyricOffDown" type="button">− 0.1s</button>
       <b class="num" id="lyricOffVal">0.0s</b>
-      <button class="btn-ghost" id="lyricOffUp" type="button">+ 0.5s</button>
+      <button class="btn-ghost" id="lyricOffUp" type="button">+ 0.1s</button>
       <button class="btn-ghost" id="lyricOffReset" type="button">重置</button>
     </div>
     <div class="pl-dialog-actions">
@@ -767,6 +768,7 @@
 <script src="recommendation-desktop.js"></script>
 <script src="video-cloud-settings.js"></script>
 <script src="app-update-settings.js"></script>
+<script src="playlist-cover-editor.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

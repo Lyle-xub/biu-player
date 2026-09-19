@@ -75,11 +75,16 @@ export default function PlaylistView() {
               ? <img src={pl.cover.pic} loading="eager" decoding="async" alt="" />
               : <span style={{ display: 'contents' }} dangerouslySetInnerHTML={{ __html: window.coverSVG(pl.cover.seed || 1, 400) }} />)
             : defaultCover}
-          <span className="pl-cover-edit" id="plCoverEdit" title="更换封面"
-            hidden={!(editing && pl && pl.customId)}
+          <div className="pl-cover-actions" hidden={!editing || !pl?.customId}>
+          <button type="button" className="pl-cover-edit" aria-label="恢复默认封面" hidden={!(pl?.customId && pl.customCover)}
+            onClick={(e) => { e.stopPropagation(); A.resetInlineCover(); }}>恢复默认</button>
+          <button type="button" aria-label="上传歌单封面" className="pl-cover-edit" id="plCoverEdit" title="更换封面"
+            hidden={!(pl && pl.customId)}
             onClick={(e) => { e.stopPropagation(); A.pickInlineCover(); }}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
-          </span>
+            <span>上传封面</span>
+          </button>
+          </div>
         </div>
         <div className="pl-info">
           <div className="label-caps" id="plLabel">{pl ? pl.label : '收藏夹 · Bilibili'}</div>

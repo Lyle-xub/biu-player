@@ -3864,6 +3864,7 @@ function openPlaylist(pl) {
     meta: pl.meta || '',
     cover: pl.cover || null,
     customId: pl.customId ?? null,
+    customCover: !!pl.customCover,
     favId: pl.favId ?? null,
     isLikes: !!pl.isLikes,
     isMusicLibrary: !!pl.isMusicLibrary,
@@ -3921,9 +3922,12 @@ const saveCustomPlaylists = () => {
 
 let plDialogMode = 'create'; // 'create' | 'delete'
 let plDialogTarget = -1;
+let coverPickRevision = 0;
+let coverPickPlaylist = null;
 let coverPickTarget = 'dialog'; // 文件选择去向：'dialog' 新建弹窗 / 'inline' 详情页内联
 
 function openPlDialog(mode, index = -1) {
+  coverPickRevision++;
   plDialogMode = mode;
   plDialogTarget = index;
   const pl = customPlaylists[index];
@@ -3936,24 +3940,30 @@ function openPlDialog(mode, index = -1) {
     cover: null,
   });
 }
-function closePlDialog() { patchSlice('plDialog', { open: false }); }
+function closePlDialog() { coverPickRevision++; window.BiuCoverEditor.close(); patchSlice('plDialog', { open: false }); }
 
-// 图片文件 → 压缩到 320px JPEG dataURL，避免撑爆 localStorage
+// 保存前交给共享裁切窗口，取消时保留原封面。
 function compressCoverFile(file, cb) {
   if (!file) return;
-  const url = URL.createObjectURL(file);
-  const img = new Image();
-  img.onload = () => {
-    const scale = Math.min(1, 320 / Math.max(img.width, img.height));
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.round(img.width * scale);
-    canvas.height = Math.round(img.height * scale);
-    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
-    URL.revokeObjectURL(url);
-    cb(canvas.toDataURL('image/jpeg', .85));
-  };
-  img.onerror = () => { URL.revokeObjectURL(url); toast('图片读取失败'); };
-  img.src = url;
+  window.BiuCoverEditor.open(file).then((dataUrl) => {
+    if (dataUrl) cb(dataUrl);
+  }).catch((error) => toast(error.message || '封面处理失败，请重试'));
+}
+
+function resetInlineCover() {
+  const pl = currentCustomPlaylist();
+  if (!pl || !pl.cover) return;
+  coverPickRevision++;
+  window.BiuCoverEditor.close();
+  delete pl.cover;
+  saveCustomPlaylists();
+  refreshCustomPlaylist(pl);
+  toast('已恢复默认封面');
+}
+function resetDialogCover() {
+  coverPickRevision++;
+  window.BiuCoverEditor.close();
+  patchSlice('plDialog', { cover: null });
 }
 
 function refreshCustomPlaylist(pl) {
@@ -4091,6 +4101,8 @@ async function togglePlEditing() {
 
 // 详情页内联换封面入口（组件里 plCoverEdit 角标的点击桥）
 function pickInlineCover() {
+  coverPickRevision++;
+  coverPickPlaylist = currentCustomPlaylist();
   coverPickTarget = 'inline';
   $('plCoverFile').click();
 }
@@ -4108,21 +4120,27 @@ function initPlaylistInlineEdit() {
 
 // 新建弹窗封面卡片点击 → 文件选择去向标记为 dialog（组件回调）
 function plDialogPickCover() {
+  coverPickRevision++;
   coverPickTarget = 'dialog';
   $('plCoverFile').click();
 }
 
 // 封面文件已选（弹窗 / 详情页内联共用，组件回调）
 function plCoverFilePicked(file) {
+  const revision = coverPickRevision, target = coverPickTarget, selectedPlaylist = coverPickPlaylist;
   compressCoverFile(file, (dataUrl) => {
-    if (coverPickTarget === 'inline') {
-      const pl = currentCustomPlaylist();
-      if (!pl) return;
+    if (revision !== coverPickRevision) return;
+    if (target === 'inline') {
+      const pl = selectedPlaylist;
+      if (!pl || !customPlaylists.includes(pl)) return;
       pl.cover = dataUrl;
       saveCustomPlaylists();
       // 原地更新封面，保留编辑态；网格卡片同步刷新
-      if (state.playlist) state.playlist.cover = { pic: dataUrl };
-      patchPlaylist({ cover: { pic: dataUrl } });
+      if (state.playlist?.customId === pl.id) {
+        state.playlist.cover = { pic: dataUrl };
+        state.playlist.customCover = true;
+        patchPlaylist({ cover: { pic: dataUrl }, customCover: true });
+      }
       renderMyPlaylists();
       toast('封面已更新');
     } else {
@@ -4134,6 +4152,7 @@ function plCoverFilePicked(file) {
 function customPlaylistDetail(p) {
   return {
     customId: p.id,
+    customCover: !!p.cover,
     label: '歌单 · 本地',
     title: p.title,
     desc: p.desc || '本地创建的歌单，保存在这台设备上。',
@@ -5560,7 +5579,7 @@ window.biuActions = { openPlaylist, likesPlaylist, rankingPlaylist, customPlayli
   switchLoginTab, refreshQrLogin, sendSmsCode, submitSmsLogin, hideQrLogin, logout,
   // 歌单新建/删除对话框（PlDialogView）
   plDialogSubmit: submitPlDialog, plDialogClose: closePlDialog, plDialogInput: (v) => patchSlice('plDialog', { inputValue: v }),
-  plDialogPickCover, plCoverFilePicked,
+  plDialogPickCover, plCoverFilePicked, resetInlineCover, resetDialogCover,
   // 下载清晰度菜单（DlMenu）
   dlPick,
   // 手动匹配歌词面板（LyricMatchView）

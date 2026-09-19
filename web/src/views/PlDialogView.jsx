@@ -22,7 +22,8 @@ export function PlDialog() {
         <p id="plDialogMsg" style={{ display: isCreate ? 'none' : '' }}>
           {isCreate ? '' : `确定删除歌单「${d.targetTitle}」吗？此操作不可恢复。`}
         </p>
-        <div className="pl-cpicker" id="plDialogCoverCard" role="button" aria-label="选择歌单封面" hidden={!isCreate}
+        <div className="pl-cpicker" id="plDialogCoverCard" role="button" tabIndex={0} aria-label="选择歌单封面"
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); A().plDialogPickCover(); } }} hidden={!isCreate}
           onClick={() => A().plDialogPickCover()}>
           <span className="pl-cpicker-cover" id="plDialogCoverImg">
             {d.cover
@@ -32,6 +33,8 @@ export function PlDialog() {
           <b className="pl-cpicker-name" id="plDialogCoverName">{d.inputValue.trim() || '歌单'}</b>
           <small className="pl-cpicker-hint">点击卡片，选择封面图片</small>
         </div>
+        <button type="button" className="btn-ghost pl-dialog-cover-reset" hidden={!isCreate || !d.cover}
+          onClick={() => A().resetDialogCover()}>恢复默认封面</button>
         <input id="plDialogInput" ref={inputRef} maxLength="40" placeholder="歌单名称" autoComplete="off"
           style={{ display: isCreate ? '' : 'none' }}
           value={d.inputValue}

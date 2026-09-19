@@ -70,8 +70,11 @@ export default function LocalPlaylistScreen({ navigation, route }) {
         header={pl ? <>
           {editor ? <PlaylistEditor visible playlist={pl} editCover onClose={() => setEditor(false)}
             onSave={(changes) => updatePlaylist(id, changes)} /> : <View style={styles.hero}>
-            <RemoteImage uri={pl.cover} style={styles.cover}
-              fallback={<DefaultCover seed={defaultCoverSeed(id)} style={StyleSheet.absoluteFill} />} />
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="更换歌单封面" onPress={() => { setEditing(false); setEditor(true); }} style={styles.cover}>
+              <RemoteImage uri={pl.cover} style={StyleSheet.absoluteFill}
+                fallback={<DefaultCover seed={defaultCoverSeed(id)} style={StyleSheet.absoluteFill} />} />
+              <View style={styles.coverBadge}><Text style={styles.coverBadgeText}>更换封面</Text></View>
+            </TouchableOpacity>
             <View style={{ flex: 1, gap: 8 }}>
               <Text style={styles.heroTitle}>{pl.title}</Text>
               <Text style={styles.description}>{pl.desc || '自建歌单'}</Text>
@@ -121,6 +124,8 @@ const styles = StyleSheet.create({
   title: { color: colors.text, fontSize: 16, fontWeight: '600', flex: 1 },
   hero: { flexDirection: 'row', padding: 18, gap: 18, alignItems: 'center' },
   cover: { width: 100, height: 100, borderRadius: 18, overflow: 'hidden' },
+  coverBadge: { position: 'absolute', bottom: 0, left: 0, right: 0, paddingVertical: 5, alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.5)' },
+  coverBadgeText: { color: '#fff', fontSize: 11 },
   heroTitle: { color: colors.text, fontSize: 19, fontWeight: '600' },
   description: { color: colors.text2, fontSize: 13, lineHeight: 20 },
   actions: { flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', gap: 6, paddingHorizontal: 14, paddingBottom: 12 },

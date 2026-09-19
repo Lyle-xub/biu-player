@@ -201,3 +201,15 @@ test('LAN selection ignores private TUN addresses and VPN toggles do not rotate 
   assert.ok(args.includes('addresses=192.168.5.2,192.168.2.2'));
   stop(); stop(); assert.equal(killed, 1); assert.equal(errors, 0);
 });
+
+test('uploaded covers propagate through sync and a later reset removes the embedded image', () => {
+  const base = library([], [{ id: 1, title: 'Cover', tracks: [] }]);
+  const uploaded = structuredClone(base);
+  uploaded.playlists[0].cover = 'data:image/jpeg;base64,Y292ZXI=';
+  const synced = reconcile(base, base, uploaded);
+  assert.equal(synced.playlists[0].cover, uploaded.playlists[0].cover);
+  assert.deepEqual(reconcile(synced, synced, synced), synced);
+  const reset = structuredClone(synced);
+  reset.playlists[0].cover = null;
+  assert.equal(reconcile(synced, synced, reset).playlists[0].cover, undefined);
+});

@@ -960,14 +960,15 @@ button.source-up:focus-visible { outline: 1px solid var(--accent); outline-offse
 .pl-cover { width: 240px; aspect-ratio: 1 / 1; flex: none; border-radius: var(--r-cover); overflow: hidden;
   position: relative; box-shadow: 0 40px 80px rgba(0,0,0,.5); }
 .pl-cover svg { display: block; width: 100%; height: auto; }
-/* 内联编辑：封面右上角角标 */
-.pl-cover-edit { position: absolute; top: 12px; right: 12px; z-index: 2;
-  width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center;
+/* 封面上传入口，与封面融为一体的轻量胶囊按钮 */
+.pl-cover-edit { position: absolute; bottom: 12px; right: 12px; z-index: 2;
+  padding: 0 12px; min-height: 36px; border-radius: 20px; display: flex; align-items: center; gap: 6px; font: inherit; font-size: 12px;
   color: #fff; background: rgba(10,10,8,.55); backdrop-filter: blur(8px);
   border: 1px solid rgba(255,255,255,.14); cursor: pointer; transition: .22s var(--ease); }
 .pl-cover-edit:hover { background: rgba(10,10,8,.75); border-color: rgba(255,255,255,.3);
   transform: scale(1.06); box-shadow: 0 0 18px rgba(251,114,153,.25); }
 .pl-cover-edit svg { width: 16px; height: 16px; }
+.pl-cover-edit:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .pl-cover-edit[hidden] { display: none; }
 /* 内联编辑：标题 / 简介输入框，与原有排版对齐 */
 .pl-edit-input { width: 100%; max-width: 560px; box-sizing: border-box;
@@ -2317,3 +2318,31 @@ body[data-view="daily"] .mini-player { display:none !important; }
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
   overflow: hidden; overflow-wrap: anywhere; word-break: break-word;
 }
+
+/* Shared desktop cover editor */
+.pl-cover-actions { position: absolute; bottom: 12px; left: 10px; right: 10px; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; z-index: 2; }
+.pl-cover-actions .pl-cover-edit { position: static; padding: 0 10px; }
+.pl-cover-actions[hidden] { display: none; }
+.pl-dialog-cover-reset { display: block; margin: -4px auto 16px; font-size: 12px; }
+.pl-dialog-cover-reset[hidden] { display: none; }
+.cover-crop-mask { z-index: 10000; padding: 20px; }
+.cover-crop-dialog { width: min(420px, 100%); max-height: calc(100dvh - 40px); overflow-y: auto; box-sizing: border-box; }
+.cover-crop-dialog h3 { margin-bottom: 8px; letter-spacing: .02em; }
+.cover-crop-stage { width: min(100%, 48dvh); aspect-ratio: 1; position: relative; overflow: hidden; margin: 0 auto;
+  border-radius: 16px; background: rgba(0,0,0,.22); cursor: grab; touch-action: none; user-select: none; }
+.cover-crop-stage.dragging { cursor: grabbing; }
+.cover-crop-stage:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.cover-crop-stage canvas { display: block; width: 100%; height: 100%; }
+.cover-crop-grid { position: absolute; inset: 0; pointer-events: none; border: 1px solid rgba(255,255,255,.3); border-radius: inherit;
+  background: linear-gradient(to right, transparent 33.2%, #ffffff35 33.3%, #ffffff35 33.5%, transparent 33.6%, transparent 66.4%, #ffffff35 66.5%, #ffffff35 66.7%, transparent 66.8%),
+  linear-gradient(to bottom, transparent 33.2%, #ffffff35 33.3%, #ffffff35 33.5%, transparent 33.6%, transparent 66.4%, #ffffff35 66.5%, #ffffff35 66.7%, transparent 66.8%); }
+.cover-crop-loading { position: absolute; inset: 0; display: grid; place-items: center; font-size: 13px; color: var(--text-2); }
+.cover-crop-loading[hidden] { display: none; }
+.cover-crop-zoom { display: flex; align-items: center; gap: 12px; font-size: 12px; color: var(--text-2); margin: 20px 0; }
+.cover-crop-zoom input { flex: 1; min-width: 0; width: auto; margin: 0; padding: 0; accent-color: var(--accent); }
+.cover-crop-zoom output { width: 40px; text-align: right; font-variant-numeric: tabular-nums; }
+.cover-crop-actions { display: flex; align-items: center; gap: 8px; }
+.cover-crop-actions > span { flex: 1; }
+.cover-crop-actions button { padding: 9px 12px; font-size: 12px; white-space: nowrap; }
+.cover-crop-actions button:disabled { opacity: .4; cursor: default; }
+@media (prefers-reduced-motion: reduce) { .cover-crop-dialog { animation: none; } }
