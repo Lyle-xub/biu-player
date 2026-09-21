@@ -4,6 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const QRCode = require('qrcode');
+const { saveVideo } = require('./video-download');
 const { createLanSync } = require('./lan-sync');
 const { createVideoCloudSync } = require('./video-cloud-sync');
 const { createVideoRuntime } = require('./cloud-video-runtime');
@@ -795,35 +796,18 @@ app.whenReady().then(() => {
     return { ok: true, path: result.filePath };
   });
 
-  // 下载整文件视频：保存对话框 → 流式写盘，进度经 download:progress 事件回报
-  ipcMain.handle('download:start', async (_e, { url, filename }) => {
+  ipcMain.handle('download:start', async (_e, { url, audioUrl, filename }) => {
     try {
-      const { canceled, filePath } = await dialog.showSaveDialog(mainWin, {
-        defaultPath: filename || 'biu-download.mp4',
-      });
+      const { canceled, filePath } = await dialog.showSaveDialog(mainWin, { defaultPath: filename || 'biu-download.mp4' });
       if (canceled || !filePath) return { ok: false, canceled: true };
-      const res = await net.fetch(url, { headers: { 'User-Agent': UA, Referer: REFERER } });
-      if (!res.ok || !res.body) throw new Error('HTTP ' + res.status);
-      const total = +res.headers.get('content-length') || 0;
-      const file = fs.createWriteStream(filePath);
-      const reader = res.body.getReader();
-      let got = 0;
-      let lastNotify = 0;
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (!file.write(value)) await new Promise((r) => file.once('drain', r));
-        got += value.length;
-        if (mainWin && !mainWin.isDestroyed() && got - lastNotify >= 4 * 1024 * 1024) {
-          lastNotify = got;
-          mainWin.webContents.send('download:progress', { got, total });
-        }
-      }
-      await new Promise((resolve, reject) => file.end((e) => (e ? reject(e) : resolve())));
-      return { ok: true, path: filePath };
-    } catch (e) {
-      console.error('下载失败:', e);
-      return { ok: false, message: String(e.message || e) };
+      const runtime = app.isPackaged ? path.join(process.resourcesPath, 'cloud-video/runtime') : path.join(__dirname, 'dist/cloud-runtime');
+      return await saveVideo({ url, audioUrl, filePath, fetch: (...args) => net.fetch(...args),
+        headers: { 'User-Agent': UA, Referer: REFERER },
+        ffmpeg: path.join(runtime, process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'),
+        onProgress: progress => { if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('download:progress', progress); },
+      });
+    } catch (error) {
+      return { ok: false, message: String(error.message || error) };
     }
   });
 

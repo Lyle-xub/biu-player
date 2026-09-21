@@ -1,0 +1,17 @@
+diff --git a/node_modules/expo-media-library/android/src/main/java/expo/modules/medialibrary/MediaLibraryUtils.kt b/node_modules/expo-media-library/android/src/main/java/expo/modules/medialibrary/MediaLibraryUtils.kt
+index e65d1e9..3b79f40 100644
+--- a/node_modules/expo-media-library/android/src/main/java/expo/modules/medialibrary/MediaLibraryUtils.kt
++++ b/node_modules/expo-media-library/android/src/main/java/expo/modules/medialibrary/MediaLibraryUtils.kt
+@@ -188,7 +188,11 @@ object MediaLibraryUtils {
+   }
+ 
+   private fun getMimeTypeFromFileUrl(url: String): String? {
+-    val extension = MimeTypeMap.getFileExtensionFromUrl(url) ?: return null
++    // getFileExtensionFromUrl rejects Unicode/punctuation in otherwise valid local
++    // filenames. A null result routes MP4 files into the Images collection.
++    val filename = Uri.parse(url).lastPathSegment ?: return null
++    val extension = filename.substringAfterLast('.', "").lowercase(java.util.Locale.ROOT)
++    if (extension.isEmpty()) return null
+     return MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
+   }
+ 

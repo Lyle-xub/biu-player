@@ -2,6 +2,7 @@
  * endpoint 与参数与桌面端一致；返回结构与原 api 对象相同。
  */
 import * as client from './client';
+import { resolve as resolveDownload } from '../../../renderer/video-download';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { mediaUrl } from './mediaUrl';
 import { fetchSubtitles } from '../../../renderer/subtitles';
@@ -492,24 +493,9 @@ export async function commentReplies(aid, root, page = 1, ps = 20, options = {})
   return commentPage(data, page, ps);
 }
 
-/* ---------- 下载（移植自 renderer/api.js videoDownloadInfo：type=mp4 整文件流 +
- * accept_quality 档位列表；实际下载由调用方走 expo-file-system） ---------- */
+/* Download quality discovery must not use the restricted HTML5 playback URL. */
 export async function videoDownloadInfo(bvid, cid, quality) {
-  const data = await progressiveVideoInfo(bvid, cid, quality);
-  if (quality && Number(data.quality) !== Number(quality)) {
-    throw new Error('当前账号或整文件流不支持所选清晰度，请选择其他档位');
-  }
-  const qualities = (data.accept_quality || []).map((qn, i) => ({
-    quality: qn,
-    label: (data.accept_description || [])[i] || `${qn}P`,
-  }));
-  return {
-    url: data.durl[0].url,
-    quality: data.quality,
-    label: (qualities.find((item) => item.quality === data.quality) || {}).label || `${data.quality}P`,
-    format: /flv/.test(data.format || '') ? 'flv' : 'mp4',
-    qualities: qualities.length ? qualities : [{ quality: data.quality, label: '默认清晰度' }],
-  };
+  return resolveDownload(jget, bvid, cid, quality, [7, 12]);
 }
 
 /* ---------- 分切：B 站章节 / 简介检测；音频分析与指纹在 SplitPanel 的本地 WebView 运行。 ---------- */

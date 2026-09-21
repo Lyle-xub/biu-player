@@ -3261,8 +3261,8 @@ async function dlPick(vq) {
     const info = await api.videoDownloadInfo(t.bvid, t.cid, vq);
     const safeTitle = String(t.title || t.bvid).replace(/[\\/:*?"<>|]/g, '_').slice(0, 60);
     const filename = `${safeTitle} - ${videoQualityLabel(info.quality)}.${info.format}`;
-    const r = await window.bili.downloadStart({ url: info.url, filename });
-    if (r && r.ok) toast('下载完成');
+    const r = await window.bili.downloadStart({ url: info.url, audioUrl: info.audioUrl, filename });
+    if (r && r.ok) toast(r.started ? '已交给浏览器下载' : '下载完成');
     else if (r && !r.canceled) toast('下载失败：' + (r.message || '未知错误'));
   } catch (error) {
     toast('下载失败：' + (error.message || error));

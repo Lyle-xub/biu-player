@@ -642,7 +642,7 @@ index 0000000..8d2b79c
 +  }
 +}
 diff --git a/node_modules/expo-widgets/ios/Widgets/WidgetLiveActivity.swift b/node_modules/expo-widgets/ios/Widgets/WidgetLiveActivity.swift
-index 24d4571..413d402 100644
+index 24d4571..984959b 100644
 --- a/node_modules/expo-widgets/ios/Widgets/WidgetLiveActivity.swift
 +++ b/node_modules/expo-widgets/ios/Widgets/WidgetLiveActivity.swift
 @@ -1,110 +1,289 @@
@@ -680,11 +680,9 @@ index 24d4571..413d402 100644
 -@available(iOS 16.1, *)
 -public struct WidgetLiveActivity: Widget {
 -  @Environment(\.self) var env
--  
--  let widgetContext: AppContext = AppContext()
 +private let biuLyricText = Color(red: 244 / 255, green: 244 / 255, blue: 245 / 255)
  
--  public init() {}
+-  let widgetContext: AppContext = AppContext()
 +// Keep the date-driven view inside the render tree. Reading a timer value into
 +// Swift state would put the scan back on the throttled ActivityKit update path.
 +private struct BiuSystemLyricSweep: View {
@@ -693,6 +691,10 @@ index 24d4571..413d402 100644
 +  let interval: ClosedRange<Date>?
 +  let progress: Double
 +  let focused: Bool
+ 
+-  public init() {}
++  private var font: UIFont { .systemFont(ofSize: fontSize, weight: .semibold) }
++  private var textWidth: CGFloat { max(1, ceil((text as NSString).size(withAttributes: [.font: font]).width)) }
  
 -  public var body: some WidgetConfiguration {
 -    ActivityConfiguration(for: LiveActivityAttributes.self) { context in
@@ -728,9 +730,6 @@ index 24d4571..413d402 100644
 -        }
 -        DynamicIslandExpandedRegion(.bottom) {
 -          LiveActivitySectionView(context: context, nodes: nodes, sectionName: "expandedBottom")
-+  private var font: UIFont { .systemFont(ofSize: fontSize, weight: .semibold) }
-+  private var textWidth: CGFloat { max(1, ceil((text as NSString).size(withAttributes: [.font: font]).width)) }
-+
 +  @ViewBuilder private func glyphImage(halo: Bool = false) -> some View {
 +    if let bitmap = BiuMonetGlyphs.image(text, font: font, halo: halo) {
 +      Image(decorative: bitmap, scale: 2)
@@ -986,7 +985,7 @@ index 24d4571..413d402 100644
 +  public var body: some WidgetConfiguration {
 +    ActivityConfiguration(for: LiveActivityAttributes.self) { context in
 +      BiuLyricsActivityBanner(payload: .decode(context.state.props))
-+        .widgetURL(context.attributes.url.flatMap(URL.init(string:)))
++        .widgetURL(URL(string: "biu-player://lyrics?showLyrics=1"))
 +    } dynamicIsland: { context in
 +      let payload = BiuLyricsFrame.decode(context.state.props)
 +      return DynamicIsland {
@@ -1003,7 +1002,7 @@ index 24d4571..413d402 100644
 +        BiuIslandSpectrum(payload: payload)
 +      }
 +      .keylineTint(Color.white.opacity(0.25))
-+      .widgetURL(context.attributes.url.flatMap(URL.init(string:)))
++      .widgetURL(URL(string: "biu-player://lyrics?showLyrics=1"))
 +    }
 +    .supplementalActivityFamiliesIfAvailable()
    }

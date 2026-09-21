@@ -1,3 +1,5 @@
+import BiuVideoDownload from '../../renderer/video-download.js';
+window.BiuVideoDownload = BiuVideoDownload;
 import BiuCoverEditor from '../../renderer/playlist-cover-editor.js';
 window.BiuCoverEditor = BiuCoverEditor;
 /* 共享模块装载：把旧版经典脚本挂到 window，供 ES 模块化的 controller 解析全局标识符。

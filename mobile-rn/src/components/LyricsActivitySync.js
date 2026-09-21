@@ -7,6 +7,7 @@ import { prepareSystemLyrics, systemLyricSlots } from '../player/systemLyrics';
 import { LyricsLiveActivity, LyricsWidget } from '../widgets/LyricsWidgets';
 import { setLyricsPiPEnabled, updateLyricsPiP } from 'biu-lyrics-pip';
 import { loadCoverColor } from '../player/coverColor';
+import { PLAYER_LINK } from '../navigation/linking';
 
 const supported = Platform.OS === 'ios';
 const defaultCoverColor = [9 / 255, 9 / 255, 11 / 255];
@@ -161,7 +162,7 @@ export default function LyricsActivitySync() {
           await instances[0].update(payload);
           await Promise.allSettled(instances.slice(1).map((instance) => instance.end('immediate')));
         } else {
-          LyricsLiveActivity.start(payload, 'biu-player://lyrics');
+          LyricsLiveActivity.start(payload, PLAYER_LINK);
         }
       }).catch(() => { lastActivityInput.current = null; });
     }

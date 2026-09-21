@@ -136,6 +136,7 @@ struct LyricsWidget: Widget {
   var body: some WidgetConfiguration {
     StaticConfiguration(kind: name, provider: LyricsTimelineProvider()) { entry in
       LyricsWidgetView(entry: entry)
+        .widgetURL(URL(string: "biu-player://lyrics?showLyrics=1"))
     }
     .configurationDisplayName("Biu 桌面歌词")
     .description("显示当前播放歌曲与歌词")

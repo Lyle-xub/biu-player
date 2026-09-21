@@ -134,3 +134,60 @@ fun main(args:Array<String>) {
     }
   } finally { fs.rmSync(dir,{recursive:true,force:true}); }
 });
+
+test('Android defers background service startup and retries safely on foreground', { skip: !compiler }, () => {
+  const source = fs.readFileSync(path.join(__dirname, '../mobile-rn/node_modules/expo-video/android/src/main/java/expo/modules/video/player/VideoPlayer.kt'), 'utf8');
+  const methods = source.slice(source.indexOf('  @Volatile private var playbackServiceStartPending'), source.indexOf('  private fun serviceSetShowNotification'));
+  assert.ok(methods.includes('LifecycleState.RESUMED'));
+  const code = `
+    enum class LifecycleState { RESUMED, BEFORE_RESUME }
+    class ReactContext(var lifecycleState: LifecycleState = LifecycleState.BEFORE_RESUME)
+    class Scope { fun launch(action: () -> Unit) { action() } }
+    class Logger { fun error(message: String) {} }
+    class AppContext { val mainQueue = Scope(); val reactContext = ReactContext(); val jsLogger = Logger() }
+    class Binder { val service = Any() }
+    class Connection { var playbackServiceBinder: Binder? = null }
+    fun getPlaybackServiceErrorMessage(message: String) = message
+    object ExpoVideoPlaybackService {
+      var calls = 0; var refuse = false
+      fun startService(app: AppContext, context: Any, connection: Connection): Boolean {
+        calls++; if (refuse) throw IllegalStateException("background start forbidden")
+        connection.playbackServiceBinder = Binder(); return true
+      }
+    }
+    class VideoPlayer {
+      val appContext: AppContext? = AppContext(); val context = Any(); val serviceConnection = Connection()
+      var staysActiveInBackground = true; var showNowPlayingNotification = true
+      ${methods}
+      fun request() = startPlaybackService()
+      fun retire() { playbackServiceReleased = true; playbackServiceStartPending = false }
+    }
+    fun main() {
+      val p = VideoPlayer()
+      check(!p.request()); check(ExpoVideoPlaybackService.calls == 0)
+      p.appContext!!.reactContext.lifecycleState = LifecycleState.RESUMED
+      p.retryPlaybackService(); check(ExpoVideoPlaybackService.calls == 1)
+      p.retryPlaybackService(); check(ExpoVideoPlaybackService.calls == 1)
+      p.appContext.reactContext.lifecycleState = LifecycleState.BEFORE_RESUME
+      check(p.request()); check(ExpoVideoPlaybackService.calls == 1)
+      val race = VideoPlayer(); race.appContext!!.reactContext.lifecycleState = LifecycleState.RESUMED
+      ExpoVideoPlaybackService.refuse = true
+      check(!race.request()); check(ExpoVideoPlaybackService.calls == 2)
+      ExpoVideoPlaybackService.refuse = false
+      race.retryPlaybackService(); check(ExpoVideoPlaybackService.calls == 3)
+      val disposed = VideoPlayer(); check(!disposed.request()); disposed.retire()
+      disposed.appContext!!.reactContext.lifecycleState = LifecycleState.RESUMED
+      disposed.retryPlaybackService(); check(!disposed.request()); check(ExpoVideoPlaybackService.calls == 3)
+      println("service lifecycle checks passed")
+    }
+  `;
+  const stdlib = jar('org.jetbrains.kotlin', 'kotlin-stdlib', '2.1.20');
+  const cp = [compiler, stdlib, jar('org.jetbrains.kotlin','kotlin-script-runtime','2.1.20'), jar('org.jetbrains.kotlin','kotlin-reflect','1.6.10'), jar('org.jetbrains.intellij.deps','trove4j','1.0.20200330'), jar('org.jetbrains.kotlinx','kotlinx-coroutines-core-jvm','1.8.0'), jar('org.jetbrains','annotations','13.0')].filter(Boolean).join(path.delimiter);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'biu-service-'));
+  try {
+    const file = path.join(dir, 'Service.kt'), out = path.join(dir, 'checks.jar');
+    fs.writeFileSync(file, code);
+    execFileSync('java', ['-cp', cp, 'org.jetbrains.kotlin.cli.jvm.K2JVMCompiler', '-no-stdlib', '-no-reflect', '-classpath', stdlib, '-d', out, file], { timeout: 60000, stdio: 'pipe' });
+    assert.match(execFileSync('java', ['-cp', `${out}${path.delimiter}${stdlib}`, 'ServiceKt'], { encoding: 'utf8' }), /checks passed/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});

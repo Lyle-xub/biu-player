@@ -1,6 +1,6 @@
 {
   "name": "mobile-rn",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "main": "index.js",
   "dependencies": {
     "@expo/ui": "~57.0.16",
@@ -28,6 +28,7 @@
     "expo-image-manipulator": "~57.0.15",
     "expo-image-picker": "~57.0.15",
     "expo-linear-gradient": "~57.0.1",
+    "expo-media-library": "~57.0.5",
     "expo-secure-store": "~57.0.3",
     "expo-sharing": "~57.0.17",
     "expo-splash-screen": "~57.0.8",
@@ -64,7 +65,8 @@
   "expo": {
     "autolinking": {
       "buildFromSource": [
-        "expo-video"
+        "expo-video",
+        "expo-media-library"
       ]
     }
   },

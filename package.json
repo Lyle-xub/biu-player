@@ -1,6 +1,6 @@
 {
   "name": "biu-player",
-  "version": "0.6.7",
+  "version": "0.6.8",
   "description": "基于 B 站公开接口的桌面音乐播放器",
   "main": "main.js",
   "scripts": {
@@ -30,7 +30,8 @@
       "video-cloud-sync.js",
       "cloud-video-runtime.js",
       "cloud-video-bili.js",
-      "app-updates.js"
+      "app-updates.js",
+      "video-download.js"
     ],
     "mac": {
       "category": "public.app-category.music",

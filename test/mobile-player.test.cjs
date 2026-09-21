@@ -25,6 +25,8 @@ function loader(mocks = {}) {
     'expo-application': { nativeApplicationVersion: '1.0.6', nativeBuildVersion: '20' },
     'biu-lyrics-pip': { setLyricsPiPEnabled() {}, updateLyricsPiP() {}, extractCoverColor: async () => null },
     'src/widgets/LyricsWidgets': { LyricsLiveActivity: { getInstances: () => [], start() {} }, LyricsWidget: { updateSnapshot() {} } },
+    'expo-modules-core': { requireOptionalNativeModule: () => null },
+    'expo-media-library/legacy': { requestPermissionsAsync: async () => ({ granted: true }), saveToLibraryAsync: async () => {} },
     'expo-image-picker': { launchImageLibraryAsync: async () => ({ canceled: true }) },
     'expo-image-manipulator': { ImageManipulator: {}, SaveFormat: { JPEG: 'jpeg' } },
     'expo-file-system': { File: class { delete() {} } },
@@ -681,15 +683,15 @@ test('download retries empty streams, retains requested quality and rejects sile
   const api = loader({ './client': { get: async (url) => {
     requests.push(url);
     const data = mode === 'parts' ? { durl: [{ url: 'a' }, { url: 'b' }] }
-      : requests.length < 3 && mode === 'fallback' ? {}
+      : requests.length < 2 && mode === 'fallback' ? {}
         : { quality: 32, durl: [{ url: 'https://media/video.mp4' }], accept_quality: [32], accept_description: ['480P'] };
     return { status: 200, body: JSON.stringify({ code: 0, data }) };
   } } })('src/api/bili.js');
   assert.equal((await api.videoDownloadInfo('BV1', 2, 32)).url, 'https://media/video.mp4');
-  assert.equal(requests.length, 3);
+  assert.equal(requests.length, 2);
   assert.ok(requests.every((u) => u.includes('qn=32')));
   mode = 'downgrade';
-  await assert.rejects(api.videoDownloadInfo('BV1', 2, 80), /不支持所选清晰度/);
+  await assert.rejects(api.videoDownloadInfo('BV1', 2, 80), /未获得所选清晰度/);
   mode = 'parts';
   await assert.rejects(api.videoDownloadInfo('BV1', 2), /多段媒体/);
 });
@@ -1108,6 +1110,7 @@ function actionHarness(overrides = {}) {
     ...overrides.api,
   };
   const disk = { documentDirectory: 'file:///app/', readDirectoryAsync: async () => [], makeDirectoryAsync: async () => {}, moveAsync: async (...a) => calls.push(['move', ...a]),
+    getInfoAsync: async () => ({ exists: true, size: 100 }),
     deleteAsync: async (...a) => calls.push(['delete', ...a]),
     createDownloadResumable: (url, fileUri) => ({ fileUri, cancelAsync: async () => calls.push(['cancel']), downloadAsync: async () => ({ status: 200 }) }), ...overrides.disk };
   const load = loader({
@@ -1117,6 +1120,8 @@ function actionHarness(overrides = {}) {
       return React.createElement('WebView', props);
     } },
     'react-native-safe-area-context': safeArea,
+    'expo-modules-core': { requireOptionalNativeModule: () => ({ mux: async (...args) => calls.push(['mux', ...args]), ...overrides.nativeExport }) },
+    'expo-media-library/legacy': { requestPermissionsAsync: async () => ({ granted: true }), saveToLibraryAsync: async (uri) => calls.push(['album', uri]), ...overrides.album },
     'expo-file-system/legacy': disk, 'expo-sharing': { isAvailableAsync: async () => true, shareAsync: async (uri) => calls.push(['share', uri]) },
     'src/api/bili': api, 'src/api/client': { authStatus: async () => ({ isLogin: true }), imageHeaders: () => ({}), streamHeaders: () => ({ Referer: 'bilibili' }) },
     'src/player/PlayerContext': { usePlayer: () => context, usePlaybackProgress: () => context }, 'src/components/icons': iconMock,
@@ -1847,7 +1852,8 @@ test('download writes a complete temporary file before exporting and cancels pen
   const h = actionHarness(); let tree;
   await act(async () => { tree = create(React.createElement(h.Component, { track })); });
   await click(tree, '下载'); await click(tree, '下载 480P');
-  assert.ok(h.calls.find((c) => c[0] === 'move' && c[1].from.endsWith('.part')));
+  assert.ok(h.calls.find((c) => c[0] === 'move' && c[1].from.endsWith('.part.mp4')));
+  assert.ok(h.calls.find((c) => c[0] === 'album'), 'completed video is automatically saved to system album');
   await click(tree, '保存到文件 / 分享');
   assert.ok(h.calls.find((c) => c[0] === 'share' && c[1].endsWith('.mp4')));
   await act(async () => tree.unmount());
@@ -1858,6 +1864,37 @@ test('download writes a complete temporary file before exporting and cancels pen
   await click(tree, '下载'); await click(tree, '下载 480P');
   await act(async () => tree.update(React.createElement(h2.Component, { track: { ...track, bvid: 'B' } })));
   assert.ok(cancelled); assert.equal(h2.calls.filter((c) => c[0] === 'move').length, 0);
+  await act(async () => tree.unmount());
+});
+
+test('DASH download merges before album save and preserves the local file when album access fails', async () => {
+  let refused = true;
+  const h = actionHarness({ api: { videoDownloadInfo: async () => ({
+    qualities: [{ quality: 120, label: '4K' }], quality: 120, label: '4K', format: 'mp4',
+    url: 'https://cdn/video', audioUrl: 'https://cdn/audio',
+  }) }, album: { saveToLibraryAsync: async () => { if (refused) throw new Error('没有相册权限'); } } });
+  let tree;
+  await act(async () => { tree = create(React.createElement(h.Component, { track })); });
+  await click(tree, '下载'); await click(tree, '下载 4K');
+  const mux = h.calls.findIndex(c => c[0] === 'mux'), move = h.calls.findIndex(c => c[0] === 'move');
+  assert.ok(mux >= 0 && move > mux);
+  assert.ok(touch(tree, '保存到文件 / 分享'), 'permission failure must not lose the completed file');
+  refused = false;
+  await click(tree, '保存到系统相册');
+  assert.equal(h.calls.filter(c => c[0] === 'mux').length, 1, 'retry saving never re-downloads');
+  assert.ok(JSON.stringify(tree.toJSON()).includes('已保存到系统相册'));
+  await act(async () => tree.unmount());
+});
+
+test('DASH download does not publish or save a failed mux, and cleans both inputs', async () => {
+  const h = actionHarness({ api: { videoDownloadInfo: async () => ({
+    qualities: [{ quality: 80, label: '1080P' }], quality: 80, format: 'mp4', url: 'video', audioUrl: 'audio',
+  }) }, nativeExport: { mux: async () => { throw new Error('合并失败'); } } });
+  let tree;
+  await act(async () => { tree = create(React.createElement(h.Component, { track })); });
+  await click(tree, '下载'); await click(tree, '下载 1080P');
+  assert.equal(h.calls.filter(c => c[0] === 'move' || c[0] === 'album').length, 0);
+  assert.equal(h.calls.filter(c => c[0] === 'delete').length, 3);
   await act(async () => tree.unmount());
 });
 
@@ -6459,4 +6496,28 @@ test('playlist cover editor preserves cancellation and rejects late results for 
   await click(tree, '恢复默认封面'); await click(tree, '保存修改');
   assert.equal(saved.cover, null);
   await act(async () => tree.unmount());
+});
+
+
+test('system playback links resolve to Biu player with a home back destination', () => {
+  const { linking, PLAYER_LINK } = loader()('src/navigation/linking.js');
+  const { getStateFromPath } = require(path.join(root, 'node_modules/@react-navigation/core/lib/module/getStateFromPath.js'));
+  assert.ok(linking.filter(PLAYER_LINK));
+  assert.equal(linking.filter('https://www.bilibili.com/video/BV1'), false);
+  assert.equal(linking.filter('bilibili://video/BV1'), false);
+  assert.equal(linking.filter('biu-player://lyrics-elsewhere'), false);
+  const state = getStateFromPath(PLAYER_LINK.slice('biu-player://'.length), linking.config);
+  assert.deepEqual(state.routes.map(route => route.name), ['Tabs', 'Player']);
+  assert.equal(state.routes[1].params.showLyrics, true);
+  assert.equal(getStateFromPath('lyrics', linking.config).routes.at(-1).name, 'Player', 'old activities still open Biu');
+  const app = fs.readFileSync(path.join(root, 'App.js'), 'utf8');
+  assert.match(app, /NavigationContainer[^>]+linking=\{linking\}/);
+  const service = fs.readFileSync(path.join(root, 'node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/ExpoVideoPlaybackService.kt'), 'utf8');
+  assert.ok(service.includes(PLAYER_LINK));
+  assert.match(service, /getLaunchIntentForPackage\(packageName\)/);
+  assert.match(service, /setSessionActivity\(it\)/);
+  assert.match(service, /setContentIntent\(session.sessionActivity\)/);
+  assert.match(service, /FLAG_IMMUTABLE/);
+  const widget = fs.readFileSync(path.join(root, 'node_modules/expo-widgets/ios/Widgets/WidgetLiveActivity.swift'), 'utf8');
+  assert.equal(widget.split(`.widgetURL(URL(string: "${PLAYER_LINK}"))`).length - 1, 2, 'lock-screen and island are both pinned to Biu');
 });

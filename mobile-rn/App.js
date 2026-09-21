@@ -24,6 +24,7 @@ import { LanSyncProvider } from './src/store/LanSyncProvider';
 import { CloudSyncProvider } from './src/store/CloudSyncProvider';
 import { mediaScreenOptions } from './src/player/useMediaTransition';
 import MiniBar from './src/components/MiniBar';
+import { linking } from './src/navigation/linking';
 import { OverlayProvider } from './src/components/Overlay';
 import PageTransition, { pageScreenOptions } from './src/components/PageTransition';
 import { IconDiscover, IconHome, IconRadio, IconSearch, IconUser } from './src/components/icons';
@@ -355,7 +356,7 @@ export default function App() {
         <LyricsActivitySync />
         <CloudSyncProvider>
         <LanSyncProvider>
-        <NavigationContainer theme={navTheme}>
+        <NavigationContainer theme={navTheme} linking={linking}>
           <StatusBar style="light" />
           <Stack.Navigator
             layout={(props) => <StackChrome {...props} closedTransition={closedTransition} />}

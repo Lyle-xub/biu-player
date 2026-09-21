@@ -60,15 +60,21 @@
     },
 
     /* ---- 下载：走 /media 代理 + Content-Disposition，交给浏览器下载 ---- */
-    downloadStart: ({ url, filename }) => {
+    downloadStart: async ({ url, audioUrl, filename }) => {
       const name = filename || 'biu-download.mp4';
       const a = document.createElement('a');
-      a.href = '/media?url=' + encodeURIComponent(url) + '&dl=' + encodeURIComponent(name);
+      if (audioUrl) {
+        const response = await fetch('/api/download', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url, audioUrl, filename: name }) });
+        const result = await response.json();
+        if (!response.ok) return { ok: false, message: result.message || '视频合并失败' };
+        a.href = '/api/download?ticket=' + encodeURIComponent(result.ticket);
+      } else a.href = '/media?url=' + encodeURIComponent(url) + '&dl=' + encodeURIComponent(name);
       a.download = name;
       document.body.appendChild(a);
       a.click();
       a.remove();
-      return Promise.resolve({ ok: true });
+      return { ok: true, started: true };
     },
     onDownloadProgress: () => {},
 

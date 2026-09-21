@@ -15,6 +15,10 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const os = require('os');
+const { saveVideo } = require('../video-download');
+const downloads = new Map();
+let preparingDownloads = 0;
 
 const ROOT = path.join(__dirname, '..');
 const RENDERER = path.join(ROOT, 'renderer');
@@ -303,6 +307,43 @@ const server = http.createServer(async (req, res) => {
       const f = path.normalize(path.join(__dirname, p.slice('/__mobile/'.length)));
       if (!f.startsWith(__dirname)) { res.writeHead(403); res.end(); return; }
       serveFile(res, f);
+      return;
+    }
+
+    if (p === '/api/download' && req.method === 'POST') {
+      if (preparingDownloads >= 2) { sendJson(res, { message: '请等待当前下载准备完成' }, 429); return; }
+      preparingDownloads++;
+      let dir;
+      try {
+        const payload = JSON.parse((await readBody(req)).toString('utf8'));
+        for (const address of [payload.url, payload.audioUrl]) {
+          const target = new URL(address);
+          if (target.protocol !== 'https:' || !/(^|\.)(bilivideo\.(com|cn)|acgvideo\.com)$/.test(target.hostname)) throw new Error('无效的视频地址');
+        }
+        dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'biu-export-'));
+        const filePath = path.join(dir, 'video.mp4');
+        await saveVideo({ ...payload, filePath, fetch, headers: { 'User-Agent': UA, Referer: REFERER },
+          ffmpeg: path.join(ROOT, 'dist/cloud-runtime', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg') });
+        const ticket = crypto.randomUUID();
+        const timer = setTimeout(() => { downloads.delete(ticket); fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {}); }, 10 * 60 * 1000);
+        timer.unref();
+        downloads.set(ticket, { dir, filePath, filename: payload.filename || 'video.mp4', timer });
+        sendJson(res, { ticket });
+      } catch (error) {
+        if (dir) await fs.promises.rm(dir, { recursive: true, force: true });
+        sendJson(res, { message: error.message }, 500);
+      } finally { preparingDownloads--; }
+      return;
+    }
+    if (p === '/api/download' && req.method === 'GET') {
+      const ticket = u.searchParams.get('ticket'), item = downloads.get(ticket);
+      if (!item) { res.writeHead(404); res.end(); return; }
+      downloads.delete(ticket); clearTimeout(item.timer);
+      res.writeHead(200, { 'Content-Type': 'video/mp4', 'Content-Length': (await fs.promises.stat(item.filePath)).size,
+        'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(item.filename)}` });
+      const stream = fs.createReadStream(item.filePath);
+      const clean = () => { stream.destroy(); fs.promises.rm(item.dir, { recursive: true, force: true }).catch(() => {}); };
+      res.on('close', clean); stream.on('error', () => res.destroy()); stream.pipe(res);
       return;
     }
 

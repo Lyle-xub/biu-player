@@ -1052,28 +1052,10 @@ const api = {
     };
   },
 
-  // 整文件下载（mp4/flv，含音轨）：请求非 DASH 的 playurl（type=mp4，无 fnval）。
-  // 不传 quality 时返回当前默认档，并附带 accept_quality 可下载档位列表（菜单用）。
-  // 返回 { url, quality, label, format, qualities }
+  // Full DASH manifest, with separate audio for lossless muxing at download time.
   async videoDownloadInfo(bvid, cid, quality) {
     if (!hasBridge) throw new Error('当前环境不支持下载');
-    const q = `bvid=${encodeURIComponent(bvid)}&cid=${cid}&type=mp4&platform=html5&high_quality=1`
-      + (quality ? `&qn=${quality}` : '');
-    let data;
-    try { data = await jget('https://api.bilibili.com/x/player/wbi/playurl?' + q, { wbi: true }); }
-    catch (e) { data = await jget('https://api.bilibili.com/x/player/playurl?' + q); }
-    if (!data || !data.durl || !data.durl.length) throw new Error('该视频暂不支持整文件下载');
-    const qualities = (data.accept_quality || []).map((qn, i) => ({
-      quality: qn,
-      label: (data.accept_description || [])[i] || `${qn}P`,
-    }));
-    return {
-      url: data.durl[0].url,
-      quality: data.quality,
-      label: (qualities.find((item) => item.quality === data.quality) || {}).label || `${data.quality}P`,
-      format: /flv/.test(data.format || '') ? 'flv' : 'mp4',
-      qualities,
-    };
+    return window.BiuVideoDownload.resolve(jget, bvid, cid, quality);
   },
 
   // MixSplitR 分切检测：优先 B 站章节（view_points），其次简介时间轴文本。

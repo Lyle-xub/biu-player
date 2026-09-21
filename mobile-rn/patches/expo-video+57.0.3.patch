@@ -318,22 +318,48 @@ index cdce796..d1c0fe8 100644
      if (mixingModes.isEmpty()) {
        return AudioMixingMode.MIX_WITH_OTHERS
 diff --git a/node_modules/expo-video/android/src/main/java/expo/modules/video/managers/VideoManager.kt b/node_modules/expo-video/android/src/main/java/expo/modules/video/managers/VideoManager.kt
-index 5f9ad2a..c1b7f0f 100644
+index 5f9ad2a..086b0f7 100644
 --- a/node_modules/expo-video/android/src/main/java/expo/modules/video/managers/VideoManager.kt
 +++ b/node_modules/expo-video/android/src/main/java/expo/modules/video/managers/VideoManager.kt
-@@ -147,6 +147,7 @@ object VideoManager {
+@@ -147,6 +147,8 @@ object VideoManager {
    }
  
    fun onAppForegrounded() {
++    videoPlayersToVideoViews.keys.toList().forEach { it.retryPlaybackService() }
 +    if (this::audioFocusManager.isInitialized) audioFocusManager.onAppForegrounded()
      listeners.forEach {
        it.get()?.onAppForegrounded()
      }
 diff --git a/node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/ExpoVideoPlaybackService.kt b/node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/ExpoVideoPlaybackService.kt
-index 54c0ad0..0aa61fa 100644
+index 54c0ad0..4428162 100644
 --- a/node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/ExpoVideoPlaybackService.kt
 +++ b/node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/ExpoVideoPlaybackService.kt
-@@ -79,10 +79,11 @@ class ExpoVideoPlaybackService : MediaSessionService() {
+@@ -3,6 +3,8 @@ package expo.modules.video.playbackService
+ import android.app.NotificationChannel
+ import android.app.NotificationManager
+ import android.app.Service
++import android.app.PendingIntent
++import android.net.Uri
+ import android.content.Context
+ import android.content.Intent
+ import android.os.Binder
+@@ -72,6 +74,15 @@ class ExpoVideoPlaybackService : MediaSessionService() {
+     }
+   }
+ 
++  private fun openPlayerIntent(): PendingIntent? {
++    // Explicit component targets Biu even if another app handles the media URL.
++    val intent = packageManager.getLaunchIntentForPackage(packageName) ?: return null
++    intent.action = Intent.ACTION_VIEW
++    intent.data = Uri.parse("biu-player://lyrics?showLyrics=1")
++    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
++    return PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
++  }
++
+   fun registerPlayer(videoPlayer: VideoPlayer) {
+     appContext.mainQueue.launch {
+       val player = videoPlayer.player
+@@ -79,10 +90,12 @@ class ExpoVideoPlaybackService : MediaSessionService() {
          return@launch
        }
  
@@ -342,11 +368,20 @@ index 54c0ad0..0aa61fa 100644
          .setId("ExpoVideoPlaybackService_${player.hashCode()}")
          .setCallback(VideoMediaSessionCallback())
 -        .setCustomLayout(ImmutableList.of(seekBackwardButton, seekForwardButton))
++        .apply { openPlayerIntent()?.let { setSessionActivity(it) } }
 +        // Standard Player commands already supply previous/next on every Android version.
 +        // Custom session buttons duplicate them in Android 13+ system controls.
          .build()
  
        // Replace the basic media session with a session connected to our playback service.
+@@ -187,6 +200,7 @@ class ExpoVideoPlaybackService : MediaSessionService() {
+     val notificationCompat = NotificationCompat.Builder(this, CHANNEL_ID)
+       .setSmallIcon(androidx.media3.session.R.drawable.media3_icon_circular_play)
+       .setContentTitle(contentTitle)
++      .setContentIntent(session.sessionActivity)
+       .setStyle(MediaStyleNotificationHelper.MediaStyle(session))
+       .build()
+ 
 diff --git a/node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/RemoteCommandPlayer.kt b/node_modules/expo-video/android/src/main/java/expo/modules/video/playbackService/RemoteCommandPlayer.kt
 new file mode 100644
 index 0000000..a295125
@@ -449,10 +484,19 @@ index 5fcf3e5..61076d7 100644
      override val name = "targetViewChange"
      override val emitToJS = false
 diff --git a/node_modules/expo-video/android/src/main/java/expo/modules/video/player/VideoPlayer.kt b/node_modules/expo-video/android/src/main/java/expo/modules/video/player/VideoPlayer.kt
-index 8bae522..4b9ffa1 100644
+index 8bae522..82e82c0 100644
 --- a/node_modules/expo-video/android/src/main/java/expo/modules/video/player/VideoPlayer.kt
 +++ b/node_modules/expo-video/android/src/main/java/expo/modules/video/player/VideoPlayer.kt
-@@ -86,6 +86,38 @@ class VideoPlayer(val context: Context, appContext: AppContext, source: VideoSou
+@@ -1,6 +1,8 @@
+ package expo.modules.video.player
+ 
+ import android.content.Context
++import com.facebook.react.common.LifecycleState
++import com.facebook.react.bridge.ReactContext
+ import android.media.MediaMetadataRetriever
+ import androidx.media3.common.C
+ import android.webkit.URLUtil
+@@ -86,6 +88,38 @@ class VideoPlayer(val context: Context, appContext: AppContext, source: VideoSou
        }
      }.build()
  
@@ -491,7 +535,16 @@ index 8bae522..4b9ffa1 100644
    internal val firstFrameEventGenerator: FirstFrameEventGenerator
    val serviceConnection = PlaybackServiceConnection(WeakReference(this), appContext)
    var mediaSession: MediaSession = buildBasicMediaSession(context, player)
-@@ -233,6 +265,12 @@ class VideoPlayer(val context: Context, appContext: AppContext, source: VideoSou
+@@ -108,7 +142,7 @@ class VideoPlayer(val context: Context, appContext: AppContext, source: VideoSou
+     set(value) {
+       field = value
+       if (value) {
+-        startPlaybackService()
++        appContext?.mainQueue?.launch { startPlaybackService() }
+       }
+     }
+   var preservesPitch = false
+@@ -233,6 +267,12 @@ class VideoPlayer(val context: Context, appContext: AppContext, source: VideoSou
    var keepScreenOnWhilePlaying by VideoPlayerKeepAwake(this, appContext)
  
    private val playerListener = object : Player.Listener {
@@ -504,15 +557,17 @@ index 8bae522..4b9ffa1 100644
      override fun onIsPlayingChanged(isPlaying: Boolean) {
        this@VideoPlayer.playing = isPlaying
      }
-@@ -361,6 +399,7 @@ class VideoPlayer(val context: Context, appContext: AppContext, source: VideoSou
+@@ -361,6 +401,9 @@ class VideoPlayer(val context: Context, appContext: AppContext, source: VideoSou
  
    @kotlin.OptIn(DelicateCoroutinesApi::class)
    override fun close() {
++    playbackServiceReleased = true
++    playbackServiceStartPending = false
 +    cancelInterruptionResume()
      // Releases the listeners from VideoPlayerKeepAwake
      keepScreenOnWhilePlaying = false
  
-@@ -411,6 +450,7 @@ class VideoPlayer(val context: Context, appContext: AppContext, source: VideoSou
+@@ -411,6 +454,7 @@ class VideoPlayer(val context: Context, appContext: AppContext, source: VideoSou
    }
  
    fun prepare() {
@@ -520,7 +575,47 @@ index 8bae522..4b9ffa1 100644
      availableVideoTracks = listOf()
      currentVideoTrack = null
  
-@@ -531,6 +571,10 @@ class VideoPlayer(val context: Context, appContext: AppContext, source: VideoSou
+@@ -481,13 +525,37 @@ class VideoPlayer(val context: Context, appContext: AppContext, source: VideoSou
+     isLive = false
+   }
+ 
++  @Volatile private var playbackServiceStartPending = false
++  @Volatile private var playbackServiceReleased = false
++
++  internal fun retryPlaybackService() {
++    appContext?.mainQueue?.launch {
++      if (playbackServiceStartPending && (staysActiveInBackground || showNowPlayingNotification)) startPlaybackService()
++    }
++  }
++
+   private fun startPlaybackService(): Boolean {
++    if (playbackServiceReleased) return false
+     if (serviceConnection.playbackServiceBinder?.service != null) {
++      playbackServiceStartPending = false
+       // PlaybackService already running.
+       return true
+     }
+-    val appContext = appContext ?: throw Exceptions.AppContextLost()
+-    val serviceStarted = ExpoVideoPlaybackService.startService(appContext, context, serviceConnection)
++    val appContext = appContext ?: return false
++    // Player creation may finish after the user has left Biu. Android rejects
++    // starting a new service then; retry on resume, keeping existing playback intact.
++    if ((appContext.reactContext as? ReactContext)?.lifecycleState != LifecycleState.RESUMED) {
++      playbackServiceStartPending = true
++      return false
++    }
++    val serviceStarted = try {
++      ExpoVideoPlaybackService.startService(appContext, context, serviceConnection)
++    } catch (_: IllegalStateException) {
++      // Foreground can change between the lifecycle check and startService().
++      playbackServiceStartPending = true
++      return false
++    }
++    playbackServiceStartPending = !serviceStarted
+ 
+     if (!serviceStarted) {
+       appContext.jsLogger?.error(
+@@ -531,6 +599,10 @@ class VideoPlayer(val context: Context, appContext: AppContext, source: VideoSou
      }
    }
  

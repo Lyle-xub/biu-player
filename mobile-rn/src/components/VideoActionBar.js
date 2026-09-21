@@ -12,7 +12,8 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import { colors, fmtCount, fmtDur } from '../theme';
 import * as bili from '../api/bili';
-import { authStatus, streamHeaders } from '../api/client';
+import { authStatus } from '../api/client';
+import { createVideoDownload, saveDownloadedVideo } from '../media/videoDownload';
 import { usePlayer } from '../player/PlayerContext';
 import { trackKeyOf } from '../player/track';
 import SplitPanel from './SplitPanel';
@@ -62,10 +63,7 @@ function TrackActions({ track, onShowLyrics, onSplit, active = true }) {
     alive.current = true;
     return () => {
       alive.current = false;
-      const pending = download.current;
-      if (pending) pending.task.cancelAsync().catch(() => {}).finally(() => {
-        FileSystem.deleteAsync(pending.temp, { idempotent: true }).catch(() => {});
-      });
+      download.current?.cancel();
     };
   }, []);
 
@@ -159,46 +157,56 @@ function TrackActions({ track, onShowLyrics, onSplit, active = true }) {
   const [dlInfo, setDlInfo] = useState(null);
   const [dlProgress, setDlProgress] = useState(null);
   const [savedFile, setSavedFile] = useState(null);
+  const [dlPhase, setDlPhase] = useState('下载中');
   const loadDownload = () => run('download-info', async () => {
+    setDlInfo(null);
     const dir = FileSystem.documentDirectory + 'downloads/';
     const files = await FileSystem.readDirectoryAsync(dir).catch(() => []);
-    const latest = files.filter((name) => name.includes(`_${track.bvid}_${cid}_`) && /\.(mp4|flv)$/.test(name))
+    const latest = files.filter((name) => name.includes(`_${track.bvid}_${cid}_`) && /_\d+_\d+\.(mp4|flv)$/.test(name))
       .sort((a, b) => Number(b.match(/_(\d+)\.[^.]+$/)?.[1] || 0) - Number(a.match(/_(\d+)\.[^.]+$/)?.[1] || 0))[0];
-    if (latest) setSavedFile({ uri: dir + latest, label: latest });
+    if (latest) {
+      const uri = dir + encodeURIComponent(latest);
+      setSavedFile(previous => previous?.uri === uri ? previous : { uri, label: latest });
+    }
     setDlInfo(await bili.videoDownloadInfo(track.bvid, cid));
   });
   const startDownload = (quality) => run('download', async () => {
     setSavedFile(null);
     setDlProgress(0);
-    let temp;
+    setDlPhase('下载中');
     try {
-      // Fetch a fresh signed CDN URL; don't reuse an expired sheet response.
       const info = await bili.videoDownloadInfo(track.bvid, cid, quality);
       if (!alive.current) return;
       const dir = FileSystem.documentDirectory + 'downloads/';
       await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
       const name = String(track.parentTitle || track.title || track.bvid)
         .replace(/[\\/:*?"<>|\s]+/g, '_').slice(0, 60);
-      const uri = `${dir}${name}_${track.bvid}_${cid}_${info.quality}_${Date.now()}.${info.format}`;
-      temp = uri + '.part';
+      const filename = `${name}_${track.bvid}_${cid}_${info.quality}_${Date.now()}.${info.format}`;
+      const uri = dir + encodeURIComponent(filename);
       if (!alive.current) return;
-      const task = FileSystem.createDownloadResumable(info.url, temp, { headers: streamHeaders() }, (p) => {
-        if (alive.current && p.totalBytesExpectedToWrite > 0) {
-          setDlProgress(Math.min(1, p.totalBytesWritten / p.totalBytesExpectedToWrite));
-        }
-      });
-      download.current = { task, temp };
-      const result = await task.downloadAsync();
+      const operation = createVideoDownload(info, uri,
+        progress => { if (alive.current) setDlProgress(progress); },
+        phase => { if (alive.current) setDlPhase(phase); });
+      download.current = operation;
+      await operation.run();
       if (!alive.current) return;
-      if (!result || result.status < 200 || result.status >= 300) throw new Error(`下载失败：HTTP ${result?.status || '中断'}`);
-      await FileSystem.moveAsync({ from: temp, to: uri });
-      setSavedFile({ uri, label: `${name} · ${info.label}` });
-      setDlProgress(1);
+      const saved = { uri, label: `${name} · ${info.label}` };
+      setSavedFile(saved);
+      setDlPhase('正在保存到系统相册');
+      try {
+        await saveDownloadedVideo(uri);
+        if (alive.current) setSavedFile({ ...saved, inAlbum: true });
+      } catch (error) {
+        if (alive.current) setError(`视频已下载，保存到相册失败：${error.message || error}`);
+      }
     } finally {
       download.current = null;
-      if (temp) await FileSystem.deleteAsync(temp, { idempotent: true }).catch(() => {});
       if (alive.current) setDlProgress(null);
     }
+  });
+  const retrySave = () => run('save', async () => {
+    await saveDownloadedVideo(savedFile.uri);
+    if (alive.current) setSavedFile(file => ({ ...file, inAlbum: true }));
   });
   const exportFile = () => run('export', async () => {
     if (!await Sharing.isAvailableAsync()) throw new Error('当前设备不支持系统文件分享');
@@ -232,7 +240,7 @@ function TrackActions({ track, onShowLyrics, onSplit, active = true }) {
       title: track.parentTitle || detail?.title || track.title,
       up: detail?.owner?.name || track.up, pic: detail?.pic || track.pic,
     }) },
-    { key: 'download', Icon: IconDownload, label: '下载', onPress: () => { open('download'); if (!dlInfo) loadDownload(); } },
+    { key: 'download', Icon: IconDownload, label: '下载', onPress: () => { open('download'); loadDownload(); } },
   ];
   const retry = { favorite: loadFolders,
     download: loadDownload }[sheet];
@@ -293,9 +301,9 @@ function TrackActions({ track, onShowLyrics, onSplit, active = true }) {
         </TouchableOpacity>)}
         {dlProgress !== null ? <View style={styles.dlProgressBox}>
           <View style={styles.dlProgressTrack}><View style={[styles.dlProgressFill, { width: `${dlProgress * 100}%` }]} /></View>
-          <Text style={styles.dlProgressText}>下载中 {Math.round(dlProgress * 100)}% · 退出此页面会取消下载</Text>
+          <Text style={styles.dlProgressText}>{dlPhase}{dlPhase === '下载中' ? ` ${Math.round(dlProgress * 100)}%` : ''} · 退出此页面会取消下载</Text>
         </View> : null}
-        {savedFile ? <><Text style={styles.sheetHint}>已下载：{savedFile.label}</Text>{button('保存到文件 / 分享', exportFile)}</> : null}
+        {savedFile ? <><Text style={styles.sheetHint}>{savedFile.inAlbum ? '已保存到系统相册' : '已下载到应用内'}：{savedFile.label}</Text>{!savedFile.inAlbum ? button('保存到系统相册', retrySave) : null}{button('保存到文件 / 分享', exportFile)}</> : null}
       </ScrollView></SheetContent> : null}
       {sheet === 'lyrics' ? <ScrollView style={styles.sheetList} keyboardShouldPersistTaps="handled">
         {button('显示动态歌词', () => { setSheet(null); onShowLyrics?.(); })}

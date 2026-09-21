@@ -2,7 +2,7 @@
   "expo": {
     "name": "Biu Player",
     "slug": "biu-player-mobile",
-    "version": "1.0.10",
+    "version": "1.0.11",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -10,7 +10,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.biuplayer.mobile",
-      "buildNumber": "27",
+      "buildNumber": "28",
       "appleTeamId": "GXVN75MDQN"
     },
     "android": {
@@ -20,7 +20,7 @@
         "foregroundImage": "./assets/android-icon-foreground.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "versionCode": 12,
+      "versionCode": 13,
       "blockedPermissions": [
         "android.permission.RECORD_AUDIO"
       ]
@@ -88,6 +88,14 @@
           "photosPermission": "选择照片作为歌单封面。",
           "cameraPermission": false,
           "microphonePermission": false
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "savePhotosPermission": "将下载的视频保存到系统相册。",
+          "photosPermission": "选择照片作为歌单封面。",
+          "granularPermissions": []
         }
       ]
     ],
