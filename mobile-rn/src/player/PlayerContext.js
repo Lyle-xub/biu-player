@@ -29,6 +29,7 @@ import { getPlaylists, mergeSyncedPlaylists, setPlaylistScope } from '../store/p
 import { accountKey, adoptGuestLibrary, readAccountValue } from '../store/accountStorage';
 import { backgroundCompute } from '../performance/backgroundCompute';
 import useAppForeground from '../performance/useAppForeground';
+import { createProgressStore } from './progressStore';
 
 import useRecommendationProfile from '../store/useRecommendationProfile';
 import { tracker } from '../../../renderer/daily-recommendation';
@@ -51,8 +52,7 @@ export const PLAY_MODES = ['loop', 'single', 'shuffle'];
 export const RECOMMEND_MODES = ['music', 'all'];
 
 const PlayerContext = createContext(null);
-const PlaybackProgressContext = createContext({ position: 0, duration: 0 });
-const BackgroundPlaybackProgressContext = createContext({ position: 0, duration: 0 });
+const PlaybackProgressContext = createContext(null);
 
 export function PlayerProvider({ children }) {
   const basePlayer = useVideoPlayer(null, (p) => {
@@ -79,7 +79,12 @@ export function PlayerProvider({ children }) {
   // useEvent retains its previous value when its emitter changes. Native reads
   // give the adopted player's actual state even when readiness happened offscreen.
   const isPlaying = player.playing, status = player.status;
-  const [currentTime, setCurrentTime] = useState(0);
+  const clock = useRef(0);
+  const publishProgress = useRef(() => {});
+  const setCurrentTime = useCallback(time => {
+    clock.current = time;
+    publishProgress.current();
+  }, []);
   const pendingSeek = useRef(null);
 
   const [queue, setQueue] = useState([]);
@@ -769,7 +774,7 @@ export function PlayerProvider({ children }) {
   }, [discoveryRecommendationManager, recommendationManager]);
   listeningRef.current = listening;
   useEffect(() => () => listening.flush(), [listening]);
-  useEffect(() => { if (!isPlaying) listening.tick(currentTime, false); }, [isPlaying, listening]);
+  useEffect(() => { if (!isPlaying) listening.tick(clock.current, false); }, [isPlaying, listening]);
   const profileScope = account?.isLogin && account.mid ? String(account.mid) : '';
   const syncSnapshot = useRef(null);
   const getSyncLibrary = useCallback(async (scope = accountScope.current) => {
@@ -950,16 +955,17 @@ export function PlayerProvider({ children }) {
   const playing = !!isPlaying;
   const mediaDeferred = !!deferredSession.current;
 
-  const position = isLive || resolving ? 0
-    : Math.max(0, Math.min(range ? range.to - range.from : Infinity, (currentTime || 0) - (range?.from || 0)));
-  const duration = isLive ? 0
-    : (range ? range.to - range.from : (player.duration || (current && current.duration) || 0));
-  const progressValue = useMemo(() => ({ position, duration }), [position, duration]);
-  const progressRef = useRef(progressValue);
-  progressRef.current = progressValue;
+  const progressRef = useRef(null);
+  if (!progressRef.current) progressRef.current = createProgressStore();
   const foreground = useAppForeground();
-  const visibleProgress = useRef(progressValue);
-  if (foreground) visibleProgress.current = progressValue;
+  publishProgress.current = () => progressRef.current.publish({
+    position: isLive || resolving ? 0 : Math.max(0,
+      Math.min(range ? range.to - range.from : Infinity, (clock.current || 0) - (range?.from || 0))),
+    duration: isLive ? 0 : (range ? range.to - range.from : (player.duration || current?.duration || 0)),
+  }, foreground);
+  // Source changes, paused seeks and foreground restoration also publish. This
+  // runs after commit so subscribers are never notified during provider render.
+  useLayoutEffect(() => { publishProgress.current(); });
 
   const value = useMemo(() => ({
     queue, index, queueSource, current, isLive, playMode, setPlayMode,
@@ -970,8 +976,8 @@ export function PlayerProvider({ children }) {
     buffering: resolving || sourcePending || status === 'loading',
     // Backwards-compatible imperative reads stay current without making every
     // usePlayer consumer subscribe to the 250 ms playback clock.
-    get position() { return progressRef.current.position; },
-    get duration() { return progressRef.current.duration; },
+    get position() { return progressRef.current.getSnapshot().position; },
+    get duration() { return progressRef.current.getSnapshot().duration; },
     playError,
     likes, isLiked, toggleLike, libraryTracks, isInLibrary, toggleLibrary, removeCollectionTrack, resolveTrackUp,
     libraryReady, getSyncLibrary, applySyncLibrary,
@@ -1020,9 +1026,7 @@ export function PlayerProvider({ children }) {
   }
   useLayoutEffect(() => store.current.publish(value), [value]);
   return <PlayerContext.Provider value={store.current}>
-    <BackgroundPlaybackProgressContext.Provider value={progressValue}>
-      <PlaybackProgressContext.Provider value={visibleProgress.current}>{children}</PlaybackProgressContext.Provider>
-    </BackgroundPlaybackProgressContext.Provider>
+    <PlaybackProgressContext.Provider value={progressRef.current}>{children}</PlaybackProgressContext.Provider>
   </PlayerContext.Provider>;
 }
 
@@ -1043,5 +1047,8 @@ export function usePlayer(fields) {
 }
 // Only system lyric services need ticks while the UI is suspended. Audio/queue
 // progression and usePlayer's imperative position getter always remain live.
-export const usePlaybackProgress = ({ background = false } = {}) =>
-  useContext(background ? BackgroundPlaybackProgressContext : PlaybackProgressContext);
+export function usePlaybackProgress({ background = false } = {}) {
+  const store = useContext(PlaybackProgressContext);
+  const getSnapshot = background ? store.getSnapshot : store.getVisibleSnapshot;
+  return useSyncExternalStore(store.subscribe, getSnapshot, getSnapshot);
+}

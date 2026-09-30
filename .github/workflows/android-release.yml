@@ -1,0 +1,55 @@
+name: Android release package
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Release tag or commit to build
+        required: true
+        default: v0.6.9
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: mobile-rn/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - run: npm ci --legacy-peer-deps
+        working-directory: mobile-rn
+      - run: npx expo prebuild --platform android --no-install
+        working-directory: mobile-rn
+      - name: Build ARM64 release APK
+        working-directory: mobile-rn/android
+        run: |
+          ./gradlew :app:assembleRelease -PreactNativeArchitectures=arm64-v8a --no-daemon --max-workers=4 > ../build-android.log 2>&1 || {
+            tail -100 ../build-android.log
+            exit 1
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-arm64
+          path: mobile-rn/android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-release-log
+          path: mobile-rn/build-android.log
+          if-no-files-found: ignore
+          retention-days: 7

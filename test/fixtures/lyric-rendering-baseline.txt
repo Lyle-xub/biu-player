@@ -1,0 +1,137 @@
+// Rendering baseline captured before the performance optimization.
+const MONET_GLOW_RISE_SCALE = 1.18;
+const MONET_GLOW_TAIL_SECONDS = 1.05;
+const MONET_GLOW_MAX_ALPHA = .88;
+const MONET_GLOW_RADIUS_ONE = .28;
+const MONET_GLOW_RADIUS_TWO = .65;
+function monetMixRgb(from, to, amount, alpha) {
+  const t = Math.min(1, Math.max(0, amount));
+  const a = Math.min(1, Math.max(0, alpha));
+  return `rgba(${Math.round(from[0] + (to[0] - from[0]) * t)}, ${Math.round(from[1] + (to[1] - from[1]) * t)}, ${Math.round(from[2] + (to[2] - from[2]) * t)}, ${a})`;
+}
+
+function measureMonetTokenOffsets(token, fontSpec) {
+  if (token.offsets && token.fontSpec === fontSpec) return;
+  const ctx = getMonetMeasureCtx();
+  ctx.font = fontSpec;
+  const graphemes = splitLyricGraphemes(token.text);
+  const offsets = new Array(graphemes.length + 1).fill(0);
+  for (let i = 1; i <= graphemes.length; i += 1) {
+    offsets[i] = ctx.measureText(graphemes.slice(0, i).join('')).width;
+  }
+  token.offsets = offsets;
+  token.fontSpec = fontSpec;
+  token.graphemeCount = graphemes.length;
+}
+
+/* 字素级填充前沿：词内按均摊字素时间在累计宽度间插值（folia fillWidth） */
+function resolveMonetTokenFillWidth(token, currentTime) {
+  const offsets = token.offsets;
+  const fullWidth = offsets[offsets.length - 1] || 0;
+  if (currentTime <= token.t0) return 0;
+  if (currentTime >= token.t1) return fullWidth;
+  const progress = (currentTime - token.t0) / Math.max(.001, token.t1 - token.t0);
+  const floatIndex = progress * token.graphemeCount;
+  const wholeIndex = Math.floor(floatIndex);
+  const fractional = floatIndex - wholeIndex;
+  const startWidth = offsets[Math.min(wholeIndex, offsets.length - 1)] || 0;
+  const endWidth = offsets[Math.min(wholeIndex + 1, offsets.length - 1)] || startWidth;
+  return startWidth + (endWidth - startWidth) * fractional;
+}
+
+function monetSmoothstep(value) {
+  const t = Math.min(1, Math.max(0, value));
+  return t * t * (3 - 2 * t);
+}
+
+/* 词发光强度：唱词期间 smoothstep 爬升，过峰后 smoothstep 驻留衰减（folia glowShadow） */
+function resolveMonetTokenGlow(token, lineRenderEnd, currentTime) {
+  if (currentTime <= token.t0) return 0;
+  const wordDuration = Math.max(.001, token.t1 - token.t0);
+  const peakTime = token.t0 + wordDuration * MONET_GLOW_RISE_SCALE;
+  if (currentTime <= peakTime) {
+    return monetSmoothstep((currentTime - token.t0) / (wordDuration * MONET_GLOW_RISE_SCALE));
+  }
+  const tailEnd = Math.max(lineRenderEnd, token.t1 + MONET_GLOW_TAIL_SECONDS);
+  const decayDuration = Math.max(.18, tailEnd - peakTime);
+  return monetSmoothstep(1 - (currentTime - peakTime) / decayDuration);
+}
+
+function clearMonetTokenFx(token) {
+  token.el.classList.remove('w-passed');
+  token.base.style.textShadow = 'none';
+  token.el.style.setProperty('--w-solid', '0px');
+  token.el.style.setProperty('--w-feather', '0px');
+  token.el.style.setProperty('--w-sweep', '0px');
+}
+
+function updateMonetLineWords(index, currentTime, isActiveLine) {
+  const st = monetLineStates.get(index);
+  if (!st) return;
+  const line = lyrics[index];
+  if (!line) return;
+  if (!st.measured) {
+    const cs = getComputedStyle(st.el);
+    st.fontPx = parseFloat(cs.fontSize) || 36;
+    st.edge = Math.max(6, Math.min(16, st.fontPx * .45));
+    const fontSpec = `${cs.fontWeight} ${st.fontPx}px ${cs.fontFamily}`;
+    st.tokens.forEach((token) => measureMonetTokenOffsets(token, fontSpec));
+    st.measured = true;
+  }
+  const lineRenderEnd = line.to;
+  const baseChannels = [255, 255, 255];
+  const baseAlpha = isActiveLine ? .34 : .46;
+  st.tokens.forEach((token) => {
+    if (!token.timed) return;
+    const wordPassed = currentTime > token.t1;
+    const wordActive = currentTime >= token.t0 && !wordPassed;
+    token.el.classList.toggle('w-passed', isActiveLine ? wordPassed : true);
+
+    /* 发光附着在基底字形上，active / passed 行都保留尾部衰减 */
+    const intensity = (isActiveLine || wordPassed)
+      ? resolveMonetTokenGlow(token, lineRenderEnd, currentTime) : 0;
+    if (intensity > 0) {
+      const r1 = Math.round(st.fontPx * MONET_GLOW_RADIUS_ONE);
+      const r2 = Math.round(st.fontPx * MONET_GLOW_RADIUS_TWO);
+      const glowColor = monetMixRgb(baseChannels, st.accentRgb, intensity, intensity * MONET_GLOW_MAX_ALPHA);
+      token.base.style.textShadow = `0 0 ${r1}px ${glowColor}, 0 0 ${r2}px ${glowColor}`;
+    } else {
+      token.base.style.textShadow = 'none';
+    }
+
+    if (!isActiveLine) {
+      token.el.style.setProperty('--w-solid', '0px');
+      token.el.style.setProperty('--w-feather', '0px');
+      token.el.style.setProperty('--w-sweep', '0px');
+      return;
+    }
+
+    /* 扫光 mask：实芯 → 0.92 羽化 → 透明，前沿越过词尾后完全探出（folia maskImage） */
+    const progress = wordPassed ? 1 : wordActive
+      ? (currentTime - token.t0) / Math.max(.001, token.t1 - token.t0) : 0;
+    const filledWidth = resolveMonetTokenFillWidth(token, currentTime);
+    const fullWidth = token.offsets[token.offsets.length - 1] || 0;
+    const sweepEnd = fullWidth > 0 ? filledWidth + st.edge * Math.min(1, Math.max(0, filledWidth / fullWidth)) : 0;
+    const solidEnd = Math.max(sweepEnd - st.edge, 0);
+    const featherStart = Math.max(sweepEnd - st.edge * .55, 0);
+    token.el.style.setProperty('--w-solid', `${solidEnd.toFixed(2)}px`);
+    token.el.style.setProperty('--w-feather', `${featherStart.toFixed(2)}px`);
+    token.el.style.setProperty('--w-sweep', `${sweepEnd.toFixed(2)}px`);
+
+    /* 填充渐变随进度从基色混入高亮色，尾端 alpha 92% → 72%（folia fillGradient） */
+    const fill = monetMixRgb(baseChannels, st.accentRgb, progress, Math.min(1, baseAlpha + (0.98 - baseAlpha) * progress));
+    token.fill.style.backgroundImage = `linear-gradient(90deg, ${fill} 0%, ${monetMixRgb(baseChannels, st.accentRgb, progress, .92 * (baseAlpha + (0.98 - baseAlpha) * progress))} 68%, ${monetMixRgb(baseChannels, st.accentRgb, progress, .72 * (baseAlpha + (0.98 - baseAlpha) * progress))} 100%)`;
+  });
+}
+
+function resetMonetLineWords(index, passed) {
+  const st = monetLineStates.get(index);
+  if (!st) return;
+  st.tokens.forEach((token) => {
+    if (!token.timed) return;
+    clearMonetTokenFx(token);
+    if (passed) token.el.classList.add('w-passed');
+  });
+}
+
+function layoutLyricRail() {}

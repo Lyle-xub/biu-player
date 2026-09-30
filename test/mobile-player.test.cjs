@@ -2824,7 +2824,7 @@ test('iOS lyrics use native glyph shadows without clipping Monet glow into glyph
 
 test('settings default to simple lyrics, apply immediately, persist across restart and protect edits from a late restore', async () => {
   const saved = new Map([['biu.quality', '2']]);
-  let settingsRenders = 0;
+  let settingsRenders = 0, providerRenders = 0;
   const events = {};
   let restore = null;
   const videoRequests = [];
@@ -2836,7 +2836,7 @@ test('settings default to simple lyrics, apply immediately, persist across resta
     'react-native-safe-area-context': safeArea, 'src/components/icons': iconMock,
     '@react-navigation/native': { useIsFocused: () => true },
     'expo-audio': { setAudioModeAsync: async () => {} },
-    'expo-video': { useVideoPlayer: () => player },
+    'expo-video': { useVideoPlayer: () => { providerRenders++; return player; } },
     'src/components/RecommendationProfileCard': { default: () => null, __esModule: true },
     expo: { useEvent: (_, name) => name === 'playingChange' ? { isPlaying: false } : { status: 'idle' },
       useEventListener: (_, name, callback) => { events[name] = callback; } },
@@ -2868,8 +2868,10 @@ test('settings default to simple lyrics, apply immediately, persist across resta
   assert.ok(touch(tree, '返回'), 'back is available without waiting for settings data');
   const initialSlowRenders = slowRenders;
   const initialProgressRenders = progressRenders;
+  const initialProviderRenders = providerRenders;
   for (let i = 1; i <= 8; i++) await act(async () => events.timeUpdate({ currentTime: i / 4 }));
   assert.equal(context.position, 2, 'playback progress still advances');
+  assert.equal(providerRenders, initialProviderRenders, 'native clock samples never rerun provider hooks or account/profile work');
   assert.equal(progress.position, 2, 'dedicated progress consumers receive the latest playback clock');
   assert.equal(slowRenders, initialSlowRenders, 'playback ticks do not publish the main player context');
   assert.ok(progressRenders > initialProgressRenders, 'the dedicated progress context publishes playback ticks');
@@ -3968,7 +3970,7 @@ test('a native video error clears the reusable media key so discovery retry repl
 
 test('discovery source readiness rejects late loads and survives A → B → A during an in-flight native replacement', async () => {
   const listeners = {}, replacingB = deferred();
-  const sources = [];
+  const sources = [], nativeNotifications = {};
   let context, tree, bRequest, aRequest;
   const player = { playing: false, status: 'readyToPlay', currentTime: 0, duration: 180,
     play() { this.playing = true; }, pause() { this.playing = false; },
@@ -3981,7 +3983,11 @@ test('discovery source readiness rejects late loads and survives A → B → A d
     } };
   const { PlayerProvider, usePlayer } = loader({
     'expo-video': { useVideoPlayer: () => player },
-    expo: { useEvent: (_, name) => name === 'playingChange' ? { isPlaying: player.playing } : { status: player.status },
+    expo: { useEvent: (_, name) => {
+      const [, refresh] = React.useReducer(n => n + 1, 0);
+      nativeNotifications[name] = refresh;
+      return name === 'playingChange' ? { isPlaying: player.playing } : { status: player.status };
+    },
       useEventListener: (_, name, fn) => { listeners[name] = fn; } },
     '@react-native-async-storage/async-storage': storage,
     'src/api/bili': { videoUrl: async (bvid) => `https://cdn/${bvid}` },
@@ -4017,9 +4023,9 @@ test('discovery source readiness rejects late loads and survives A → B → A d
     assert.deepEqual(context.videoSource, { key: 'A', revision: 3 });
     assert.equal(context.playing, true);
     assert.equal(context.buffering, false, 'sourceLoad without sourceChange clears startup even when loading finished before replaceAsync');
-    await act(async () => { player.status = 'loading'; listeners.timeUpdate({ currentTime: 0.5 }); });
+    await act(async () => { player.status = 'loading'; nativeNotifications.statusChange(); listeners.statusChange({ status: 'loading' }); listeners.timeUpdate({ currentTime: 0.5 }); });
     assert.equal(context.buffering, true, 'a genuine native rebuffer still shows loading even with play intent set');
-    await act(async () => { player.status = 'readyToPlay'; listeners.timeUpdate({ currentTime: 0.75 }); });
+    await act(async () => { player.status = 'readyToPlay'; nativeNotifications.statusChange(); listeners.statusChange({ status: 'readyToPlay' }); listeners.timeUpdate({ currentTime: 0.75 }); });
     assert.equal(context.buffering, false);
     await act(async () => listeners.sourceLoad({ videoSource: sources[1] }));
     assert.deepEqual(context.videoSource, { key: 'A', revision: 3 }, 'late B events cannot undo the last selection');

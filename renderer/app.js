@@ -1213,12 +1213,9 @@ async function setVideoMode(on, force = false, immediate = false) {
   $('videoStatus').className = 'video-status';
   $('videoStatus').querySelector('b').textContent = '正在准备原视频…';
   try {
-    const loadedQuality = await prepareOriginalVideo(t, token, force);
+    await prepareOriginalVideo(t, token, force);
     if (requestToken !== modeRequestToken || token !== videoLoadToken || state.current !== t) return;
     if (!document.body.classList.contains('video-pending') && !videoModeOn()) return;
-    if (loadedQuality !== settings.vq) {
-      toast(`${videoQualityLabel(settings.vq)} 当前不可用，已切换至 ${videoQualityLabel(loadedQuality)}`);
-    }
     // 在歌词仍可见时完成定位和首帧解码，随后才启动视觉转场。
     const handoffSource = activeMedia();
     const handoffTime = isFinite(handoffSource.currentTime) ? handoffSource.currentTime : 0;
@@ -3057,12 +3054,24 @@ function resolveMonetTokenGlow(token, lineRenderEnd, currentTime) {
   return monetSmoothstep(1 - (currentTime - peakTime) / decayDuration);
 }
 
+// Keep the same rendered values while avoiding redundant DOM mutations for
+// completed words and inactive lines. Weak keys do not retain previous songs.
+const lyricStyleValues = new WeakMap();
+function setLyricStyle(element, property, value) {
+  let values = lyricStyleValues.get(element);
+  if (!values) { values = new Map(); lyricStyleValues.set(element, values); }
+  if (values.get(property) === value) return;
+  values.set(property, value);
+  if (property.startsWith('--')) element.style.setProperty(property, value);
+  else element.style[property] = value;
+}
+
 function clearMonetTokenFx(token) {
   token.el.classList.remove('w-passed');
-  token.base.style.textShadow = 'none';
-  token.el.style.setProperty('--w-solid', '0px');
-  token.el.style.setProperty('--w-feather', '0px');
-  token.el.style.setProperty('--w-sweep', '0px');
+  setLyricStyle(token.base, 'textShadow', 'none');
+  setLyricStyle(token.el, '--w-solid', '0px');
+  setLyricStyle(token.el, '--w-feather', '0px');
+  setLyricStyle(token.el, '--w-sweep', '0px');
 }
 
 function updateMonetLineWords(index, currentTime, isActiveLine) {
@@ -3078,6 +3087,7 @@ function updateMonetLineWords(index, currentTime, isActiveLine) {
     st.tokens.forEach((token) => measureMonetTokenOffsets(token, fontSpec));
     st.measured = true;
   }
+  st.resetPassed = undefined;
   const lineRenderEnd = line.to;
   const baseChannels = [255, 255, 255];
   const baseAlpha = isActiveLine ? .34 : .46;
@@ -3094,15 +3104,15 @@ function updateMonetLineWords(index, currentTime, isActiveLine) {
       const r1 = Math.round(st.fontPx * MONET_GLOW_RADIUS_ONE);
       const r2 = Math.round(st.fontPx * MONET_GLOW_RADIUS_TWO);
       const glowColor = monetMixRgb(baseChannels, st.accentRgb, intensity, intensity * MONET_GLOW_MAX_ALPHA);
-      token.base.style.textShadow = `0 0 ${r1}px ${glowColor}, 0 0 ${r2}px ${glowColor}`;
+      setLyricStyle(token.base, 'textShadow', `0 0 ${r1}px ${glowColor}, 0 0 ${r2}px ${glowColor}`);
     } else {
-      token.base.style.textShadow = 'none';
+      setLyricStyle(token.base, 'textShadow', 'none');
     }
 
     if (!isActiveLine) {
-      token.el.style.setProperty('--w-solid', '0px');
-      token.el.style.setProperty('--w-feather', '0px');
-      token.el.style.setProperty('--w-sweep', '0px');
+      setLyricStyle(token.el, '--w-solid', '0px');
+      setLyricStyle(token.el, '--w-feather', '0px');
+      setLyricStyle(token.el, '--w-sweep', '0px');
       return;
     }
 
@@ -3114,19 +3124,20 @@ function updateMonetLineWords(index, currentTime, isActiveLine) {
     const sweepEnd = fullWidth > 0 ? filledWidth + st.edge * Math.min(1, Math.max(0, filledWidth / fullWidth)) : 0;
     const solidEnd = Math.max(sweepEnd - st.edge, 0);
     const featherStart = Math.max(sweepEnd - st.edge * .55, 0);
-    token.el.style.setProperty('--w-solid', `${solidEnd.toFixed(2)}px`);
-    token.el.style.setProperty('--w-feather', `${featherStart.toFixed(2)}px`);
-    token.el.style.setProperty('--w-sweep', `${sweepEnd.toFixed(2)}px`);
+    setLyricStyle(token.el, '--w-solid', `${solidEnd.toFixed(2)}px`);
+    setLyricStyle(token.el, '--w-feather', `${featherStart.toFixed(2)}px`);
+    setLyricStyle(token.el, '--w-sweep', `${sweepEnd.toFixed(2)}px`);
 
     /* 填充渐变随进度从基色混入高亮色，尾端 alpha 92% → 72%（folia fillGradient） */
     const fill = monetMixRgb(baseChannels, st.accentRgb, progress, Math.min(1, baseAlpha + (0.98 - baseAlpha) * progress));
-    token.fill.style.backgroundImage = `linear-gradient(90deg, ${fill} 0%, ${monetMixRgb(baseChannels, st.accentRgb, progress, .92 * (baseAlpha + (0.98 - baseAlpha) * progress))} 68%, ${monetMixRgb(baseChannels, st.accentRgb, progress, .72 * (baseAlpha + (0.98 - baseAlpha) * progress))} 100%)`;
+    setLyricStyle(token.fill, 'backgroundImage', `linear-gradient(90deg, ${fill} 0%, ${monetMixRgb(baseChannels, st.accentRgb, progress, .92 * (baseAlpha + (0.98 - baseAlpha) * progress))} 68%, ${monetMixRgb(baseChannels, st.accentRgb, progress, .72 * (baseAlpha + (0.98 - baseAlpha) * progress))} 100%)`);
   });
 }
 
 function resetMonetLineWords(index, passed) {
   const st = monetLineStates.get(index);
-  if (!st) return;
+  if (!st || st.resetPassed === passed) return;
+  st.resetPassed = passed;
   st.tokens.forEach((token) => {
     if (!token.timed) return;
     clearMonetTokenFx(token);
@@ -3882,8 +3893,8 @@ function renderSpectrum(now) {
     const target = .025 + signal * envelope * .96;
     spectrumLevels[i] += (target - spectrumLevels[i]) * (target > spectrumLevels[i] ? .38 : .12);
     if (spectrumLevels[i] > maxLevel) maxLevel = spectrumLevels[i];
-    bar.style.transform = `scaleY(${Math.max(.018, spectrumLevels[i]).toFixed(3)})`;
-    bar.style.opacity = (.34 + Math.min(1, signal) * .66).toFixed(2);
+    setLyricStyle(bar, 'transform', `scaleY(${Math.max(.018, spectrumLevels[i]).toFixed(3)})`);
+    setLyricStyle(bar, 'opacity', (.34 + Math.min(1, signal) * .66).toFixed(2));
   });
   // 未播放且所有柱都回落到基线附近后进入空闲态，停止每帧 DOM 写入
   if (!playing && maxLevel < 0.028) spectrumSettled = true;
