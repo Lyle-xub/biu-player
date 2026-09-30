@@ -29,6 +29,9 @@ jobs:
           distribution: zulu
           java-version: '17'
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
       - run: npm ci --legacy-peer-deps
         working-directory: mobile-rn
       - run: npx expo prebuild --platform android --no-install
