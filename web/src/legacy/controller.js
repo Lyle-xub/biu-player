@@ -2250,6 +2250,11 @@ async function playTrack(t, options = {}) {
     savePlaybackSession();
   } catch (e) {
     if (obsolete()) return;
+    if (!options.recover) {
+      // A failed request for song B must not leave song A resumable under B's title.
+      audio.pause(); audio.removeAttribute('src');
+      audio.removeAttribute('data-bvid'); audio.removeAttribute('data-quality'); audio.load();
+    }
     pendingPlaybackStart = null;
     syncToggleIcon();
     savePlaybackSession();

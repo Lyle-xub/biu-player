@@ -21,6 +21,12 @@ test('playback logs accept structured state, omit credentials and URLs, and rota
   assert.equal(entry.bvid, 'BV1test'); assert.equal(entry.position, 83.5);
   assert.ok(!fs.readFileSync(file, 'utf8').includes('secret'));
   log({ event: 'proxy-failure', errorName: 'AbortError', host: 'cdn.test' });
+  log({ event: 'playurl-failure', endpoint: 'html5', apiCode: -404, status: 200, audioTracks: 0, durlParts: 0,
+    reason: 'request-error', url: 'https://cdn.test/?signature=secret' });
+  const failure = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(failure.apiCode, -404); assert.equal(failure.endpoint, 'html5');
+  assert.equal(failure.status, 200); assert.equal(failure.reason, 'request-error');
+  assert.equal(failure.url, undefined);
   log({ event: 'stall', mediaError: 0, soundError: 0 });
   assert.ok(fs.existsSync(file + '.1'));
   assert.equal(fs.readdirSync(directory).length, 2);

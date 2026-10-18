@@ -131,10 +131,36 @@ function absImg(u) {
 async function jget(url, opts) {
   // IPC/网络偶发不返回时必须主动结束；否则 videoManifest 会缓存永久 pending 的 Promise。
   const r = await withApiTimeout(window.bili.get(url, opts), 8000);
-  if (r.status !== 200) throw new Error('HTTP ' + r.status);
+  if (r.status !== 200) throw Object.assign(new Error('HTTP ' + r.status), { status: r.status });
   const d = JSON.parse(r.body);
-  if (d.code !== 0) throw new Error(d.message || ('code ' + d.code));
+  if (d.code !== 0) throw Object.assign(new Error(d.message || ('code ' + d.code)), { code: d.code, status: r.status });
   return d.data;
+}
+
+function playbackStreamUrl(track) {
+  const candidates = [track?.baseUrl, track?.base_url, track?.url,
+    ...[].concat(track?.backupUrl || [], track?.backup_url || [])];
+  for (const value of candidates) {
+    if (typeof value !== 'string' || !value.trim()) continue;
+    const url = value.trim().replace(/^\/\//, 'https://').replace(/^http:/i, 'https:');
+    try { if (/^https:\/\//i.test(url) && new URL(url).protocol === 'https:') return url; } catch {}
+  }
+  return null;
+}
+
+function audioPlaybackUrl(data, quality) {
+  const dash = data?.dash;
+  if (quality >= 2 && dash?.flac?.display !== false) {
+    const flac = playbackStreamUrl(dash?.flac?.audio);
+    if (flac) return flac;
+  }
+  const tracks = (Array.isArray(dash?.audio) ? dash.audio : [])
+    .map(track => ({ url: playbackStreamUrl(track), bandwidth: Number(track?.bandwidth) || 0 }))
+    .filter(track => track.url).sort((a, b) => b.bandwidth - a.bandwidth);
+  if (tracks.length) return (quality === 0 ? tracks[tracks.length - 1] : tracks[0]).url;
+  // A single progressive file contains audio too. Never silently play just part 1.
+  if (data?.durl?.length === 1) return playbackStreamUrl(data.durl[0]);
+  return null;
 }
 
 const VIDEO_QUALITY_NAMES = {
@@ -986,32 +1012,35 @@ const api = {
   // quality: 0 标准(最低码率) 1 高品(最高码率) 2 无损(优先 flac，需登录/大会员)
   async playUrl(bvid, cid, quality = 1) {
     if (!hasBridge) return null;
-    const q = `bvid=${encodeURIComponent(bvid)}&cid=${cid}&fnval=16&fourk=1`;
-    let data;
-    try {
-      data = await jget('https://api.bilibili.com/x/player/wbi/playurl?' + q, { wbi: true });
-    } catch (e) {
+    const base = `bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}`;
+    const dash = base + '&fnval=16&fnver=0&fourk=1';
+    const attempts = [
+      { endpoint: 'wbi-dash', url: 'https://api.bilibili.com/x/player/wbi/playurl?' + dash, options: { wbi: true } },
+      { endpoint: 'dash', url: 'https://api.bilibili.com/x/player/playurl?' + dash },
+      { endpoint: 'html5', url: 'https://api.bilibili.com/x/player/playurl?' + base + '&type=mp4&platform=html5&high_quality=1' },
+    ];
+    const log = payload => {
+      try { window.bili.playbackDiagnostic?.({ ...payload, bvid, cid: Number(cid) }); } catch {}
+    };
+    let failure = new Error('无可用播放地址');
+    for (const attempt of attempts) {
+      let data;
       try {
-        data = await jget('https://api.bilibili.com/x/player/playurl?' + q);
-      } catch (e2) {
-        data = await jget('https://api.bilibili.com/x/web-interface/playurl?' + q);
+        data = await jget(attempt.url, attempt.options);
+        const url = audioPlaybackUrl(data, quality);
+        if (!url) throw Object.assign(new Error(data?.durl?.length > 1
+          ? '接口返回多段媒体，暂无可用的完整音频地址' : '无可用播放地址'), { reason: 'empty-manifest', code: 0, status: 200 });
+        if (attempt !== attempts[0]) log({ event: 'playurl-fallback', endpoint: attempt.endpoint });
+        return url;
+      } catch (error) {
+        failure = error;
+        log({ event: 'playurl-failure', endpoint: attempt.endpoint, reason: error.reason || 'request-error',
+          apiCode: error.code, status: error.status, errorName: error.name,
+          audioTracks: Array.isArray(data?.dash?.audio) ? data.dash.audio.length : 0,
+          durlParts: Array.isArray(data?.durl) ? data.durl.length : 0 });
       }
     }
-    const dash = data.dash;
-    if (dash) {
-      // 无损：flac 通道（display=false 多为无权限，退回最高码率）
-      if (quality >= 2 && dash.flac && dash.flac.audio && dash.flac.display !== false) {
-        const f = dash.flac.audio;
-        return f.baseUrl || f.base_url;
-      }
-      if (dash.audio && dash.audio.length) {
-        const audios = [...dash.audio].sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0));
-        const pick = quality === 0 ? audios[audios.length - 1] : audios[0];
-        return pick.baseUrl || pick.base_url;
-      }
-    }
-    if (data.durl && data.durl.length) return data.durl[0].url;
-    throw new Error('无可用播放地址');
+    throw failure;
   },
 
   // 返回当前账号、当前稿件真正拿得到且具有视频流的清晰度档位。

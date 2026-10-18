@@ -212,7 +212,7 @@ test('moving DASH audio cannot hide a video track that remains stalled after rec
 });
 
 for (const file of ['renderer/app.js', 'web/src/legacy/controller.js']) {
-  test(`${file}: recovery bypasses segment source reuse without adding listening history`, async () => {
+  test(`${file}: recovery and source switching preserve the intended track`, async t => {
     const source = fs.readFileSync(file, 'utf8');
     const block = source.slice(source.indexOf('async function playTrack(t, options = {})'), source.indexOf('// 电台直播：HLS 流'));
     const audio = new Media(), video = new Media(), liveVideo = new Media();
@@ -238,5 +238,27 @@ for (const file of ['renderer/app.js', 'web/src/legacy/controller.js']) {
     assert.equal(audio.currentTime, 83.5); assert.equal(audio.plays, 1); assert.equal(learned, 0);
     await context.playTrack(track, { recover: true, forceAudioRefresh: true, startTime: 95, keepView: true, cancelled: () => true });
     assert.equal(audio.plays, 1, 'cancelled loading cannot restart the old song');
+    await t.test('a failed new song cannot resume the previous source under the new title', async () => {
+      const next = { bvid: 'B', cid: 2, aid: 2, duration: 188 };
+      audio.currentTime = 252.8;
+      context.api.playUrl = async () => { throw new Error('无播放地址'); };
+      context.console = { error() {} };
+      await context.playTrack(next, { keepView: true });
+      assert.equal(context.state.current, next);
+      assert.equal(audio.src, '', 'the next click must reload B rather than resume A');
+      assert.equal(audio.paused, true);
+    });
+    await t.test('a late failure from an old request cannot clear a newer playing source', async () => {
+      let rejectOld;
+      context.api.playUrl = bvid => bvid === 'Slow'
+        ? new Promise((_resolve, reject) => { rejectOld = reject; }) : Promise.resolve('https://cdn.test/new-song');
+      const old = context.playTrack({ bvid: 'Slow', cid: 3, aid: 3 }, { keepView: true });
+      const next = { bvid: 'New', cid: 4, aid: 4 };
+      await context.playTrack(next, { keepView: true });
+      rejectOld(new Error('无播放地址')); await old;
+      assert.equal(context.state.current, next);
+      assert.equal(audio.src, 'https://cdn.test/new-song');
+      assert.equal(audio.paused, false);
+    });
   });
 }
