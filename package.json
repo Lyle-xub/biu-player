@@ -31,7 +31,8 @@
       "cloud-video-runtime.js",
       "cloud-video-bili.js",
       "app-updates.js",
-      "video-download.js"
+      "video-download.js",
+      "playback-diagnostics.js"
     ],
     "mac": {
       "category": "public.app-category.music",

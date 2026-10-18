@@ -14,6 +14,10 @@ npm run check
 源码尚未构建时回退到 `renderer/` 界面；`BIU_WEB_UI=0 npm start` 可显式使用旧界面。
 Electron 的主进程与桥接入口为 `main.js`、`preload.js`。
 
+播放恢复诊断保存在 Electron 用户数据目录的 `logs/playback.log`（Windows 安装版为 `%APPDATA%\biu-player\logs\playback.log`）。日志记录恢复、进度停滞、失败及 CDN HTTP 状态，只保留结构化播放状态，不写入 Cookie、签名播放地址或音乐库内容；达到 512 KiB 后轮转，保留一份 `.1` 备份。
+
+`node --test test/playback-recovery.test.cjs test/playback-diagnostics.test.cjs test/playback-session.test.cjs` 验证恢复、取消和日志行为。另可设置 `BIU_FFMPEG` 为 FFmpeg 可执行文件路径，运行 `electron test/playback-stall-repro.cjs`：隐藏窗口使用本地生成音频，模拟暂停后缓存可播但连接不再返回数据的情况，验证进度恢复，全程不访问个人账号。
+
 macOS 打包使用 electron-builder，自动查找本机可用的签名证书；请在本机配置签名，不要将证书身份写入仓库。
 
 ```bash

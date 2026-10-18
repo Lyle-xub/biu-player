@@ -13,24 +13,74 @@
     } catch { return false; }
   }
 
-  function create({ read, refresh, report, changed = () => {}, cancelled = () => {}, now = Date.now }) {
-    const samples = new WeakMap();
+  function create({ read, refresh, report, changed = () => {}, cancelled = () => {}, diagnostic = () => {}, now = Date.now }) {
+    const samples = new Map();
     let generation = 0, pending = null, attempted = false, refreshFailed = false, failedPosition = null;
+    function log(event, state = read(), error) {
+      try {
+        diagnostic({ event, bvid: state?.track?.bvid, cid: state?.track?.cid,
+          position: state?.position ?? state?.sound?.currentTime,
+          mediaError: state?.media?.error?.code || 0, soundError: state?.sound?.error?.code || 0,
+          readyState: state?.sound?.readyState, networkState: state?.sound?.networkState, errorName: error?.name });
+      } catch { /* Diagnostics must not change recovery behavior. */ }
+    }
+    function stopWatch(sample) {
+      clearTimeout(sample.timer);
+      sample.timer = null;
+    }
+    function watch(media, restart = false) {
+      const state = read(), sample = samples.get(media);
+      if (!sample || !state?.track || state.track.isLive
+          || (media !== state.media && media !== state.sound)
+          || !sample.wanted || media.paused || media.ended) return;
+      if (restart) stopWatch(sample);
+      if (sample.timer !== null) return;
+      const track = state.track;
+      sample.timer = setTimeout(() => {
+        sample.timer = null;
+        if (read()?.track === track && !media.paused && !media.ended) handleError(media, 'stall');
+      }, 12000);
+      sample.timer.unref?.();
+    }
+    function pause(state) {
+      state.media.pause();
+      if (state.sound !== state.media) state.sound.pause();
+    }
     function bind(media) {
-      const sample = { position: 0, pausedAt: now(), wanted: false };
+      const sample = { position: 0, pausedAt: now(), wanted: false, timer: null, progressed: false };
       samples.set(media, sample);
       media.addEventListener('timeupdate', () => {
-        if (!media.error && Number.isFinite(media.currentTime)) sample.position = media.currentTime;
+        if (!media.error && Number.isFinite(media.currentTime)) {
+          // play() can resolve from buffered data before a dead connection stalls.
+          // Repeated timeupdate/playing events alone do not prove forward progress.
+          if (!media.paused && !media.seeking && media.currentTime > sample.position + .01) {
+            const state = read();
+            if (media === state?.media || media === state?.sound) sample.progressed = true;
+            if (!pending && state && [state.media, state.sound].every(item => samples.get(item)?.progressed)) attempted = false;
+            watch(media, true);
+          }
+          sample.position = media.currentTime;
+        }
       });
-      media.addEventListener('play', () => { sample.wanted = true; });
+      media.addEventListener('play', () => { sample.wanted = true; watch(media, true); });
       media.addEventListener('pause', () => {
+        stopWatch(sample);
         if (!media.error) { sample.wanted = false; sample.pausedAt = now(); }
       });
-      media.addEventListener('emptied', () => { sample.position = 0; sample.wanted = false; });
+      media.addEventListener('emptied', () => {
+        stopWatch(sample); sample.position = 0; sample.wanted = false;
+      });
+      media.addEventListener('ended', () => stopWatch(sample));
+      media.addEventListener('seeked', () => watch(media, true));
+      for (const event of ['waiting', 'stalled', 'playing']) {
+        media.addEventListener(event, () => watch(media));
+      }
     }
     function cancel() {
       generation++;
+      for (const sample of samples.values()) stopWatch(sample);
       if (pending) {
+        log('cancel');
         failedPosition = pending.position;
         refreshFailed = true;
         cancelled();
@@ -55,14 +105,16 @@
       const job = { position: state.position };
       pending = job;
       changed(true);
+      log('resume', state);
       // Defer until pending is installed: an error event and play() rejection
       // must share one refresh, including when both DASH tracks fail together.
       job.promise = Promise.resolve().then(async () => {
         const reload = async () => {
           if (!valid()) return;
           attempted = true;
-          state.media.pause();
-          if (state.sound !== state.media) state.sound.pause();
+          for (const sample of samples.values()) sample.progressed = false;
+          log('refresh', state);
+          pause(state);
           await refresh(state, valid);
           if (valid()) { refreshFailed = false; failedPosition = null; }
         };
@@ -82,17 +134,33 @@
           await reload();
         }
       }).catch(error => {
-        if (valid()) { refreshFailed = true; failedPosition = state.position; report(error); }
+        if (valid()) {
+          refreshFailed = true; failedPosition = state.position;
+          pause(state);
+          log('failure', state, error);
+          report(error);
+        }
       }).finally(() => {
-        if (pending === job) { pending = null; changed(false); }
+        if (pending === job) {
+          pending = null; changed(false);
+          watch(state.media); watch(state.sound);
+        }
       });
       return job.promise;
     }
-    function handleError(media) {
+    function handleError(media, reason = 'media-error') {
       const state = read();
       if (!state?.track || state.track.isLive || (media !== state.media && media !== state.sound)) return;
-      if (pending || !samples.get(state.media)?.wanted) return;
-      if (attempted) { report(new Error('媒体连接失败，请检查网络后点击播放重试')); return; }
+      if (pending || !samples.get(media)?.wanted || media.ended) return;
+      log(reason, state);
+      if (attempted) {
+        refreshFailed = true;
+        failedPosition = state.sound.error ? samples.get(state.sound)?.position : state.sound.currentTime;
+        pause(state);
+        log('failure', state);
+        report(new Error('媒体连接失败，请检查网络后点击播放重试'));
+        return;
+      }
       void resume(true);
     }
     return { bind, reset, cancel, resume, handleError, get pending() { return !!pending; } };

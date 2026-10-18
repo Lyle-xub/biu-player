@@ -417,6 +417,7 @@ const state = {
 };
 
 const playbackRecovery = window.BiuPlaybackRecovery.create({
+  diagnostic: payload => window.bili?.playbackDiagnostic?.(payload),
   read: () => ({ track: state.current, media: activeMedia(),
     sound: activeMedia() === video && videoUsesSeparateAudio() ? audio : activeMedia(), videoMode: videoModeOn() }),
   refresh: (snapshot, valid) => playTrack(snapshot.track, { recover: true, forceAudioRefresh: true,

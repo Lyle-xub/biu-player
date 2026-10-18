@@ -96,6 +96,121 @@ test('DASH resumes both tracks from the audio timeline, and stalled play receive
   assert.equal(stalled.calls.length, 1);
 });
 
+test('resuming buffered audio that later stops advancing refreshes even when play() resolved and no error fired', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = harness();
+  await h.manager.resume();
+  h.audio.currentTime += .5;
+  h.audio.dispatchEvent(new Event('timeupdate'));
+  h.audio.readyState = 2;
+  h.audio.dispatchEvent(new Event('waiting'));
+  // Chromium continues sending timeupdate while stuck at the same position.
+  for (let i = 0; i < 12; i++) {
+    t.mock.timers.tick(1000);
+    h.audio.dispatchEvent(new Event('timeupdate'));
+    h.audio.dispatchEvent(new Event('stalled'));
+  }
+  await Promise.resolve();
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.calls[0].position, 84);
+  assert.equal(h.audio.error, null);
+});
+
+test('a failed refresh pauses both DASH tracks so the next click can retry immediately', async () => {
+  const h = harness(true);
+  h.refresh(async () => {
+    await h.audio.play(); await h.video.play();
+    throw new Error('播放启动超时');
+  });
+  await h.manager.resume(true);
+  assert.equal(h.audio.paused, true);
+  assert.equal(h.video.paused, true);
+  assert.equal(h.errors.length, 1);
+});
+
+test('healthy progress and explicit pauses do not trigger the stall watchdog', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = harness();
+  await h.manager.resume();
+  for (let i = 0; i < 24; i++) {
+    t.mock.timers.tick(1000);
+    h.audio.currentTime += 1; h.audio.dispatchEvent(new Event('timeupdate'));
+  }
+  assert.equal(h.calls.length, 0);
+  h.audio.pause(); h.audio.dispatchEvent(new Event('waiting'));
+  t.mock.timers.tick(60000); await Promise.resolve();
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.errors.length, 0);
+});
+
+test('a synchronous pause wins even before Chromium dispatches its queued pause event', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = harness(); await h.manager.resume();
+  h.audio.paused = true;
+  t.mock.timers.tick(12000); await Promise.resolve();
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.errors.length, 0);
+});
+
+test('the watchdog ignores preloaded media and checks DASH audio independently of moving video', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = harness(true), preload = new Media();
+  h.manager.bind(preload); await preload.play();
+  t.mock.timers.tick(12000); await Promise.resolve();
+  assert.equal(h.calls.length, 0);
+  await h.manager.resume();
+  for (let i = 0; i < 12; i++) {
+    t.mock.timers.tick(1000);
+    h.video.currentTime += 1; h.video.dispatchEvent(new Event('timeupdate'));
+  }
+  await Promise.resolve();
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.calls[0].position, 83.5);
+});
+
+test('a second stall without progress stops once; real progress allows a later independent recovery', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = harness();
+  h.refresh(async () => { await h.audio.play(); });
+  await h.manager.resume(true);
+  t.mock.timers.tick(12000); await Promise.resolve();
+  assert.equal(h.calls.length, 1); assert.equal(h.errors.length, 1);
+  assert.equal(h.audio.paused, true);
+  t.mock.timers.tick(60000);
+  assert.equal(h.errors.length, 1);
+  await h.manager.resume();
+  assert.equal(h.calls.length, 2);
+  h.audio.currentTime += 1; h.audio.dispatchEvent(new Event('timeupdate'));
+  h.manager.handleError(h.audio); await Promise.resolve();
+  assert.equal(h.calls.length, 3);
+  h.manager.cancel();
+});
+
+test('changing tracks or cancelling removes outstanding watchdog work', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  for (const changeTrack of [false, true]) {
+    const h = harness(); await h.manager.resume();
+    if (changeTrack) h.select({ bvid: 'B', cid: 2 }); else h.manager.cancel();
+    t.mock.timers.tick(12000); await Promise.resolve();
+    assert.equal(h.calls.length, 0); assert.equal(h.errors.length, 0);
+  }
+});
+
+test('moving DASH audio cannot hide a video track that remains stalled after recovery', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = harness(true);
+  h.refresh(async () => { await h.audio.play(); await h.video.play(); });
+  await h.manager.resume(true);
+  for (let i = 0; i < 12; i++) {
+    t.mock.timers.tick(1000);
+    h.audio.currentTime += 1; h.audio.dispatchEvent(new Event('timeupdate'));
+  }
+  await Promise.resolve();
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.errors.length, 1);
+  assert.equal(h.audio.paused, true); assert.equal(h.video.paused, true);
+});
+
 for (const file of ['renderer/app.js', 'web/src/legacy/controller.js']) {
   test(`${file}: recovery bypasses segment source reuse without adding listening history`, async () => {
     const source = fs.readFileSync(file, 'utf8');

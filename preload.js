@@ -69,6 +69,7 @@ contextBridge.exposeInMainWorld('bili', {
   },
   // 仅退出前使用同步确认，确保最后一个播放快照已落盘再销毁渲染进程。
   playbackSave: (snapshot) => ipcRenderer.sendSync('playback:save', snapshot),
+  playbackDiagnostic: (payload) => ipcRenderer.send('playback:diagnostic', payload),
   // 窗口控制
   winMin: () => ipcRenderer.send('win:min'),
   winMax: () => ipcRenderer.send('win:max'),

@@ -5,6 +5,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const QRCode = require('qrcode');
 const { saveVideo } = require('./video-download');
+const { createPlaybackDiagnostics } = require('./playback-diagnostics');
 const { createLanSync } = require('./lan-sync');
 const { createVideoCloudSync } = require('./video-cloud-sync');
 const { createVideoRuntime } = require('./cloud-video-runtime');
@@ -309,6 +310,8 @@ function createWindow() {
 
 app.whenReady().then(() => {
   if (!primaryInstance) return;
+  const playbackDiagnostic = createPlaybackDiagnostics(path.join(app.getPath('userData'), 'logs'));
+  ipcMain.on('playback:diagnostic', (_event, payload) => playbackDiagnostic(payload));
   // 渲染层右上角三个圆形按钮 → 窗口控制
   ipcMain.on('win:min', () => mainWin.minimize());
   ipcMain.on('win:max', () => {
@@ -339,6 +342,9 @@ app.whenReady().then(() => {
     const parsed = new URL(request.url);
     const target = parsed.searchParams.get('url') || '';
     if (!/^https:\/\//i.test(target)) return new Response('Invalid media URL', { status: 400 });
+    let host;
+    try { host = new URL(target).hostname; }
+    catch { return new Response('Invalid media URL', { status: 400 }); }
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: {
         'Access-Control-Allow-Origin': '*',
@@ -363,6 +369,7 @@ app.whenReady().then(() => {
           ...(range ? { Range: range } : {}),
         },
       });
+      if (!remote.ok) playbackDiagnostic({ event: 'proxy-http', status: remote.status, host });
       const headers = new Headers(remote.headers);
       headers.set('Access-Control-Allow-Origin', '*');
       headers.set('Access-Control-Expose-Headers', 'Accept-Ranges, Content-Length, Content-Range');
@@ -392,6 +399,7 @@ app.whenReady().then(() => {
       }) : null;
       return new Response(body, { status: remote.status, statusText: remote.statusText, headers });
     } catch (error) {
+      playbackDiagnostic({ event: 'proxy-failure', errorName: error.name, host });
       console.error('媒体代理失败:', error);
       return new Response('Media proxy failed', { status: 502 });
     } finally {
