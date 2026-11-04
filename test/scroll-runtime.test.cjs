@@ -51,6 +51,7 @@ function harness(file) {
   vm.runInContext(
     extract('function lyricVisualsVisible()', '\n}') + '\n}\n' +
     extract('function syncLyric(force)', '/* ---------- 桌面歌词') +
+    extract('const lyricStyleValues =', 'function clearMonetTokenFx(') +
     extract('function renderSpectrum(now)', '// 进度定位：') +
     extract('function initRecommendationInfiniteScroll()', 'async function loadLibrary('), ctx);
   return { ctx, calls, document, media, events, view, rafs, timers };

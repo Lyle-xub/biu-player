@@ -106,8 +106,11 @@ test('Electron bridge and RN transport preserve binary bytes and retain the exis
   const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
   const start = source.indexOf("  ipcMain.handle('bili:get'");
   const end = source.indexOf('\n  });', start) + '\n  });'.length;
-  const context = vm.createContext({ ipcMain: { handle: (_, fn) => { handler = fn; } }, biliFetch: async () => response() });
-  vm.runInContext(source.slice(start, end), context);
+  const authSession = require('../renderer/auth-session').create({ verify: async () => ({ isLogin: true, mid: 1 }) });
+  await authSession.check();
+  const observe = source.slice(source.indexOf('function observeAuthResponse('), source.indexOf('function notifyAuthChanged('));
+  const context = vm.createContext({ authSession, ipcMain: { handle: (_, fn) => { handler = fn; } }, biliFetch: async () => response() });
+  vm.runInContext(observe + source.slice(start, end), context);
   assert.deepEqual(Array.from((await handler(null, 'https://api.bilibili.com/test', { responseType: 'bytes' })).body), bytes);
   assert.equal((await handler(null, 'https://api.bilibili.com/test')).body, 'existing text response');
 
@@ -126,7 +129,9 @@ test('Electron bridge and RN transport preserve binary bytes and retain the exis
     ? { getItem: async () => JSON.stringify({ SESSDATA: 'fixture-session', buvid3: 'fixture-buvid' }) }
     : name === 'expo-secure-store' ? { getItemAsync: async () => null, setItemAsync: async () => {}, deleteItemAsync: async () => {} }
     : name === 'expo-crypto' ? { getRandomBytes: (count) => new Uint8Array(require('node:crypto').randomBytes(count)) }
-    : name === './mediaUrl' ? { mediaUrl: value => value } : require(require.resolve(name, { paths: [mobile] })), module, module.exports, authenticatedFetch);
+    : name === './mediaUrl' ? { mediaUrl: value => value }
+    : name === '../../../renderer/auth-session' ? require('../renderer/auth-session')
+    : require(require.resolve(name, { paths: [mobile] })), module, module.exports, authenticatedFetch);
   const result = await module.exports.get('https://api.bilibili.com/test', { responseType: 'bytes', headers: { Accept: 'application/octet-stream' } });
   assert.deepEqual(result.body, bytes);
 });

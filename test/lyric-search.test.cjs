@@ -25,6 +25,7 @@ function loadApi(platform, get) {
     if (name === './mediaUrl') return { mediaUrl: value => value };
 
     if (name === '../../../renderer/subtitles') return require('../renderer/subtitles');
+    if (name === '../../../renderer/video-download') return require('../renderer/video-download');
     throw new Error('Unexpected import: ' + name);
   }, module, module.exports);
   return module.exports;
