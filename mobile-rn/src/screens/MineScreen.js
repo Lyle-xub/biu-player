@@ -166,7 +166,7 @@ export default function MineScreen({ navigation }) {
                 </View>} />
               <View style={{ flex: 1, minWidth: 0 }}>
                 <Text style={styles.uname} numberOfLines={1}>{auth.uname || 'B 站用户'}</Text>
-                <Text style={styles.uid}>mid: {auth.mid}</Text>
+                <Text style={styles.uid}>{auth.unverified ? '暂时无法验证登录状态，请检查网络' : `mid: ${auth.mid}`}</Text>
               </View>
               <TouchableOpacity style={styles.ghostBtn} onPress={doLogout}>
                 <Text style={styles.ghostBtnText}>退出登录</Text>
@@ -178,8 +178,8 @@ export default function MineScreen({ navigation }) {
                 <IconUser size={22} color={colors.text3} />
               </View>
               <View style={{ flex: 1 }}>
-                <Text style={styles.uname}>未登录</Text>
-                <Text style={styles.uid}>登录后可使用 App 推荐、高码率音频与收藏夹</Text>
+                <Text style={styles.uname}>{auth?.status === 'expired' ? '登录已失效' : '未登录'}</Text>
+                <Text style={styles.uid}>{auth?.status === 'expired' ? '请重新登录，本地音乐库与画像会保留' : '登录后可使用 App 推荐、高码率音频与收藏夹'}</Text>
               </View>
               <TouchableOpacity style={styles.loginBtn} accessibilityRole="button" accessibilityLabel="登录" onPress={() => setLoginVisible(true)}>
                 <Text style={styles.loginBtnText}>登录</Text>

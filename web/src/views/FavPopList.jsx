@@ -5,9 +5,14 @@ import { useSlice } from '../store.js';
  * controller 的 renderFavPopList 只 publish('favpop', ...)，弹层定位仍由 positionFavPop 负责。 */
 export function FavPopList() {
   const data = useSlice('favpop');
+  const part = useSlice('videoParts')?.part;
+  const liked = useSlice('npActions')?.liked;
   const state = data ? data.state : 'loading';
   return (
     <div className="fav-pop-list" id="favPopList">
+      {part && <button type="button" className="part-favorite-action" onClick={() => window.biuActions.toggleCurrentPartFavorite()}>
+        {liked ? '取消收藏这一 P' : '收藏这一 P 到我喜欢'}
+      </button>}
       {state !== 'ready'
         ? (
           <div className="fav-pop-hint">{state === 'signed-out'

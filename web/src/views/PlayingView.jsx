@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useLayoutEffect, useRef } from 'react';
+import videoPartsMenu from '../../../renderer/video-parts-menu.js';
 import { useSlice } from '../store.js';
 
 /* 播放页 / 原视频页数据区组件集合：DOM 由组件拥有，controller 只 publish 数据。
@@ -29,6 +30,17 @@ const defaultNpCover = (
     <path d="M0 400 Q 230 350 460 400 L 460 460 L 0 460Z" fill="#12180a"/>
   </svg>
 );
+
+function VideoPartsPicker() {
+  const data = useSlice('videoParts');
+  const trigger = useRef(null), menu = useRef(null);
+  useLayoutEffect(() => {
+    menu.current = videoPartsMenu.mount(trigger.current, cid => window.biuActions.selectVideoPart(cid));
+    return () => { menu.current.destroy(); menu.current = null; };
+  }, []);
+  useLayoutEffect(() => { menu.current.update(data); }, [data]);
+  return <button type="button" className="video-parts-picker" ref={trigger} aria-label="选择分 P" hidden />;
+}
 
 /* np-heading 内容：曲目信息 + 喜欢/收藏/歌单按钮（按钮点击绑定在 controller init，状态 class 来自 slice） */
 export function NpInfo() {
@@ -86,6 +98,7 @@ export function NpInfo() {
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><path d="M4 5h12M4 10h12M4 15h8"/><circle cx="17" cy="17" r="4"/><path d="M17 15v4M15 17h4"/></svg>
           <span>音乐库</span>
         </button>
+        <VideoPartsPicker />
       </div>
     </>
   );
@@ -166,6 +179,7 @@ export function VDetail() {
   return (
     <div className="vinfo">
       <h3 id="vTitle">{d ? d.title : '—'}</h3>
+      <VideoPartsPicker />
       <div className="vup">
         <span className="ava" id="vUpAva" role="button" title="进入 UP 主主页">{d && d.upFace ? <img src={d.upFace} alt="" /> : null}</span>
         <span><b id="vUpName">{d ? d.upName : '—'}</b><small id="vUpFans">{d ? d.upFans : ''}</small></span>

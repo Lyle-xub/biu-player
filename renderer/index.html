@@ -311,11 +311,13 @@
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h12M4 10h12M4 15h8"/><circle cx="17" cy="17" r="4"/><path d="M17 15v4M15 17h4"/></svg>
           <span>音乐库</span>
         </button>
+        <button type="button" class="video-parts-picker" id="npVideoParts" aria-label="选择分 P" hidden></button>
       </div>
     </div>
     <!-- 收藏夹弹层放在 np-heading 外：heading 的 contain:layout 会把 fixed 后代关进自身并裁掉 -->
     <div class="fav-pop" id="favPop" hidden>
-      <div class="fav-pop-title">添加到收藏夹</div>
+      <div class="fav-pop-title">B 站收藏夹</div>
+      <button type="button" class="part-favorite-action" id="favCurrentPart" hidden></button>
       <div class="fav-pop-list" id="favPopList"><div class="fav-pop-hint">加载中…</div></div>
     </div>
     <div class="fav-pop" id="plPop" hidden>
@@ -405,6 +407,7 @@
 
     <div class="vinfo">
       <h3 id="vTitle">—</h3>
+      <button type="button" class="video-parts-picker" id="vVideoParts" aria-label="选择分 P" hidden></button>
       <div class="vup">
         <span class="ava" id="vUpAva" role="button" title="进入 UP 主主页"></span>
         <span><b id="vUpName">—</b><small id="vUpFans"></small></span>
@@ -754,6 +757,8 @@
 <script src="video-download.js"></script>
 <script src="api.js"></script>
 <script src="track-source.js"></script>
+<script src="video-parts.js"></script>
+<script src="video-parts-menu.js"></script>
 <script src="playback-session.js"></script>
 <script src="playback-recovery.js"></script>
 <script src="music-dictionary.js"></script>

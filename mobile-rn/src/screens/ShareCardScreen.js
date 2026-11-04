@@ -1,3 +1,4 @@
+import { url as videoPartUrl } from '../../../renderer/video-parts';
 import React from 'react';
 import { Share, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -7,7 +8,7 @@ import ShareCard from '../components/ShareCard';
 
 export default function ShareCardScreen({ navigation, route }) {
   const track = route.params?.track;
-  const link = track?.bvid ? `https://www.bilibili.com/video/${track.bvid}` : '';
+  const link = track?.bvid ? videoPartUrl(track) : '';
   const shareLink = () => {
     if (!link) return;
     Share.share({ title: track?.title || 'Biu Player', message: `${track?.title || 'Biu Player'}\n${link}`, url: link });

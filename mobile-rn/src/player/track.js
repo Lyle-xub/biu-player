@@ -1,3 +1,5 @@
+import { partKey } from '../../../renderer/video-parts';
+
 export function segmentRange(track) {
   if (!track?.isSegment) return null;
   const from = Math.max(0, Number(track.from) || 0);
@@ -7,9 +9,9 @@ export function segmentRange(track) {
 
 export function trackKeyOf(track) {
   if (!track) return '';
-  const base = track.bvid || String(track.roomid || track.aid || '');
+  const base = partKey(track) || String(track.roomid || track.aid || '');
   const range = segmentRange(track);
-  return range ? `${base}:${track.cid || 0}:${range.from}:${range.to}` : base;
+  return range ? `${track.bvid || base}:${track.cid || 0}:${range.from}:${range.to}` : base;
 }
 
 export function segmentTracks(track, segments) {

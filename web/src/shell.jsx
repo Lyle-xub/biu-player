@@ -234,7 +234,7 @@ function ViewPlaying() {
           </div>
           {/* 收藏夹弹层放在 np-heading 外：heading 的 contain:layout 会把 fixed 后代关进自身并裁掉 */}
           <div className="fav-pop" id="favPop" hidden={true}>
-            <div className="fav-pop-title">添加到收藏夹</div>
+            <div className="fav-pop-title">B 站收藏夹</div>
             <FavPopList />
           </div>
           <div className="fav-pop" id="plPop" hidden={true}>

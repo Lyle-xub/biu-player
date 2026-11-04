@@ -26,7 +26,7 @@ export function SettingsModal() {
       <div className="modal settings-modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
         <header className="settings-heading"><h3 id="settingsTitle">设置</h3><button className="settings-close" type="button" aria-label="关闭设置" onClick={() => window.biuUi?.closePanel()}><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="m6 6 12 12M6 18 18 6" /></svg></button></header>
         <div className="mrow settings-account">
-          <div className="ml"><b>B 站账号</b><small id="authSubtitle">{auth.isLogin ? `UID ${auth.mid} · 已同步收藏夹` : '扫码或手机验证码安全登录'}</small></div>
+          <div className="ml"><b>B 站账号</b><small id="authSubtitle">{auth.unverified ? '暂时无法验证登录状态，请检查网络' : auth.status === 'expired' ? '登录已失效，请重新登录' : auth.isLogin ? `UID ${auth.mid} · 已同步收藏夹` : '扫码或手机验证码安全登录'}</small></div>
           {!auth.isLogin && (
             <div className="mr auth-actions" id="authLoggedOut">
               <button className="btn-ghost" id="btnQrLogin" onClick={() => A().showLogin('qr')}>扫码登录</button>

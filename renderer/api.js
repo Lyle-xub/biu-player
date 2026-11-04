@@ -131,9 +131,9 @@ function absImg(u) {
 async function jget(url, opts) {
   // IPC/网络偶发不返回时必须主动结束；否则 videoManifest 会缓存永久 pending 的 Promise。
   const r = await withApiTimeout(window.bili.get(url, opts), 8000);
-  if (r.status !== 200) throw new Error('HTTP ' + r.status);
+  if (r.status !== 200) throw Object.assign(new Error(r.status === -1 ? (r.body || '网络连接失败') : 'HTTP ' + r.status), { status: r.status });
   const d = JSON.parse(r.body);
-  if (d.code !== 0) throw new Error(d.message || ('code ' + d.code));
+  if (d.code !== 0) throw Object.assign(new Error(d.message || ('code ' + d.code)), { code: d.code });
   return d.data;
 }
 
@@ -793,7 +793,12 @@ const api = {
       + encodeURIComponent(keyword) + '&page=' + page;
     if (order) url += '&order=' + encodeURIComponent(order);
     if (duration) url += '&duration=' + duration;
-    const data = await jget(url);
+    let data;
+    try { data = await jget(url.replace('/search/type?', '/wbi/search/type?'), { wbi: true }); }
+    catch (error) {
+      if (error.name === 'AbortError') throw error;
+      data = await jget(url);
+    }
     const list = (data.result || [])
       // search_type=video 已限定为视频；以可播放标识判断，兼容部分结果缺少 type 字段。
       .filter((v) => v && v.bvid)

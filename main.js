@@ -4,6 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const QRCode = require('qrcode');
+const { create: createAuthSession, decode: decodeAuth, NAV: AUTH_NAV } = require('./renderer/auth-session');
 const { saveVideo } = require('./video-download');
 const { createLanSync } = require('./lan-sync');
 const { createVideoCloudSync } = require('./video-cloud-sync');
@@ -67,7 +68,7 @@ let wbiKeysAt = 0;
 
 async function getWbiKeys() {
   if (wbiKeys && Date.now() - wbiKeysAt < 12 * 3600 * 1000) return wbiKeys;
-  const res = await net.fetch('https://api.bilibili.com/x/web-interface/nav', {
+  const res = await fetchWithFallback('https://api.bilibili.com/x/web-interface/nav', {
     headers: { 'User-Agent': UA, Referer: REFERER },
   });
   const data = JSON.parse(await res.text());
@@ -89,16 +90,19 @@ async function signWbi(query) {
   const entries = [...params.entries()]
     .map(([k, v]) => [k, String(v).replace(/[!'()*]/g, '')])
     .sort((a, b) => (a[0] < b[0] ? -1 : 1));
-  const q = new URLSearchParams(entries).toString();
+  const q = entries.map(([key, value]) => encodeURIComponent(key) + '=' + encodeURIComponent(value)).join('&');
   const wrid = crypto.createHash('md5').update(q + mixin).digest('hex');
   return q + '&w_rid=' + wrid;
 }
 
 // 通过 spi 接口获取并缓存 buvid3
+let buvidPending = null;
 async function ensureBuvid() {
   if (buvid3) return buvid3;
+  if (buvidPending) return buvidPending;
+  buvidPending = (async () => {
   try {
-    const res = await net.fetch('https://api.bilibili.com/x/frontend/finger/spi', {
+    const res = await fetchWithFallback('https://api.bilibili.com/x/frontend/finger/spi', {
       headers: { 'User-Agent': UA, Referer: REFERER },
     });
     const data = JSON.parse(await res.text());
@@ -107,6 +111,8 @@ async function ensureBuvid() {
     console.error('获取 buvid3 失败:', e);
   }
   return buvid3;
+  })().finally(() => { buvidPending = null; });
+  return buvidPending;
 }
 
 /* ---------- Shazam：shazamio-core WASM 指纹签名 ---------- */
@@ -169,7 +175,7 @@ async function cookieHeader(extraCookie = '') {
   const values = new Map();
   const saved = await session.defaultSession.cookies.get({ url: 'https://www.bilibili.com/' });
   saved.forEach((cookie) => values.set(cookie.name, cookie.value));
-  const bv = await ensureBuvid();
+  const bv = values.get('buvid3') || await ensureBuvid();
   if (bv && !values.has('buvid3')) values.set('buvid3', bv);
   String(extraCookie || '').split(';').forEach((part) => {
     const pos = part.indexOf('=');
@@ -181,16 +187,10 @@ async function cookieHeader(extraCookie = '') {
 // 带直连兜底的请求：Electron net.fetch 走 Chromium 网络栈，会应用系统代理，
 // 代理规则/TLS 拦截对个别域名（如 interface.music.163.com）可能直接重置连接（net::ERR_FAILED）。
 // 网络层失败时用 Node 内置 undici fetch 直连重试（默认不走系统代理；Cookie 等头部是显式传递的，行为一致）。
-async function fetchWithFallback(url, opts) {
-  try {
-    return await net.fetch(url, opts);
-  } catch (e) {
-    console.warn('net.fetch 失败，直连重试:', url.split('?')[0], '—', String((e && e.message) || e));
-    const directOpts = { ...opts };
-    delete directOpts.credentials; // undici 无 Electron session，Cookie 已在 headers 里显式带上
-    return fetch(url, directOpts);
-  }
-}
+const fetchWithFallback = require('./renderer/network-request').create({
+  primary: (url, opts) => net.fetch(url, opts),
+  direct: (url, opts) => fetch(url, opts),
+});
 
 async function biliFetch(url, opts = {}) {
   let finalUrl = url;
@@ -215,22 +215,19 @@ async function biliFetch(url, opts = {}) {
   });
 }
 
-async function getAuthStatus() {
+const authSession = createAuthSession({ verify: async () => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
   try {
-    const res = await biliFetch('https://api.bilibili.com/x/web-interface/nav');
-    const json = JSON.parse(await res.text());
-    const data = json && json.data;
-    if (json.code !== 0 || !data || !data.isLogin) return { isLogin: false };
-    return {
-      isLogin: true,
-      mid: data.mid,
-      uname: data.uname || '',
-      face: data.face || '',
-      vipType: data.vipType || 0,
-    };
-  } catch (e) {
-    return { isLogin: false, error: String(e) };
-  }
+    const res = await biliFetch(AUTH_NAV, { signal: controller.signal });
+    return decodeAuth(res.status, await res.text());
+  } finally { clearTimeout(timer); }
+} });
+authSession.subscribe(auth => notifyAuthChanged(auth));
+function getAuthStatus(options = { force: true }) { return authSession.check(options); }
+function observeAuthResponse(url, response, revision) {
+  authSession.observe(url, response, revision, !!authSession.state?.isLogin);
+  return response;
 }
 
 function notifyAuthChanged(auth) {
@@ -266,8 +263,12 @@ function openOfficialLogin() {
     }
   };
   const cookieChanged = (_event, cookie, _cause, removed) => {
-    if (!removed && /(^|\.)bilibili\.com$/.test(cookie.domain || '')) check();
+    if (!removed && /(^|\.)bilibili\.com$/.test(cookie.domain || '')) {
+      if (cookie.name === 'SESSDATA') authSession.reset();
+      check();
+    }
   };
+  const loginCheckTimer = setInterval(check, 2000);
   session.defaultSession.cookies.on('changed', cookieChanged);
   loginWin.webContents.on('page-title-updated', (event) => {
     event.preventDefault();
@@ -275,6 +276,7 @@ function openOfficialLogin() {
   });
   loginWin.webContents.on('did-finish-load', check);
   loginWin.on('closed', () => {
+    clearInterval(loginCheckTimer);
     session.defaultSession.cookies.removeListener('changed', cookieChanged);
     loginWin = null;
   });
@@ -352,7 +354,7 @@ app.whenReady().then(() => {
       const range = request.headers.get('range');
       const controller = new AbortController();
       connectTimer = setTimeout(() => controller.abort(), 8000);
-      const remote = await net.fetch(target, {
+      const remote = await fetchWithFallback(target, {
         method: request.method === 'HEAD' ? 'HEAD' : 'GET',
         credentials: 'include',
         signal: controller.signal,
@@ -427,9 +429,10 @@ app.whenReady().then(() => {
   // opts.wbi = true 时对查询串做 WBI 签名（playurl / 字幕等接口风控需要）
   ipcMain.handle('bili:get', async (_e, url, opts = {}) => {
     try {
+      const revision = authSession.revision;
       const res = await biliFetch(url, opts);
-      return { status: res.status, body: opts.responseType === 'bytes'
-        ? Array.from(new Uint8Array(await res.arrayBuffer())) : await res.text() };
+      return observeAuthResponse(url, { status: res.status, body: opts.responseType === 'bytes'
+        ? Array.from(new Uint8Array(await res.arrayBuffer())) : await res.text() }, revision);
     } catch (e) {
       return { status: -1, body: String(e) };
     }
@@ -640,6 +643,7 @@ app.whenReady().then(() => {
 
   // 通用 POST：form 编码，自动从 session Cookie 补 bili_jct 作为 csrf（收藏等写接口需要）
   ipcMain.handle('bili:post', async (_e, url, body = {}) => {
+    const revision = authSession.revision;
     try {
       const cookies = await session.defaultSession.cookies.get({ url: 'https://www.bilibili.com/' });
       const csrf = ((cookies.find((c) => c.name === 'bili_jct') || {}).value) || '';
@@ -653,14 +657,14 @@ app.whenReady().then(() => {
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: params.toString(),
       });
-      return { status: res.status, body: await res.text() };
+      return observeAuthResponse(url, { status: res.status, body: await res.text() }, revision);
     } catch (e) {
       return { status: -1, body: String(e) };
     }
   });
 
   // 扫码登录：主进程请求与轮询，Cookie 只保存在 Electron session 中。
-  ipcMain.handle('auth:status', () => getAuthStatus());
+  ipcMain.handle('auth:status', (_event, options) => getAuthStatus(options));
   ipcMain.handle('auth:qr-start', async () => {
     try {
       const res = await biliFetch('https://passport.bilibili.com/x/passport-login/web/qrcode/generate', {
@@ -688,8 +692,8 @@ app.whenReady().then(() => {
       if (json.code !== 0 || !json.data) throw new Error(json.message || '二维码轮询失败');
       const result = { ok: true, code: json.data.code, message: json.data.message || '' };
       if (json.data.code === 0) {
+        authSession.reset();
         result.auth = await getAuthStatus();
-        notifyAuthChanged(result.auth);
       }
       return result;
     } catch (e) {
@@ -738,8 +742,8 @@ app.whenReady().then(() => {
         captcha_key: p.captchaKey, keep: true,
       });
       if (json.code !== 0) return { ok: false, message: json.message || '登录失败' };
+      authSession.reset();
       const auth = await getAuthStatus();
-      notifyAuthChanged(auth);
       return { ok: true, auth };
     } catch (e) { return { ok: false, message: String(e.message || e) }; }
   });
@@ -750,7 +754,7 @@ app.whenReady().then(() => {
       session.defaultSession.cookies.remove('https://' + cookie.domain.replace(/^\./, '') + cookie.path, cookie.name)
     ));
     const auth = { isLogin: false };
-    notifyAuthChanged(auth);
+    authSession.reset(auth);
     return auth;
   });
 

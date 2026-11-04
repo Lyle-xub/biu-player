@@ -19,7 +19,7 @@ contextBridge.exposeInMainWorld('bili', {
   downloadStart: (payload) => ipcRenderer.invoke('download:start', payload),
   onDownloadProgress: (cb) => ipcRenderer.on('download:progress', (_event, p) => cb(p)),
   // B 站登录（Cookie 仅保存在 Electron session）
-  authStatus: () => ipcRenderer.invoke('auth:status'),
+  authStatus: (options) => ipcRenderer.invoke('auth:status', options),
   authQrStart: () => ipcRenderer.invoke('auth:qr-start'),
   authQrPoll: (key) => ipcRenderer.invoke('auth:qr-poll', key),
   authOpenLogin: () => ipcRenderer.send('auth:open-login'),

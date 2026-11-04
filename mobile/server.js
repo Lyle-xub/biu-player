@@ -123,20 +123,22 @@ async function biliFetch(url, opts = {}) {
     ...(cookie ? { Cookie: cookie } : {}),
     ...(opts.headers || {}),
   };
-  const res = await fetch(url, { method: opts.method || 'GET', headers, body: opts.body, redirect: 'follow' });
-  captureCookies(res, u.hostname);
+  const revision = authSession.revision;
+  const res = await fetch(url, { method: opts.method || 'GET', headers, body: opts.body, redirect: 'follow', signal: opts.signal });
+  if (revision === authSession.revision) captureCookies(res, u.hostname);
   return res;
 }
 
-async function getAuthStatus() {
+const { create: createAuthSession, decode: decodeAuth, NAV: AUTH_NAV } = require('../renderer/auth-session');
+const authSession = createAuthSession({ verify: async () => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
   try {
-    const res = await biliFetch('https://api.bilibili.com/x/web-interface/nav');
-    const json = JSON.parse(await res.text());
-    const data = json && json.data;
-    if (json.code !== 0 || !data || !data.isLogin) return { isLogin: false };
-    return { isLogin: true, mid: data.mid, uname: data.uname || '', face: data.face || '', vipType: data.vipType || 0 };
-  } catch (e) { return { isLogin: false, error: String(e) }; }
-}
+    const res = await biliFetch(AUTH_NAV, { signal: controller.signal });
+    return decodeAuth(res.status, await res.text());
+  } finally { clearTimeout(timer); }
+} });
+function getAuthStatus(options = { force: true }) { return authSession.check(options); }
 
 /* ---------- 本地数据仓（与 main.js biu-store 同构：原子写 + .bak） ---------- */
 const storeFile = path.join(DATA_DIR, 'store.json');
@@ -351,6 +353,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/req' && req.method === 'POST') {
       const payload = JSON.parse((await readBody(req)).toString('utf8'));
       if (!/^https:\/\//i.test(payload.url || '')) { sendJson(res, { status: 400, body: 'bad url' }); return; }
+      const revision = authSession.revision, authenticated = !!jar.SESSDATA;
       try {
         let r;
         if (payload.method === 'post') {
@@ -367,8 +370,10 @@ const server = http.createServer(async (req, res) => {
         } else {
           r = await biliFetch(payload.url, payload.opts || {});
         }
-        sendJson(res, { status: r.status, body: payload.opts?.responseType === 'bytes'
-          ? Array.from(new Uint8Array(await r.arrayBuffer())) : await r.text() });
+        const response = { status: r.status, body: payload.opts?.responseType === 'bytes'
+          ? Array.from(new Uint8Array(await r.arrayBuffer())) : await r.text() };
+        authSession.observe(payload.url, response, revision, authenticated);
+        sendJson(res, { ...response, auth: authSession.state });
       } catch (e) { sendJson(res, { status: -1, body: String(e) }); }
       return;
     }
@@ -444,7 +449,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     // 扫码登录
-    if (p === '/auth/status') { sendJson(res, await getAuthStatus()); return; }
+    if (p === '/auth/status') { sendJson(res, await getAuthStatus({ force: u.searchParams.get('force') !== '0' })); return; }
     if (p === '/auth/qr-start') {
       try {
         const r = await biliFetch('https://passport.bilibili.com/x/passport-login/web/qrcode/generate',
@@ -467,7 +472,7 @@ const server = http.createServer(async (req, res) => {
         const json = JSON.parse(await r.text());
         if (json.code !== 0 || !json.data) throw new Error(json.message || '二维码轮询失败');
         const result = { ok: true, code: json.data.code, message: json.data.message || '' };
-        if (json.data.code === 0) result.auth = await getAuthStatus();
+        if (json.data.code === 0) { authSession.reset(); result.auth = await getAuthStatus(); }
         sendJson(res, result);
       } catch (e) { sendJson(res, { ok: false, message: String(e.message || e) }); }
       return;
@@ -475,6 +480,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/auth/logout' && req.method === 'POST') {
       ['SESSDATA', 'bili_jct', 'DedeUserID', 'DedeUserID__ckMd5', 'sid'].forEach((k) => delete jar[k]);
       saveJar();
+      authSession.reset({ isLogin: false });
       sendJson(res, { isLogin: false });
       return;
     }
@@ -511,6 +517,7 @@ const server = http.createServer(async (req, res) => {
         } else if (json.code !== 0) {
           sendJson(res, { ok: false, message: json.message || '登录失败' });
         } else {
+          authSession.reset();
           sendJson(res, { ok: true, auth: await getAuthStatus() });
         }
       } catch (e) { sendJson(res, { ok: false, message: String(e.message || e) }); }

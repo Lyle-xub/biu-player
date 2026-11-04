@@ -44,7 +44,7 @@ export default function VideoActionBar({ track, ...props }) {
   </>;
 }
 
-function TrackActions({ track, onShowLyrics, onSplit, active = true }) {
+function TrackActions({ track, onShowLyrics, onSplit, onFavoritePart, partLiked, active = true }) {
   const { lyricSettings, updateLyricSettings } = usePlayer();
   const focused = useIsFocused();
   const [detail, setDetail] = useState(null);
@@ -231,7 +231,11 @@ function TrackActions({ track, onShowLyrics, onSplit, active = true }) {
     { key: 'coin', Icon: IconCoin, label: coinCount ? '已投币' : '投币', count: stat.coin, on: coinCount > 0,
       onPress: () => { if (requireLogin()) open('coin'); } },
     { key: 'favorite', Icon: IconStar, label: favored ? '已收藏' : '收藏', count: stat.favorite, on: favored,
-      onPress: () => { if (requireLogin()) { open('favorite'); loadFolders(); } } },
+      onPress: () => {
+        if (!onFavoritePart && !requireLogin()) return;
+        open('favorite');
+        if (loggedIn) loadFolders();
+      } },
     { key: 'comments', Icon: IconComment, label: '评论', count: stat.reply,
       onPress: () => open('comments') },
     { key: 'lyrics', Icon: IconLyric, label: '歌词', onPress: () => open('lyrics') },
@@ -285,13 +289,19 @@ function TrackActions({ track, onShowLyrics, onSplit, active = true }) {
           ))}
         </View>
       </> : null}
+      {sheet === 'favorite' && onFavoritePart ? (
+        <TouchableOpacity style={styles.favRow} accessibilityRole="button"
+          onPress={() => { onFavoritePart(); setSheet(null); }}>
+          <Text style={[styles.favName, { color: colors.accent }]}>{partLiked ? '取消收藏这一 P' : '收藏这一 P 到我喜欢'}</Text>
+        </TouchableOpacity>
+      ) : null}
       {sheet === 'favorite' ? <SheetContent loading={busy === 'folders' && folders === null} minHeight={240}><FlatList data={folders || []} keyExtractor={(f) => String(f.id)} style={styles.sheetList}
         renderItem={({ item }) => <TouchableOpacity disabled={!!busy} onPress={() => toggleFolder(item)}
           accessibilityRole="checkbox" accessibilityLabel={item.title} accessibilityState={{ checked: item.favored }} style={styles.favRow}>
           <View style={[styles.favCheck, item.favored && styles.favCheckOn]}><Text style={styles.favCheckMark}>{item.favored ? '✓' : ''}</Text></View>
           <Text style={styles.favName}>{item.title}</Text><Text style={styles.favCount}>{item.count} 首</Text>
         </TouchableOpacity>}
-        ListEmptyComponent={!busy && !error ? <Text style={styles.sheetHint}>还没有收藏夹，请先在 B 站创建</Text> : null} /></SheetContent> : null}
+        ListEmptyComponent={!busy && !error ? <Text style={styles.sheetHint}>{loggedIn ? '还没有收藏夹，请先在 B 站创建' : '登录后可收藏整个投稿到 B 站'}</Text> : null} /></SheetContent> : null}
       {sheet === 'comments' ? <CommentsPanel aid={aid} sort={commentSort} /> : null}
       {sheet === 'download' ? <SheetContent loading={busy === 'download-info' && dlInfo === null} minHeight={240}><ScrollView style={styles.sheetList}>
         {track.isSegment ? <Text style={styles.sheetHint}>下载包含全部分切的原视频</Text> : null}

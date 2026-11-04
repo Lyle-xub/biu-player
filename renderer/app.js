@@ -1,5 +1,6 @@
 /* Biu Player · 渲染逻辑：视图切换 / 数据渲染 / 播放器状态 */
 
+const BiuVideoParts = window.BiuVideoParts;
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -514,12 +515,17 @@ function waitForPlaybackMetadata(media) {
 /* ---------- B 站登录：扫码 + 官方验证码页 ---------- */
 let authState = { isLogin: false };
 let authRequest = null;
+let authWatchTimer = null;
+function refreshVisibleAuth() {
+  if (document.visibilityState !== 'hidden') ensureAuth(false).catch(() => {});
+}
 let qrKey = '';
 let qrPollTimer = null;
 
 /* ---------- 本地数据按账号隔离：喜欢 / 自建歌单 / 历史随登录账号切换 ----------
    游客数据在无后缀键，登录后用 base@mid；首次登录把游客数据拷进空账号桶，老用户不丢数据 */
 let dataNs = '';
+let dataNsRevision = 0;
 const dataKey = (base) => (dataNs ? `${base}@${dataNs}` : base);
 const recommendationProfiles = window.BiuRecommendationDesktop({
   getMode: () => settings.recommendMode,
@@ -540,6 +546,7 @@ const recommendationProfiles = window.BiuRecommendationDesktop({
 window.biuProfiles = recommendationProfiles;
 
 async function loadBuckets() {
+  const scope = dataNs, revision = dataNsRevision;
   const adopt = {
     'biu-likes': (v) => { likes = v; },
     'biu-library': (v) => { musicLibrary = v; },
@@ -547,9 +554,10 @@ async function loadBuckets() {
     'biu-history': (v) => { playHistory = v; },
   };
   for (const base of Object.keys(adopt)) {
-    const k = dataKey(base);
+    const k = scope ? `${base}@${scope}` : base;
     try {
       let v = api.hasBridge && window.bili.storeGet ? await window.bili.storeGet(k) : null;
+      if (scope !== dataNs || revision !== dataNsRevision) return;
       if (v == null) {
         const legacy = localStorage.getItem(k);
         if (legacy != null) {
@@ -564,9 +572,12 @@ async function loadBuckets() {
 
 async function switchDataNs(ns) {
   if (ns === dataNs) return;
-  await window.bili?.lanSyncStop?.();
   const prev = dataNs;
   dataNs = ns;
+  const revision = ++dataNsRevision;
+  const current = () => revision === dataNsRevision;
+  await window.bili?.lanSyncStop?.();
+  if (!current()) return;
   recommendationProfiles.manager();
   if (ns && !prev) {
     // 游客 → 登录：账号桶为空时把游客数据拷过去（不搬动，游客数据保留）
@@ -574,12 +585,14 @@ async function switchDataNs(ns) {
       try {
         const to = `${base}@${ns}`;
         let existing = api.hasBridge && window.bili.storeGet ? await window.bili.storeGet(to) : null;
+        if (!current()) return;
         if (existing == null) {
           const raw = localStorage.getItem(to);
           existing = raw != null ? JSON.parse(raw) : null;
         }
         if (existing != null) continue;
         let val = api.hasBridge && window.bili.storeGet ? await window.bili.storeGet(base) : null;
+        if (!current()) return;
         if (val == null) {
           const raw = localStorage.getItem(base);
           val = raw != null ? JSON.parse(raw) : null;
@@ -591,7 +604,8 @@ async function switchDataNs(ns) {
     }
   }
   await loadBuckets();
-  try { await loadLibrary({ force: true }); } catch (e) {}
+  if (!current()) return;
+  loadLibrary({ force: true }).catch(() => {});
   refreshMusicLibraryUI();
   renderFavButtons();
   if (dataNs === ns) await window.bili?.lanSyncConfigure?.(ns);
@@ -602,7 +616,7 @@ function renderAuth(auth = authState) {
   if (!$('authLoggedOut')) return;
   $('authLoggedOut').hidden = !!authState.isLogin;
   $('authLoggedIn').hidden = !authState.isLogin;
-  $('authSubtitle').textContent = authState.isLogin ? `UID ${authState.mid} · 已同步收藏夹` : '扫码或手机验证码安全登录';
+  $('authSubtitle').textContent = authState.unverified ? '暂时无法验证登录状态，请检查网络' : authState.status === 'expired' ? '登录已失效，请重新登录' : authState.isLogin ? `UID ${authState.mid} · 已同步收藏夹` : '扫码或手机验证码安全登录';
   if (authState.isLogin) {
     $('authName').textContent = authState.uname || '已登录';
     $('authFace').src = authState.face || '';
@@ -614,8 +628,8 @@ function renderAuth(auth = authState) {
 
 async function ensureAuth(force = false) {
   if (!api.hasBridge) return authState;
-  if (!authRequest || force) {
-    authRequest = window.bili.authStatus().then((auth) => {
+  if (!authRequest) {
+    authRequest = window.bili.authStatus({ force }).then((auth) => {
       renderAuth(auth);
       return authState;
     }).finally(() => { authRequest = null; });
@@ -853,11 +867,19 @@ function initAuth() {
   });
   if (api.hasBridge) {
     window.bili.onAuthChanged((auth) => {
+      const wasLogin = authState.isLogin, wasExpired = authState.status === 'expired';
+      const changed = wasLogin !== auth.isLogin || String(authState.mid || '') !== String(auth.mid || '');
       renderAuth(auth);
-      if (auth.isLogin) toast(`欢迎回来，${auth.uname || 'B 站用户'}`);
-      loadFav();
+      if (auth.status === 'expired' && !wasExpired) toast('登录已失效，请重新登录');
+      else if (auth.isLogin && !wasLogin) toast(`欢迎回来，${auth.uname || 'B 站用户'}`);
+      if (changed) loadFav();
     });
-    ensureAuth(true);
+    ensureAuth(true).catch(() => {});
+    clearInterval(authWatchTimer);
+    authWatchTimer = setInterval(refreshVisibleAuth, 60000);
+    window.addEventListener('focus', refreshVisibleAuth);
+    window.addEventListener('online', refreshVisibleAuth);
+    document.addEventListener('visibilitychange', refreshVisibleAuth);
   } else renderAuth({ isLogin: false });
 }
 
@@ -997,15 +1019,15 @@ async function attachVideoStream(stream, token, t, deadline = Date.now() + 12000
 }
 
 async function prepareOriginalVideo(t, token, force = false) {
-  const key = `${t.bvid}:${settings.vq}`;
-  if (!force && video.dataset.bvid === t.bvid && video.dataset.ready === 'true' && video.currentSrc) {
+  const key = `${t.bvid}:${t.cid}:${settings.vq}`;
+  if (!force && video.dataset.bvid === `${t.bvid}:${t.cid}` && video.dataset.ready === 'true' && video.currentSrc) {
     return Number(video.dataset.actualQuality) || settings.vq;
   }
   if (!force && videoPreparePromise && videoPrepareKey === key) return videoPreparePromise;
 
   const task = (async () => {
     const deadline = Date.now() + 15000;
-    video.dataset.bvid = t.bvid;
+    video.dataset.bvid = `${t.bvid}:${t.cid}`;
     video.dataset.ready = 'false';
     const qualities = await withTimeout(getVideoQualityOptions(t, force), 5000, '获取可选清晰度超时');
     if (token !== videoLoadToken || state.current !== t) throw new Error('视频加载已取消');
@@ -1038,6 +1060,7 @@ async function prepareOriginalVideo(t, token, force = false) {
     }
     if (lastError) throw lastError;
     video.dataset.actualQuality = String(loadedQuality);
+    video.dataset.bvid = `${t.bvid}:${t.cid}`;
     video.dataset.ready = 'true';
     syncVideoQualityUI(loadedQuality);
     // 预热场景顺手把画面预定位到音频当前进度（分切段起点很深时尤其重要），
@@ -1160,7 +1183,7 @@ async function setVideoMode(on, force = false, immediate = false) {
     toast(t && t.isLive ? '直播电台没有原视频模式' : '当前曲目暂无原视频');
     return;
   }
-  if (on && videoModeOn() && !force && video.dataset.bvid === t.bvid && video.dataset.ready === 'true') return;
+  if (on && videoModeOn() && !force && video.dataset.bvid === `${t.bvid}:${t.cid}` && video.dataset.ready === 'true') return;
   if (on && document.body.classList.contains('video-pending') && !force) return;
   const requestToken = ++modeRequestToken;
   if (!on) {
@@ -1364,6 +1387,12 @@ async function syncFavState(t) {
 }
 
 function renderFavPopList() {
+  const part = BiuVideoParts.currentPart(state.current, availableVideoParts);
+  const local = $('favCurrentPart');
+  if (local) {
+    local.hidden = !part;
+    local.textContent = part && isLiked(part) ? '取消收藏这一 P' : '收藏这一 P 到我喜欢';
+  }
   const list = $('favPopList');
   if (!list) return;
   // 异步加载完成后会重绘列表，保留滚动位置避免跳回顶部
@@ -1456,16 +1485,19 @@ async function toggleFavFolder(index) {
 // 曲目身份键：分切段按 bvid + 区间独立成对象（同视频各段互不冲突），整曲/直播不变
 const trackKey = (t) => {
   if (!t) return '';
-  if (t.isSegment && t.bvid) return `${t.bvid}#${Math.round((t.from || 0) * 10)}-${Math.round((t.to || 0) * 10)}`;
-  return t.bvid || (t.roomid ? 'live:' + t.roomid : '');
+  if (t.isSegment && t.bvid) return `${BiuVideoParts.partKey(t)}#${Math.round((t.from || 0) * 10)}-${Math.round((t.to || 0) * 10)}`;
+  return BiuVideoParts.partKey(t) || (t.roomid ? 'live:' + t.roomid : '');
 };
 // 拷贝曲目进本地集合：分切段必须带上区间与歌词引用，否则退化成整曲甚至撞 bvid 被覆盖
-const trackCopy = (t) => ({
-  bvid: t.bvid, aid: t.aid, cid: t.cid, title: t.title,
+const trackCopy = (track) => {
+  const t = BiuVideoParts.currentPart(track, availableVideoParts) || track;
+  return {
+  bvid: t.bvid, aid: t.aid, cid: t.cid, page: t.page, parentTitle: t.parentTitle, title: t.title,
   up: t.up, mid: t.mid, duration: t.duration, pic: t.pic,
   ...(t.isSegment ? { isSegment: true, from: t.from, to: t.to, lyricRef: t.lyricRef,
     parentBvid: t.parentBvid, parentTitle: t.parentTitle, parentUp: t.parentUp, parentMid: t.parentMid } : {}),
-});
+  };
+};
 
 /* ---------- 歌词偏移：按曲目持久化，同步时钟 = 播放时间 + 偏移 ---------- */
 let lyricOffsets = store.get('biu-lyric-offsets', {});
@@ -2384,7 +2416,7 @@ async function playTrack(t, options = {}) {
     if (!t.cid || !t.aid) {
       const d = await api.view(t.bvid);
       if (obsolete()) return; // 已切歌，丢弃过期结果
-      t.cid = d.cid; t.aid = d.aid;
+      t.cid ||= d.cid; t.aid ||= d.aid;
       fillPlayingDetail(d);
     } else {
       api.view(t.bvid).then((d) => { if (state.current === t) fillPlayingDetail(d); }).catch(() => {});
@@ -2394,14 +2426,14 @@ async function playTrack(t, options = {}) {
     // 分切歌单连播：同一稿件同一音质时复用已加载的音频管线，只做段内定位。
     // 否则每次切歌都重新请求签名地址并重建整个媒体管线，冷缓冲深度 seek 必造成开头卡顿。
     const reuseAudio = !!(!options.forceAudioRefresh && t.isSegment && audio.src && !audio.error
-      && audio.dataset.bvid === t.bvid
+      && audio.dataset.bvid === `${t.bvid}:${t.cid}`
       && audio.dataset.quality === String(settings.quality));
     if (!reuseAudio) {
       audio.pause();
       const url = await api.playUrl(t.bvid, t.cid, settings.quality);
       if (obsolete()) return;
       audio.src = api.media(url);
-      audio.dataset.bvid = t.bvid;
+      audio.dataset.bvid = `${t.bvid}:${t.cid}`;
       audio.dataset.quality = String(settings.quality);
     }
     // 分切歌单的曲目：先定位到本段起点再播放（metadata 未就绪时浏览器会挂起此次 seek，
@@ -2674,14 +2706,38 @@ function fillPlayingAttribution(t) {
   const sourceTitle = t.isSegment && t.parentTitle && t.parentTitle !== t.title ? t.parentTitle : '';
   const sourceUp = t.isSegment && t.parentUp && t.parentUp !== t.up ? t.parentUp : '';
   $('npArtist').innerHTML = `${esc(t.up || '—')}${sourceUp ? `<span class="np-source-inline"> · ${esc(sourceUp)}</span>` : ''}`;
-  const title = t.title || '—';
+  const title = (!t.isSegment && t.page && t.parentTitle) || t.title || '—';
   const titleLength = Array.from(title).length;
   $('npTitle').innerHTML = `<span class="np-title-main">${esc(title)}</span>${sourceTitle ? `<span class="np-source-inline"><span class="np-source-text">${esc(sourceTitle)}</span></span>` : ''}`;
   $('npTitle').classList.toggle('title-long', titleLength > 28);
   $('npTitle').classList.toggle('title-xlong', titleLength > 52);
 }
 
+let availableVideoParts = [];
+const videoPartsPickers = [];
+function renderVideoParts(track) {
+  const parts = track?.bvid && !track.isSegment && !track.isLive && availableVideoParts[0]?.bvid === track.bvid
+    ? availableVideoParts : [];
+  const part = BiuVideoParts.currentPart(track, parts);
+  const cid = part?.cid ?? '';
+  for (const picker of videoPartsPickers) picker.update({ parts, cid, part });
+}
+function toggleCurrentPartFavorite() {
+  const part = BiuVideoParts.currentPart(state.current, availableVideoParts);
+  if (!part) return;
+  toggleLike(part);
+  closeFavPop();
+  renderFavButtons();
+}
+function selectVideoPart(cid) {
+  const selected = BiuVideoParts.select(state.queue, state.qi, state.current, availableVideoParts, cid);
+  if (!selected) return;
+  state.queue = selected.tracks;
+  playIndex(selected.index);
+}
+
 function fillPlayingBase(track) {
+  renderVideoParts(track);
   const t = sourceTrack(track);
   fillPlayingAttribution(t);
   $('npSrc').textContent = t.isLive
@@ -2716,6 +2772,10 @@ function fillPlayingBase(track) {
 
 /* 播放页详情信息（view 接口数据） */
 function fillPlayingDetail(d) {
+  if (state.current?.bvid) {
+    availableVideoParts = BiuVideoParts.fromDetail(state.current.bvid, d);
+    renderVideoParts(state.current);
+  }
   if (d.title) $('vTitle').textContent = d.title;
   $('npSrc').textContent = `来源 · ${d.tname || (state.current && state.current.bvid) || 'Bilibili'}`;
   $('npSrc').title = $('npSrc').textContent;
@@ -4005,7 +4065,7 @@ function recordHistory(t) {
   const key = historyKey(t);
   if (!key) return;
   playHistory = playHistory.filter((x) => historyKey(x) !== key);
-  playHistory.unshift({ ...t, playedAt: Date.now() });
+  playHistory.unshift({ ...t, ...BiuVideoParts.currentPart(t, availableVideoParts), playedAt: Date.now() });
   if (playHistory.length > 60) playHistory.length = 60;
   store.set(dataKey('biu-history'), playHistory);
   if (api.hasBridge && window.bili.storeSet) window.bili.storeSet(dataKey('biu-history'), playHistory);
@@ -5430,7 +5490,7 @@ function initSettings() {
           const url = await api.playUrl(t.bvid, t.cid, settings.quality);
           if (state.current !== t) return;
           audio.src = url;
-          audio.dataset.bvid = t.bvid;
+          audio.dataset.bvid = `${t.bvid}:${t.cid}`;
           audio.dataset.quality = String(settings.quality);
           audio.currentTime = pos;
           if (wasPlaying) await audio.play();
@@ -5456,7 +5516,7 @@ function initSettings() {
       }
       // 非视频模式：作废按旧档位预热的视频，按新默认重新预热，否则进入视频模式仍沿用旧清晰度
       const t = state.current;
-      if (t && !t.isLive && video.dataset.bvid === t.bvid
+      if (t && !t.isLive && video.dataset.bvid === `${t.bvid}:${t.cid}`
           && Number(video.dataset.actualQuality) !== settings.vq) {
         video.dataset.ready = 'false';
         video.removeAttribute('data-actual-quality');
@@ -5517,6 +5577,11 @@ function initSettings() {
 
 /* ---------- 初始化 ---------- */
 function init() {
+  $('favCurrentPart')?.addEventListener('click', toggleCurrentPartFavorite);
+  for (const id of ['npVideoParts', 'vVideoParts']) {
+    const trigger = $(id);
+    if (trigger) videoPartsPickers.push(window.BiuVideoPartsMenu.mount(trigger, selectVideoPart));
+  }
   // 顶栏导航 / 快捷键（沿用设计稿）
   document.querySelectorAll('#mainNav button').forEach((b) =>
     b.addEventListener('click', () => go(b.dataset.v)));
@@ -5651,7 +5716,7 @@ function init() {
   $('shareCardLink').addEventListener('click', async () => {
     if (!sharedTrack?.bvid) return toast('当前歌曲没有可分享的链接');
     try {
-      await window.bili.shareLinkCopy(`https://www.bilibili.com/video/${sharedTrack.bvid}`);
+      await window.bili.shareLinkCopy(BiuVideoParts.url(sharedTrack));
       toast('歌曲链接已复制');
     } catch (error) { toast(error.message || '复制链接失败'); }
   });

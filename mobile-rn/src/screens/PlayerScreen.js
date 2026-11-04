@@ -21,7 +21,10 @@ import { useIsFocused } from '@react-navigation/native';
 import useMediaTransition from '../player/useMediaTransition';
 import useLyricReveal from '../player/useLyricReveal';
 import { trackKeyOf } from '../player/track';
+import { view } from '../api/bili';
+import { fromDetail, currentPart } from '../../../renderer/video-parts';
 import VideoActionBar from '../components/VideoActionBar';
+import VideoPartsMenu from '../components/VideoPartsMenu';
 import { colors } from '../theme';
 import ProgressScrubber from '../components/ProgressScrubber';
 import { usePlaybackProgress, usePlayer } from '../player/PlayerContext';
@@ -45,8 +48,8 @@ export default function PlayerScreen({ navigation, route }) {
     current, isLive, playing, buffering, playError,
     togglePlay, next, prev, seekTo, isLiked, toggleLike,
     isInLibrary = () => false, toggleLibrary = () => {},
-    player: mediaPlayer, lyricSettings, lyricEffect, seekRevision, resolveTrackUp,
-  } = usePlayer(['current', 'isLive', 'playing', 'buffering', 'playError', 'togglePlay', 'next', 'prev', 'seekTo', 'isLiked', 'toggleLike', 'isInLibrary', 'toggleLibrary', 'player', 'lyricSettings', 'lyricEffect', 'seekRevision', 'resolveTrackUp']);
+    player: mediaPlayer, lyricSettings, lyricEffect, seekRevision, resolveTrackUp, playVideoPart,
+  } = usePlayer(['current', 'isLive', 'playing', 'buffering', 'playError', 'togglePlay', 'next', 'prev', 'seekTo', 'isLiked', 'toggleLike', 'isInLibrary', 'toggleLibrary', 'player', 'lyricSettings', 'lyricEffect', 'seekRevision', 'resolveTrackUp', 'playVideoPart']);
   const { position, duration } = usePlaybackProgress();
   const openUp = (track) => openTrackUp(navigation, track, resolveTrackUp);
   const { width: winW, height: winH } = useWindowDimensions();
@@ -58,11 +61,28 @@ export default function PlayerScreen({ navigation, route }) {
   const [mediaMode, setMediaMode] = useState('lyrics'); // lyrics | video（顶部分段开关，纯显隐）
   const [sheet, setSheet] = useState(null); // menu | queue | playlist
 
+  const partBvid = current?.isSegment || isLive ? null : current?.bvid;
+  const [partDetails, setPartDetails] = useState(null);
+  useEffect(() => {
+    if (!focused || !partBvid || typeof view !== 'function') return;
+    let active = true;
+    view(partBvid).then(detail => {
+      if (active) setPartDetails({ bvid: partBvid, parts: fromDetail(partBvid, detail) });
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [focused, partBvid]);
+  const parts = partDetails && partDetails.bvid === partBvid ? partDetails.parts : [];
+  const activePart = currentPart(current, parts);
+  const collectionTrack = activePart || current;
+  const partMenu = activePart && focused && mediaMode === 'lyrics' ? (
+    <VideoPartsMenu key={partBvid} current={activePart} parts={parts}
+      onSelect={cid => playVideoPart?.(parts, cid)} />
+  ) : null;
   const [lyricResult, setLyricResult] = useState(null); // null=加载中 []=无词
   const [railSize, setRailSize] = useState({ width: 0, height: 0 });
 
-  const liked = isLiked(current);
-  const inLibrary = isInLibrary(current);
+  const liked = isLiked(collectionTrack);
+  const inLibrary = isInLibrary(collectionTrack);
   const hasVideo = !!(current && current.bvid && !isLive);
   const canOpenCurrentUp = canOpenTrackUp(current);
   const attributedCurrent = useTrackSource(current);
@@ -273,9 +293,9 @@ export default function PlayerScreen({ navigation, route }) {
                       </View>
 
                       {/* 标题行：左标题/UP，右我喜欢 + … */}
-                      <View style={styles.titleRow}>
+                      <View testID="player-cover-title-row" style={styles.titleRow}>
                         <View style={styles.titleBox}>
-                          <Text style={styles.title} numberOfLines={1}>{current.title}{sourceTitle ? <Text style={styles.sourceTitle}>  · {sourceTitle}</Text> : null}</Text>
+                          <Text style={styles.title} numberOfLines={1}>{(!current.isSegment && current.page && current.parentTitle) || current.title}{sourceTitle ? <Text style={styles.sourceTitle}>  · {sourceTitle}</Text> : null}</Text>
                           <View style={styles.identityUpRow}>
                             <Text style={styles.up} numberOfLines={1}>{current.up}</Text>
                             {sourceUp ? <TouchableOpacity disabled={!canOpenCurrentUp} onPress={() => openUp(current)} hitSlop={6} style={styles.upHit}>
@@ -283,7 +303,8 @@ export default function PlayerScreen({ navigation, route }) {
                             </TouchableOpacity> : null}
                           </View>
                         </View>
-                        <TouchableOpacity style={styles.smallRoundBtn} onPress={() => toggleLike(current)} hitSlop={7}
+                        {mode === 'cover' ? partMenu : null}
+                        <TouchableOpacity style={styles.smallRoundBtn} onPress={() => toggleLike(collectionTrack)} hitSlop={7}
                           accessibilityRole="button" accessibilityLabel={liked ? '取消我喜欢' : '加入我喜欢'}
                           accessibilityState={{ selected: liked }}>
                           <IconHeart size={18} color={liked ? colors.accent : 'rgba(255,255,255,0.85)'} filled={liked} />
@@ -309,8 +330,8 @@ export default function PlayerScreen({ navigation, route }) {
                           fallback={<View style={[StyleSheet.absoluteFill, styles.bigCoverFallback]}>
                             <IconNote size={16} color={colors.accent} />
                           </View>} />
-                        <View style={{ flex: 1, minWidth: 0 }}>
-                          <Text style={styles.miniTitle} numberOfLines={1}>{current.title}{sourceTitle ? <Text style={styles.sourceTitle}>  · {sourceTitle}</Text> : null}</Text>
+                        <View style={styles.titleBox}>
+                          <Text style={styles.miniTitle} numberOfLines={1}>{(!current.isSegment && current.page && current.parentTitle) || current.title}{sourceTitle ? <Text style={styles.sourceTitle}>  · {sourceTitle}</Text> : null}</Text>
                           <View style={styles.identityUpRow}>
                             <Text style={styles.miniUp} numberOfLines={1}>{current.up}</Text>
                             {sourceUp ? <TouchableOpacity disabled={!canOpenCurrentUp} onPress={() => openUp(current)} hitSlop={6} style={styles.upHit}>
@@ -318,7 +339,8 @@ export default function PlayerScreen({ navigation, route }) {
                             </TouchableOpacity> : null}
                           </View>
                         </View>
-                        <TouchableOpacity style={styles.smallRoundBtn} onPress={() => toggleLike(current)} hitSlop={7}
+                        {mode === 'lyrics' ? partMenu : null}
+                        <TouchableOpacity style={styles.smallRoundBtn} onPress={() => toggleLike(collectionTrack)} hitSlop={7}
                           accessibilityRole="button" accessibilityLabel={liked ? '取消我喜欢' : '加入我喜欢'}
                           accessibilityState={{ selected: liked }}>
                           <IconHeart size={18} color={liked ? colors.accent : 'rgba(255,255,255,0.85)'} filled={liked} />
@@ -384,14 +406,15 @@ export default function PlayerScreen({ navigation, route }) {
                   <VideoPane player={mediaPlayer} buffering={buffering} error={playError}
                     cover={current.pic} visible={focused} />
                   <View style={styles.videoMeta}>
-                    <Text style={styles.videoTitle} numberOfLines={2}>{current.isSegment ? sourceTitle || '正在读取原视频信息…' : current.title}</Text>
+                    <Text style={styles.videoTitle} numberOfLines={2}>{current.isSegment ? sourceTitle || '正在读取原视频信息…' : (current.page && current.parentTitle) || current.title}</Text>
                     <View style={styles.identityUpRow}>
                       <TouchableOpacity disabled={!canOpenCurrentUp} onPress={() => openUp(current)} hitSlop={6} style={styles.upHit}>
                         <Text style={styles.videoUp} numberOfLines={1}>{current.isSegment ? sourceUp || '原 UP' : current.up}</Text>
                       </TouchableOpacity>
                     </View>
                   </View>
-                  <VideoActionBar track={current} active={mediaMode === 'video'} onShowLyrics={showLyrics} />
+                  <VideoActionBar track={collectionTrack} partLiked={liked}
+                    onFavoritePart={activePart ? () => toggleLike(activePart) : undefined} active={mediaMode === 'video'} onShowLyrics={showLyrics} />
                   <View style={{ flex: 1, minHeight: 12 }} />
                   {progressBar}
                   {controls}
@@ -408,12 +431,12 @@ export default function PlayerScreen({ navigation, route }) {
           style={sheet === 'menu' ? styles.sheet : styles.queueSheet}>
           {sheet === 'menu' && current ? (
             <>
-              <TouchableOpacity style={styles.sheetItem} onPress={() => { toggleLike(current); setSheet(null); }}>
+              <TouchableOpacity style={styles.sheetItem} onPress={() => { toggleLike(collectionTrack); setSheet(null); }}>
                 <IconHeart size={18} color={liked ? colors.accent : colors.text} filled={liked} />
                 <Text style={styles.sheetText}>{liked ? '取消我喜欢' : '加入我喜欢'}</Text>
               </TouchableOpacity>
               {!isLive ? (
-                <TouchableOpacity style={styles.sheetItem} onPress={() => { toggleLibrary(current); setSheet(null); }}>
+                <TouchableOpacity style={styles.sheetItem} onPress={() => { toggleLibrary(collectionTrack); setSheet(null); }}>
                   <IconPlaylist size={18} color={inLibrary ? colors.accent : colors.text} />
                   <Text style={styles.sheetText}>{inLibrary ? '从音乐库移除' : '加入音乐库'}</Text>
                 </TouchableOpacity>
@@ -434,7 +457,7 @@ export default function PlayerScreen({ navigation, route }) {
                 </TouchableOpacity>
               ) : null}
               <TouchableOpacity style={styles.sheetItem} onPress={() => {
-                const track = current;
+                const track = collectionTrack;
                 setSheet(null);
                 navigation.navigate('ShareCard', { track });
               }}>
@@ -444,7 +467,7 @@ export default function PlayerScreen({ navigation, route }) {
             </>
           ) : null}
           {sheet === 'queue' ? <PlaybackQueue onClose={() => setSheet(null)} /> : null}
-          {sheet === 'playlist' ? <PlaylistPicker track={current} onClose={() => setSheet(null)} /> : null}
+          {sheet === 'playlist' ? <PlaylistPicker track={collectionTrack} onClose={() => setSheet(null)} /> : null}
         </BottomSheet>
       </Animated.View>
     </Animated.View>

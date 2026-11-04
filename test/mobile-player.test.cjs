@@ -6527,3 +6527,175 @@ test('system playback links resolve to Biu player with a home back destination',
   const widget = fs.readFileSync(path.join(root, 'node_modules/expo-widgets/ios/Widgets/WidgetLiveActivity.swift'), 'utf8');
   assert.equal(widget.split(`.widgetURL(URL(string: "${PLAYER_LINK}"))`).length - 1, 2, 'lock-screen and island are both pinned to Biu');
 });
+
+test('mobile session expiry reaches subscribers, preserves offline credentials, and recovers after checking again', async t => {
+  const savedFetch = global.fetch; t.after(() => { global.fetch = savedFetch; });
+  const client = loader({ '@react-native-async-storage/async-storage': {
+    getItem: async () => JSON.stringify({ buvid3: 'visitor', SESSDATA: 'session', bili_jct: 'csrf', DedeUserID: '123' }),
+    setItem: async () => {},
+  } })('src/api/client.js');
+  const events = []; const unsubscribe = client.onAuthChanged(auth => events.push(auth)); t.after(unsubscribe);
+  let offline = false, code = 0;
+  global.fetch = async url => {
+    if (offline) throw new Error('offline');
+    return { status: 200, headers: { get: () => null }, text: async () => JSON.stringify({
+      code: url.includes('/nav') ? 0 : code,
+      data: { isLogin: true, mid: 123, uname: '测试' },
+    }) };
+  };
+  await client.authStatus();
+  offline = true;
+  assert.equal((await client.authStatus()).isLogin, true);
+  assert.equal(events.at(-1).unverified, true);
+  offline = false;
+  await client.authStatus({ force: false });
+  code = -101;
+  await client.get('https://app.bilibili.com/x/v2/feed/index');
+  assert.equal(events.at(-1).isLogin, true, 'App token expiry cannot revoke the Web session');
+  await client.post('https://api.bilibili.com/x/web-interface/archive/like', { aid: 1 });
+  assert.equal(events.at(-1).status, 'expired');
+  assert.equal((await client.authStatus()).isLogin, true, 'newly validated credentials restore the account');
+});
+
+test('old mobile API responses cannot revoke a fresh login or restore cookies after logout', async t => {
+  const fixture = appAuthFixture(t, { buvid3: 'visitor', DedeUserID: '123', SESSDATA: 'old-session' });
+  const client = fixture.makeClient(); await client.authStatus();
+  const events = []; t.after(client.onAuthChanged(auth => events.push(auth)));
+  const original = global.fetch;
+  let complete;
+  global.fetch = (url, options) => url.endsWith('/delayed-expiry')
+    ? new Promise(resolve => { complete = () => resolve({ status: 200,
+      headers: { getSetCookie: () => ['SESSDATA=stale; Domain=.bilibili.com'] },
+      text: async () => JSON.stringify({ code: -101 }) }); }) : original(url, options);
+  const stale = client.get('https://api.bilibili.com/delayed-expiry');
+  while (!complete) await new Promise(resolve => setTimeout(resolve, 0));
+  const grant = await client.startAppAuthorization({ login: true });
+  await client.pollAppAuthorization(grant);
+  complete(); await stale;
+  const verified = await client.authStatus();
+  assert.equal(verified.isLogin, true);
+  assert.equal(verified.unverified, undefined, 'the new cookie is still accepted, without a network-error fallback');
+  complete = null;
+  const preLogout = client.get('https://api.bilibili.com/delayed-expiry');
+  while (!complete) await new Promise(resolve => setTimeout(resolve, 0));
+  await client.logout();
+  complete(); await preLogout;
+  assert.equal(events.at(-1).isLogin, false);
+  assert.equal(JSON.parse(fixture.state.jar).SESSDATA, undefined, 'logout credentials remain cleared on disk');
+});
+
+test('repeated mobile account checks avoid library reloads and expired login preserves account data', async () => {
+  const song = { bvid: 'BVkeep', cid: 1, title: '保留的歌曲' };
+  const disk = new Map([['biu.likes@9', JSON.stringify([song])]]);
+  let reads = 0, listener, unsubscribed = false;
+  const load = loader({
+    'expo-video': { useVideoPlayer: () => ({ playing: false, duration: 0 }) },
+    expo: { useEvent: (_, name) => name === 'playingChange' ? { isPlaying: false } : { status: 'idle' }, useEventListener() {} },
+    '@react-native-async-storage/async-storage': {
+      getItem: async key => { reads++; return disk.get(key) ?? null; },
+      setItem: async (key, value) => disk.set(key, value),
+    },
+    'src/api/bili': {},
+    'src/api/client': { authStatus: async () => ({ isLogin: true, mid: 9 }), streamHeaders: () => ({}),
+      onAuthChanged: callback => { listener = callback; return () => { unsubscribed = true; }; } },
+  });
+  const { PlayerProvider, usePlayer } = load('src/player/PlayerContext.js');
+  let state, tree;
+  function Probe() { state = usePlayer(); return null; }
+  await act(async () => { tree = create(React.createElement(PlayerProvider, null, React.createElement(Probe))); });
+  assert.equal(state.account.mid, 9);
+  const initialReads = reads;
+  await act(async () => { listener({ isLogin: true, mid: 9, uname: '更新名字' }); });
+  assert.equal(reads, initialReads, 'profile refresh does not reread likes, history and playlists');
+  await act(async () => { listener({ isLogin: false, status: 'expired' }); });
+  assert.equal(state.account.status, 'expired'); assert.equal(state.account.isLogin, false);
+  assert.deepEqual(JSON.parse(disk.get('biu.likes@9')), [song]);
+  await act(async () => { listener({ isLogin: true, mid: 9 }); });
+  assert.deepEqual(state.likes, [song], 'relogin restores the original account library');
+  await act(async () => tree.unmount());
+  assert.equal(unsubscribed, true);
+});
+
+test('Web QR relogin replaces expired mobile cookies and persists them before reporting success', async t => {
+  const savedFetch = global.fetch; t.after(() => { global.fetch = savedFetch; });
+  let disk = JSON.stringify({ buvid3: 'visitor', SESSDATA: 'expired', bili_jct: 'old-csrf', DedeUserID: '1' });
+  const client = loader({ '@react-native-async-storage/async-storage': {
+    getItem: async () => disk, setItem: async (_, value) => { disk = value; },
+  } })('src/api/client.js');
+  global.fetch = async (url, options) => {
+    let body;
+    if (url.includes('/poll?')) body = { code: 0, data: { code: 0,
+      url: 'https://passport.bilibili.com/callback?SESSDATA=fresh%2Csession&bili_jct=fresh-csrf&DedeUserID=2' } };
+    else {
+      assert.match(options.headers.Cookie, /SESSDATA=fresh%2Csession/);
+      assert.match(options.headers.Cookie, /DedeUserID=2/);
+      assert.doesNotMatch(options.headers.Cookie, /expired/);
+      body = { code: 0, data: { isLogin: true, mid: 2 } };
+    }
+    return { status: 200, headers: { getSetCookie: () => [] }, text: async () => JSON.stringify(body) };
+  };
+  const result = await client.qrPoll('test-key');
+  assert.equal(result.auth.mid, 2); assert.equal(result.auth.unverified, undefined);
+  assert.equal(JSON.parse(disk).SESSDATA, 'fresh,session');
+  assert.equal(JSON.parse(disk).bili_jct, 'fresh-csrf');
+});
+
+test('cover and lyric titles share the part menu and favorite the selected CID', async () => {
+  const bvid = 'BV1zhEq6HEj8';
+  let current = { bvid, cid: 39646463876, title: '原投稿' };
+  let selected, saved;
+  const pages = [
+    { page: 1, cid: 39646463876, part: '第一首', duration: 226 },
+    { page: 2, cid: 39646464077, part: '第二首', duration: 210 },
+  ];
+  const load = loader({ ...lyricMocks,
+    '@react-navigation/native': { useIsFocused: () => true },
+    'react-native-safe-area-context': safeArea,
+    'src/player/useMediaTransition': { default: () => ({}), __esModule: true },
+    'src/api/bili': { view: async () => ({ title: '原投稿', aid: 123, pages }) },
+    'src/player/PlayerContext': { usePlayer: () => ({ current, lyricSettings: {},
+      isLiked: () => false, toggleLike: (track) => { saved = track; },
+      playVideoPart: (parts, cid) => { selected = parts.find(p => p.cid === cid); },
+    }), usePlaybackProgress: () => ({ position: 0, duration: 226 }) },
+    'src/player/loadLyrics': { loadTrackLyrics: async () => [] },
+    'src/player/trackSource': { useTrackSource: track => track },
+    'src/components/icons': iconMock,
+    ...Object.fromEntries(['VideoPane', 'VideoActionBar', 'LivePlayerBody', 'PlaylistPicker', 'BottomSheet',
+      'PlaybackQueue', 'RemoteImage', 'ProgressScrubber', 'LyricsRail'].map(name => [`src/components/${name}`, name])),
+  });
+  const Player = withOverlays(load, load('src/screens/PlayerScreen.js').default);
+  const render = () => React.createElement(Player, { navigation: { setParams() {} }, route: { params: {} } });
+  let tree;
+  await act(async () => { tree = create(render(), { createNodeMock: ({ props }) => {
+    if (props.testID === 'player-parts-anchor') return { measureInWindow: callback => callback(160, 300, 26, 26) };
+    if (props.testID === 'player-parts-overlay') return { measureInWindow: callback => callback(0, 0, 390, 844) };
+    return null;
+  } }); });
+  assert.equal(tree.root.findByType('VideoActionBar').props.track.title, '第一首');
+  await act(async () => tree.root.findByType('VideoActionBar').props.onFavoritePart());
+  assert.equal(saved.cid, pages[0].cid);
+  const title = tree.root.findAll(node => node.props.accessibilityLabel === '选择分 P：P1 第一首')[0];
+  assert.ok(title);
+  const coverTitle = tree.root.findByProps({ testID: 'player-cover-title-row' });
+  assert.equal(coverTitle.findByProps({ testID: 'player-parts-trigger' }).props.accessibilityState.expanded, false);
+  await act(async () => title.props.onPress());
+  await act(async () => tree.root.findByProps({ testID: 'player-parts-overlay' }).props.onLayout({
+    nativeEvent: { layout: { width: 390, height: 844 } },
+  }));
+  const panel = rn.StyleSheet.flatten(tree.root.findByProps({ testID: 'player-parts-menu' }).props.style);
+  assert.equal(panel.top + panel.height, 292, 'menu fits directly above its trigger');
+  const second = tree.root.findAll(node => node.props.accessibilityLabel === '播放 P2：第二首')[0];
+  assert.ok(second);
+  await act(async () => second.props.onPress());
+  assert.equal(selected.cid, pages[1].cid);
+  assert.equal(tree.root.findAllByProps({ testID: 'player-parts-menu' }).length, 0);
+  await act(async () => { current = selected; tree.update(render()); });
+  await click(tree, '显示歌词');
+  const lyricLayer = tree.root.findByProps({ testID: 'player-lyric-layer' });
+  assert.equal(lyricLayer.findByProps({ testID: 'player-parts-trigger' }).props.accessibilityLabel, '选择分 P：P2 第二首');
+  assert.equal(tree.root.findByProps({ testID: 'player-cover-title-row' }).findAllByProps({ testID: 'player-parts-trigger' }).length, 0);
+  await act(async () => tree.root.findByType('VideoActionBar').props.onFavoritePart());
+  assert.equal(saved.title, '第二首');
+  assert.equal(saved.page, 2);
+  await act(async () => tree.unmount());
+});

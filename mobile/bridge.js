@@ -5,7 +5,16 @@
  */
 (function () {
   'use strict';
-  const json = (r) => r.json();
+  const authListeners = new Set();
+  let lastAuth = '';
+  const publishAuth = (value) => {
+    if (value && typeof value.isLogin === 'boolean' && JSON.stringify(value) !== lastAuth) {
+      lastAuth = JSON.stringify(value);
+      for (const listener of authListeners) { try { listener(value); } catch {} }
+    }
+    return value;
+  };
+  const json = (r) => r.json().then(value => { if (value?.auth) publishAuth(value.auth); return value; });
   const postJson = (url, payload) => fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -33,7 +42,7 @@
     playbackSave: (snap) => { postJson('/store/set', { key: 'biu-playback-session', val: snap }).catch(() => {}); },
 
     /* ---- 扫码登录 ---- */
-    authStatus: () => fetch('/auth/status').then(json),
+    authStatus: (options) => fetch('/auth/status?force=' + (options?.force === false ? '0' : '1')).then(json).then(publishAuth),
     authQrStart: () => fetch('/auth/qr-start').then(json),
     authQrPoll: (key) => fetch('/auth/qr-poll?key=' + encodeURIComponent(key)).then(json),
     authLogout: () => fetch('/auth/logout', { method: 'POST' }).then(json),
@@ -43,7 +52,7 @@
     authSmsLogin: (payload) => postJson('/auth/sms-login', payload),
     // 桌面版会开官方登录窗；移动版开新标签页（扫码登录是主路径）
     authOpenLogin: () => window.open('https://passport.bilibili.com/login', '_blank'),
-    onAuthChanged: () => {},
+    onAuthChanged: (listener) => { authListeners.add(listener); return () => authListeners.delete(listener); },
 
     /* ---- MixSplitR 识曲：PCM（Float32 ArrayBuffer）原样上传 ---- */
     ncmRecognize: async ({ pcm, from, len }) => {

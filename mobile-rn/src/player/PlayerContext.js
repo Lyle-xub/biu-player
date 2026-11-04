@@ -19,11 +19,12 @@ import { useVideoPlayer } from 'expo-video';
 import { useEvent, useEventListener } from 'expo';
 import AsyncStorage from '../store/largeStorage';
 import * as bili from '../api/bili';
-import { authStatus, streamHeaders } from '../api/client';
+import { authStatus, onAuthChanged, streamHeaders } from '../api/client';
 import { mediaUrl } from '../api/mediaUrl';
 import { fetchTrackSource } from './trackSource';
 import { takeDiscoveryPreload } from './discoveryPreload';
 import { segmentRange, trackKeyOf } from './track';
+import { select as selectParts } from '../../../renderer/video-parts';
 import { PLAYBACK_QUALITIES, normalizePlaybackQuality } from './playbackQuality';
 import { getPlaylists, mergeSyncedPlaylists, setPlaylistScope } from '../store/playlists';
 import { accountKey, adoptGuestLibrary, readAccountValue } from '../store/accountStorage';
@@ -104,6 +105,7 @@ export function PlayerProvider({ children }) {
   const [account, setAccount] = useState(null);
   const accountScope = useRef('');
   const accountSwitch = useRef(Promise.resolve());
+  const accountTarget = useRef(null);
   const libraryEpoch = useRef(0);
   const libraryReadyRef = useRef(false);
   const likesRef = useRef(likes);
@@ -154,14 +156,17 @@ export function PlayerProvider({ children }) {
   }, []);
 
   const switchAccount = useCallback((nextAccount) => {
+    const normalized = nextAccount || { isLogin: false };
+    const nextScope = normalized.isLogin && normalized.mid ? String(normalized.mid) : '';
+    setAccount(normalized);
+    if (accountTarget.current === nextScope) return accountSwitch.current.then(() => normalized);
+    accountTarget.current = nextScope;
     libraryEpoch.current += 1;
+    const epoch = libraryEpoch.current;
     libraryReadyRef.current = false;
-    const normalized = nextAccount && nextAccount.isLogin
-      ? nextAccount : { isLogin: false };
+    setLibraryReady(false);
     accountSwitch.current = accountSwitch.current.catch(() => {}).then(async () => {
-      const nextScope = normalized.isLogin && normalized.mid ? String(normalized.mid) : '';
       const previousScope = accountScope.current;
-      setLibraryReady(false);
       await adoptGuestLibrary(nextScope, previousScope);
       const [nextLikes, nextHistory, nextLibrary] = await Promise.all([
         readAccountValue(LIKES_KEY, nextScope, []),
@@ -169,19 +174,27 @@ export function PlayerProvider({ children }) {
         readAccountValue(MUSIC_LIBRARY_KEY, nextScope, []),
         setPlaylistScope(nextScope),
       ]);
+      if (epoch !== libraryEpoch.current) return normalized;
       accountScope.current = nextScope;
       likesRef.current = Array.isArray(nextLikes) ? nextLikes : [];
       setLikes(likesRef.current);
       setHistory(Array.isArray(nextHistory) ? nextHistory : []);
       savedLibraryRef.current = Array.isArray(nextLibrary) ? nextLibrary : [];
       setSavedLibrary(savedLibraryRef.current);
-      setAccount(normalized);
       libraryReadyRef.current = true;
       setLibraryReady(true);
       return normalized;
+    }).catch(error => {
+      if (epoch === libraryEpoch.current) accountTarget.current = null;
+      throw error;
     });
     return accountSwitch.current;
   }, []);
+
+  useEffect(() => {
+    if (typeof onAuthChanged !== 'function') return;
+    return onAuthChanged(auth => { switchAccount(auth).catch(() => {}); });
+  }, [switchAccount]);
 
   useEffect(() => {
     (async () => {
@@ -308,7 +321,7 @@ export function PlayerProvider({ children }) {
           // 回填 cid，避免重复请求
           if (cid) {
             t.cid = cid;
-            setQueue((q) => q.map((item) => (item === t || item.bvid === t.bvid ? { ...item, cid } : item)));
+            setQueue((q) => q.map((item) => (item === t ? { ...item, cid } : item)));
           }
         }
         if (!cid) throw new Error('无法获取视频分 P 信息');
@@ -468,6 +481,11 @@ export function PlayerProvider({ children }) {
     setQueueSource(source);
     return playIndex(tracks, i, false, false, startAt);
   }, [playIndex]);
+
+  const playVideoPart = useCallback((parts, cid) => {
+    const selected = selectParts(queue, index, current, parts, cid);
+    if (selected) return playQueue(selected.tracks, selected.index, 0, '分 P');
+  }, [queue, index, current, playQueue]);
 
   // Feed enrichment changes future entries without replacing the playing source.
   const syncDiscoveryQueue = useCallback((tracks) => {
@@ -958,6 +976,13 @@ export function PlayerProvider({ children }) {
   const progressRef = useRef(null);
   if (!progressRef.current) progressRef.current = createProgressStore();
   const foreground = useAppForeground();
+  useEffect(() => {
+    if (!foreground || typeof authStatus !== 'function') return;
+    const check = () => { authStatus({ force: false }).then(switchAccount).catch(() => {}); };
+    check();
+    const timer = setInterval(check, 60000);
+    return () => clearInterval(timer);
+  }, [foreground, switchAccount]);
   publishProgress.current = () => progressRef.current.publish({
     position: isLive || resolving ? 0 : Math.max(0,
       Math.min(range ? range.to - range.from : Infinity, (clock.current || 0) - (range?.from || 0))),
@@ -998,7 +1023,7 @@ export function PlayerProvider({ children }) {
     discoveryRecommendMode, setDiscoveryRecommendMode,
     discoveryRecommendationManager, discoveryRecommendationProfile,
     setVolume, pauseAll, resume,
-    playQueue, syncDiscoveryQueue, playIndex, togglePlay, next, prev, seekTo,
+    playQueue, playVideoPart, syncDiscoveryQueue, playIndex, togglePlay, next, prev, seekTo,
     player, // 原始 VideoPlayer：播放页/视频页的 VideoView 共用
   }), [
     queue, index, queueSource, current, isLive, playMode, setPlayMode, playing, mediaDeferred, status, sourcePending, videoSource, automaticVideoTransition,
@@ -1014,7 +1039,7 @@ export function PlayerProvider({ children }) {
     discoveryRecommendMode, setDiscoveryRecommendMode,
     discoveryRecommendationManager, discoveryRecommendationProfile,
     setVolume, pauseAll, resume,
-    playQueue, syncDiscoveryQueue, playIndex, togglePlay, next, prev, seekTo, player,
+    playQueue, playVideoPart, syncDiscoveryQueue, playIndex, togglePlay, next, prev, seekTo, player,
   ]);
 
   const store = useRef(null);

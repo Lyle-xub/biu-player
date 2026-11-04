@@ -12,6 +12,7 @@ import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
 import forge from 'node-forge';
 import { mediaUrl } from './mediaUrl';
+import { create as createAuthSession, decode as decodeAuth, NAV } from '../../../renderer/auth-session';
 
 export const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 export const REFERER = 'https://www.bilibili.com/';
@@ -23,6 +24,12 @@ let jar = {};
 let jarReady = null;
 let jarTimer = null;
 let authRevision = 0;
+const authSession = createAuthSession({ verify: async () => {
+  const response = await get(NAV, { skipBuvid: true });
+  const auth = decodeAuth(response.status, response.body);
+  return auth.isLogin ? { ...auth, face: mediaUrl(auth.face) || '' } : auth;
+} });
+export const onAuthChanged = (listener) => authSession.subscribe(listener);
 
 export function initClient() {
   if (!jarReady) {
@@ -174,6 +181,8 @@ export async function biliFetch(url, opts = {}, consume = (res) => res) {
         ...(opts.headers || {}),
       };
       if (controller.signal.aborted) throw Object.assign(new Error('请求已取消'), { name: 'AbortError' });
+      const requestRevision = authRevision, sessionRevision = authSession.revision;
+      const authenticated = opts.cookies !== false && !!jar.SESSDATA;
       const res = await fetch(url, {
         method: opts.method || 'GET',
         // Keep the application's explicit Cookie header as the only source.
@@ -182,10 +191,14 @@ export async function biliFetch(url, opts = {}, consume = (res) => res) {
         body: opts.body,
         signal: controller.signal,
       });
-      if (opts.captureCookies !== false && !controller.signal.aborted) captureCookies(res, u.hostname);
+      if (requestRevision === authRevision && opts.captureCookies !== false && !controller.signal.aborted) captureCookies(res, u.hostname);
       // Keep the deadline through body consumption, even if native fetch fails
       // to reject promptly after aborting. A stalled body must release callers.
-      return await consume(res);
+      const result = await consume(res);
+      if (!controller.signal.aborted && requestRevision === authRevision && result?.body !== undefined) {
+        authSession.observe(url, result, sessionRevision, authenticated);
+      }
+      return result;
     })()]);
   } finally {
     clearTimeout(timer);
@@ -248,17 +261,8 @@ export async function post(url, params = {}, opts = {}) {
 }
 
 /* ---------- 扫码登录 ---------- */
-export async function authStatus() {
-  try {
-    const r = await get('https://api.bilibili.com/x/web-interface/nav');
-    if (r.status !== 200) return { isLogin: false };
-    const json = JSON.parse(r.body);
-    const data = json && json.data;
-    if (json.code !== 0 || !data || !data.isLogin) return { isLogin: false };
-    return { isLogin: true, mid: data.mid, uname: data.uname || '', face: mediaUrl(data.face) || '', vipType: data.vipType || 0 };
-  } catch (e) {
-    return { isLogin: false, error: String(e) };
-  }
+export function authStatus(options = { force: true }) {
+  return authSession.check(options);
 }
 
 // 返回 { ok, key, url }：url 供 RN 端本地渲染二维码
@@ -291,10 +295,14 @@ export async function qrPoll(key) {
         const cu = new URL(json.data.url || '');
         ['SESSDATA', 'bili_jct', 'DedeUserID', 'DedeUserID__ckMd5', 'sid'].forEach((k) => {
           const v = cu.searchParams.get(k);
-          if (v && !jar[k]) jar[k] = v;
+          if (v) jar[k] = v;
         });
         scheduleJarSave();
       } catch (e) { /* 有 Set-Cookie 兜底，忽略 */ }
+      authRevision++;
+      authSession.reset();
+      clearTimeout(jarTimer);
+      await AsyncStorage.setItem(JAR_KEY, JSON.stringify(jar));
       result.auth = await authStatus();
     }
     return result;
@@ -308,8 +316,10 @@ export async function logout() {
   authRevision++;
   const mid = jar.DedeUserID;
   ['SESSDATA', 'bili_jct', 'DedeUserID', 'DedeUserID__ckMd5', 'sid'].forEach((k) => delete jar[k]);
+  authSession.reset({ isLogin: false });
   if (mid) await appCredentialWrite(() => SecureStore.deleteItemAsync(`biu.bili-app.${mid}`)).catch(() => {});
-  scheduleJarSave();
+  clearTimeout(jarTimer);
+  await AsyncStorage.setItem(JAR_KEY, JSON.stringify(jar)).catch(() => scheduleJarSave());
   return { isLogin: false };
 }
 
@@ -514,6 +524,7 @@ async function completeAppLogin(grant, data, signal) {
         grant.check();
         jar = nextJar;
         authRevision++;
+        authSession.reset(auth);
       }
     } catch (error) {
       await SecureStore.deleteItemAsync(storageKey);
