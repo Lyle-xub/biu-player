@@ -192,6 +192,43 @@ function parseLrc(lrc) {
   }));
 }
 
+function streamUrl(item) {
+  const values = [item?.baseUrl, item?.base_url, item?.url, ...(item?.backupUrl || item?.backup_url || [])];
+  for (const value of values) {
+    if (typeof value !== 'string') continue;
+    const url = value.replace(/^\/\//, 'https://').replace(/^http:/, 'https:');
+    if (/^https:\/\/[^\s/]+(?:[/:?#]|$)/.test(url)) return url;
+  }
+  return null;
+}
+
+function audioAddress(data, quality) {
+  if (!data) return null;
+  if (quality >= 2 && data.dash?.flac?.display !== false) {
+    const lossless = streamUrl(data.dash?.flac?.audio);
+    if (lossless) return lossless;
+  }
+  const audios = (Array.isArray(data.dash?.audio) ? data.dash.audio : [])
+    .filter(item => streamUrl(item)).sort((a, b) => Number(b.bandwidth || 0) - Number(a.bandwidth || 0));
+  const audio = quality === 0 ? audios[audios.length - 1] : audios[0];
+  return streamUrl(audio) || streamUrl(data.durl?.[0]);
+}
+
+async function resolvePlayResponse(query, select) {
+  let failure;
+  for (const signed of [true, false]) {
+    try {
+      const data = await jget('https://api.bilibili.com/x/player/' + (signed ? 'wbi/' : '') + 'playurl?' + query,
+        signed ? { wbi: true } : undefined);
+      const result = select(data);
+      // Bilibili can return code=0 with only v_voucher and no streams.
+      if (result) return result;
+      failure = new Error('播放接口未返回可用媒体，请稍后重试');
+    } catch (error) { failure = error; }
+  }
+  throw failure || new Error('无法获取播放地址');
+}
+
 async function videoManifest(bvid, cid, force = false) {
   const key = `${bvid}:${cid}`;
   // force：签名流地址可能已过期，必须放弃缓存重新拉取
@@ -201,11 +238,7 @@ async function videoManifest(bvid, cid, force = false) {
   const promise = (async () => {
     // DASH 才能稳定取得 1080P 及以上视频；4048 = DASH + 4K + 杜比视界 + 8K + AV1。
     const q = `bvid=${encodeURIComponent(bvid)}&cid=${cid}&qn=127&fnver=0&fnval=4048&fourk=1`;
-    try {
-      return await jget('https://api.bilibili.com/x/player/wbi/playurl?' + q, { wbi: true });
-    } catch (error) {
-      return jget('https://api.bilibili.com/x/player/playurl?' + q);
-    }
+    return resolvePlayResponse(q, data => data && availableVideoQualities(data).length ? data : null);
   })();
   videoManifestCache.set(key, { time: Date.now(), promise });
   promise.catch(() => videoManifestCache.delete(key));
@@ -213,7 +246,7 @@ async function videoManifest(bvid, cid, force = false) {
 }
 
 function playableDashVideos(data) {
-  const videos = data && data.dash && Array.isArray(data.dash.video) ? data.dash.video : [];
+  const videos = (data && data.dash && Array.isArray(data.dash.video) ? data.dash.video : []).filter(item => streamUrl(item));
   // Chromium/Electron 对 AVC/H.264 最稳定；避免误选 HEVC/AV1 后报像素格式不支持。
   const avc = videos.filter((item) => Number(item.codecid) === 7 || /^avc1/i.test(item.codecs || ''));
   if (avc.length) return avc;
@@ -992,31 +1025,7 @@ const api = {
   async playUrl(bvid, cid, quality = 1) {
     if (!hasBridge) return null;
     const q = `bvid=${encodeURIComponent(bvid)}&cid=${cid}&fnval=16&fourk=1`;
-    let data;
-    try {
-      data = await jget('https://api.bilibili.com/x/player/wbi/playurl?' + q, { wbi: true });
-    } catch (e) {
-      try {
-        data = await jget('https://api.bilibili.com/x/player/playurl?' + q);
-      } catch (e2) {
-        data = await jget('https://api.bilibili.com/x/web-interface/playurl?' + q);
-      }
-    }
-    const dash = data.dash;
-    if (dash) {
-      // 无损：flac 通道（display=false 多为无权限，退回最高码率）
-      if (quality >= 2 && dash.flac && dash.flac.audio && dash.flac.display !== false) {
-        const f = dash.flac.audio;
-        return f.baseUrl || f.base_url;
-      }
-      if (dash.audio && dash.audio.length) {
-        const audios = [...dash.audio].sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0));
-        const pick = quality === 0 ? audios[audios.length - 1] : audios[0];
-        return pick.baseUrl || pick.base_url;
-      }
-    }
-    if (data.durl && data.durl.length) return data.durl[0].url;
-    throw new Error('无可用播放地址');
+    return resolvePlayResponse(q, data => audioAddress(data, quality));
   },
 
   // 返回当前账号、当前稿件真正拿得到且具有视频流的清晰度档位。
@@ -1045,7 +1054,7 @@ const api = {
     const item = candidates[0];
     if (!item) throw new Error('所选清晰度没有可播放的视频轨');
     return {
-      url: item.baseUrl || item.base_url,
+      url: streamUrl(item),
       backups: item.backup_url || item.backupUrl || [],
       quality: selectedQuality,
       label: (qualities.find((entry) => entry.quality === selectedQuality) || {}).label,
