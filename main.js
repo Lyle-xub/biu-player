@@ -45,7 +45,9 @@ function updateCloudBackground(status) {
   if(keepCloudRunning && !cloudTray) {
     const icon=nativeImage.createFromPath(path.join(__dirname,'renderer/assets/icon.png')).resize({width:18,height:18});
     cloudTray=new Tray(icon);
-    cloudTray.setToolTip('Biu Player · 云同步后台运行');
+    // macOS can leave the native status-item tooltip visible after the pointer
+    // moves away. The context menu already identifies the app and its actions.
+    if(process.platform!=='darwin')cloudTray.setToolTip('Biu Player · 云同步后台运行');
     cloudTray.setContextMenu(Menu.buildFromTemplate([
       {label:'打开 Biu Player',click:showMainWindow},
       {type:'separator'},
