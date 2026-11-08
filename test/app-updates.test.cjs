@@ -57,3 +57,44 @@ test('automatic update work waits for recommendation requests', async () => {
     assert.equal(downloads, 1);
   } finally { app.emit('will-quit'); }
 });
+
+test('missing packaged update configuration is recovered outside the signed bundle, including cache settings', t => {
+  const fs = require('node:fs'), path = require('node:path'), os = require('node:os');
+  const { ensureUpdateConfiguration } = require('../app-updates');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'biu-update-config-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const resourcesPath = path.join(directory, 'signed-resources'), userData = path.join(directory, 'user-data');
+  fs.mkdirSync(resourcesPath);
+  const app = { isPackaged: true, getPath: name => { assert.equal(name, 'userData'); return userData; } };
+  let assigned = 0, config;
+  const updater = { set updateConfigPath(value) { assigned++; config = value; } };
+  ensureUpdateConfiguration({ app, updater, resourcesPath });
+  assert.ok(config.startsWith(userData));
+  assert.equal(fs.existsSync(path.join(resourcesPath, 'app-update.yml')), false, 'do not invalidate the app signature');
+  const raw = fs.readFileSync(config, 'utf8');
+  assert.match(raw, /provider: github/); assert.match(raw, /owner: Lyle-xub/);
+  assert.match(raw, /repo: biu-player/); assert.match(raw, /updaterCacheDirName: biu-player-updater/);
+  ensureUpdateConfiguration({ app, updater, resourcesPath }); assert.equal(assigned, 1);
+  fs.unlinkSync(config); ensureUpdateConfiguration({ app, updater, resourcesPath });
+  assert.equal(fs.readFileSync(config, 'utf8'), raw);
+  fs.writeFileSync(path.join(resourcesPath, 'app-update.yml'), 'bundled');
+  ensureUpdateConfiguration({ app, updater, resourcesPath }); assert.equal(assigned, 1);
+  assert.equal(fs.readFileSync(path.join(resourcesPath, 'app-update.yml'), 'utf8'), 'bundled');
+});
+
+test('update preparation failures and missing platform metadata are not reported as generic network failures', async () => {
+  const app = Object.assign(new EventEmitter(), { isPackaged: true, getVersion: () => '0.6.9' });
+  let checks = 0, failure = Object.assign(new Error('missing config'), { code: 'ENOENT' });
+  const updater = Object.assign(new EventEmitter(), { async checkForUpdates() { checks++; } });
+  const manager = createAppUpdates({ app, updater, platform: 'darwin', prepare() { if (failure) throw failure; },
+    read: () => ({ autoDownload: false }), write() {}, notify() {}, beforeInstall() {} });
+  try {
+    await manager.check(true); assert.equal(checks, 0);
+    assert.equal(manager.status().errorCode, 'ENOENT'); assert.match(manager.status().message, /配置缺失/);
+    failure = null; await manager.check(true); assert.equal(checks, 1); assert.equal(manager.status().errorCode, '');
+    updater.emit('error', { code: 'ERR_UPDATER_CHANNEL_FILE_NOT_FOUND' });
+    assert.match(manager.status().message, /当前平台/);
+    updater.emit('error', { code: 'ERR_UPDATER_ZIP_FILE_NOT_FOUND' });
+    assert.match(manager.status().message, /Mac 架构/);
+  } finally { app.emit('will-quit'); }
+});

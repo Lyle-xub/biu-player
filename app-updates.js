@@ -1,6 +1,28 @@
 const INTERVAL = 6 * 60 * 60 * 1000;
+const fs = require('node:fs');
+const path = require('node:path');
+const recoveredConfig = new WeakMap();
+const OFFICIAL_CONFIG = 'provider: github\nowner: Lyle-xub\nrepo: biu-player\nupdaterCacheDirName: biu-player-updater\n';
 
-function createAppUpdates({ app, updater, read, write, notify, beforeInstall, platform = process.platform }) {
+function ensureUpdateConfiguration({ app, updater, resourcesPath = process.resourcesPath }) {
+  if (!app.isPackaged) return;
+  const bundled = path.join(resourcesPath, 'app-update.yml');
+  if (fs.existsSync(bundled)) return;
+  // Old locally packaged builds omitted this file. Recover outside the signed
+  // app bundle so both discovery and the download cache have a valid config.
+  const directory = path.join(app.getPath('userData'), 'updates');
+  const file = path.join(directory, 'app-update.yml');
+  fs.mkdirSync(directory, { recursive: true });
+  if (!fs.existsSync(file) || fs.readFileSync(file, 'utf8') !== OFFICIAL_CONFIG) {
+    fs.writeFileSync(file, OFFICIAL_CONFIG, { mode: 0o600 });
+  }
+  if (recoveredConfig.get(updater) !== file) {
+    updater.updateConfigPath = file;
+    recoveredConfig.set(updater, file);
+  }
+}
+
+function createAppUpdates({ app, updater, read, write, notify, beforeInstall, prepare = () => {}, platform = process.platform }) {
   const saved = read() || {};
   let state = { currentVersion: app.getVersion(), enabled: saved.enabled !== false,
     autoDownload: saved.autoDownload !== false, phase: 'idle', version: '', progress: 0,
@@ -8,7 +30,11 @@ function createAppUpdates({ app, updater, read, write, notify, beforeInstall, pl
   let checking, downloading, attemptedAt = 0, recommendationRequests = 0;
   let pendingCheck = false, pendingDownload = false;
   const emit = patch => { state = { ...state, ...patch }; notify({ ...state }); return { ...state }; };
-  const fail = () => emit({ phase: 'error', message: '更新暂时不可用，请检查网络后重试' });
+  const fail = error => emit({ phase: 'error', errorCode: error?.code || '', message:
+    error?.code === 'ENOENT' ? '更新配置缺失，请安装完整的官方安装包'
+    : error?.code === 'ERR_UPDATER_CHANNEL_FILE_NOT_FOUND' ? '最新发布暂未提供当前平台的更新文件，请稍后重试'
+    : error?.code === 'ERR_UPDATER_ZIP_FILE_NOT_FOUND' ? '最新发布没有适合此 Mac 架构的更新包'
+    : '更新暂时不可用，请检查网络后重试' });
   updater.autoDownload = false;
   updater.autoInstallOnAppQuit = state.autoDownload;
   updater.allowPrerelease = false;
@@ -32,8 +58,9 @@ function createAppUpdates({ app, updater, read, write, notify, beforeInstall, pl
     if (!manual && (!state.enabled || Date.now() - attemptedAt < INTERVAL)) return state;
     pendingCheck = false;
     attemptedAt = Date.now();
-    emit({ phase: 'checking', message: '正在检查更新' });
-    checking = updater.checkForUpdates().then(() => emit({ checkedAt: Date.now() })).catch(fail).finally(() => { checking = null; });
+    emit({ phase: 'checking', errorCode: '', message: '正在检查更新' });
+    checking = Promise.resolve().then(() => { prepare(); return updater.checkForUpdates(); })
+      .then(() => emit({ checkedAt: Date.now() })).catch(fail).finally(() => { checking = null; });
     await checking;
     return state;
   }
@@ -83,4 +110,4 @@ function createAppUpdates({ app, updater, read, write, notify, beforeInstall, pl
     },
   };
 }
-module.exports = { createAppUpdates };
+module.exports = { createAppUpdates, ensureUpdateConfiguration };

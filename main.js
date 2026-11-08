@@ -499,6 +499,7 @@ app.whenReady().then(() => {
 
   const updates = require('./app-updates').createAppUpdates({
     app, updater: require('electron-updater').autoUpdater,
+    prepare: () => require('./app-updates').ensureUpdateConfiguration({ app, updater: require('electron-updater').autoUpdater }),
     read: () => readBiuStore()['biu-app-updates'],
     write: value => {
       readBiuStore()['biu-app-updates'] = value;
