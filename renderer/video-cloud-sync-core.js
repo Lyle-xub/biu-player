@@ -2,6 +2,8 @@
 module.exports = function ({ fs, path, crypto, Buffer, compute }) {
 const { normalize, reconcile, libraryCount } = require('./library-sync');
 const INTERVALS = [3,6,12,24];
+const HOUR = 3600000;
+const VERIFY_RETRY = 45000;
 const fingerprint = v => crypto.createHash('sha256').update(JSON.stringify(normalize(v))).digest('hex');
 async function atomic(file, raw) {
   fs.mkdirSync(path.dirname(file), {recursive:true,mode:0o700});
@@ -29,6 +31,10 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
       throw new Error('云同步配置读取失败，请重试；原配置与密钥已保留', { cause });
     }
     if (!value || !INTERVALS.includes(value.intervalHours) || !value.device || !value.heads || !value.slots) throw corrupt();
+    // Older restores updated lastSync without moving the check deadline.
+    if (!value.pending && value.lastSync > 0 && !(value.nextRun > value.lastSync)) {
+      value.nextRun=value.lastSync+value.intervalHours*HOUR;
+    }
     return value;
   }
   let saving = Promise.resolve();
@@ -39,6 +45,10 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
     saving = operation;
     return operation;
   };
+  function recordSuccess(delay = config.intervalHours*HOUR) {
+    config.lastSync=now();
+    config.nextRun=config.lastSync+delay;
+  }
   function trimVideoCache() {
     const root=path.join(directory,scope,'snapshots');
     try {
@@ -79,8 +89,8 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
   }
   function schedule() {
     clearTimeout(timer);
-    if (paused || !scope || !config?.enabled) return;
-    const delay=config.pending ? 45000 : Math.max(1000,(config.nextRun || now())-now());
+    if (paused || running || !scope || !config?.enabled) return;
+    const delay=Math.max(1000,(config.nextRun || 0)-now());
     timer=setTimeout(()=>run().catch(()=>{}),Math.min(delay,2147483647));timer.unref?.();
   }
   async function ensureAccount(expected) {
@@ -118,7 +128,10 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
     if (patch.enabled===false) {stop();if(running)await running.catch(()=>{});}
     const previous=await parse(await stringify(config));
     try {
-    if ('intervalHours' in patch) {config.intervalHours=Number(patch.intervalHours);config.nextRun=config.lastSync?config.lastSync+config.intervalHours*3600000:now();}
+    if ('intervalHours' in patch) {
+      config.intervalHours=Number(patch.intervalHours);
+      if(!config.pending)config.nextRun=config.lastSync?config.lastSync+config.intervalHours*HOUR:now();
+    }
     if (typeof patch.enabled==='boolean') config.enabled=patch.enabled;
     if (config.enabled) paused=false;
     if (config.enabled && !config.secret) {
@@ -174,14 +187,14 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
       if (signal.aborted) throw new Error('同步已停止');
       config.archive=pending.archive;config.base=restored;config.baseSequence=pending.archive.meta.sequence;remember(pending.archive.meta.snapshotId,restored);
       config.activeBvid=pending.archive.bvid;config.lastPublishedHash=pending.hash;config.lastPublishedSnapshot=pending.archive.meta.snapshotId;config.baseSnapshotId=pending.archive.meta.snapshotId;
-      config.pending=null;config.lastSync=now();config.nextRun=now()+config.intervalHours*3600000;
+      config.pending=null;recordSuccess();
       await save();emit({type:'complete',message:'云端 360p / 480p 均验证通过，已保留上一快照分 P'});return true;
     } catch(e) {
       if(signal.aborted)throw e;
       // Keep the previous verified slot; never mark an unverified candidate as synced.
-      emit({type:'waiting',message:'等待平台转码或审核；本地数据和上一版本已保留'});
+      config.nextRun=now()+VERIFY_RETRY;
       error=now()-pending.createdAt>24*3600000?'候选稿件超过一天仍未验证，请到创作中心检查审核结果':'';
-      await save();return false;
+      await save();emit({type:'waiting',message:'等待平台转码或审核；本地数据和上一版本已保留'});return false;
     }
   }
   async function work(readOnly,signal,ownScope,force) {
@@ -215,23 +228,28 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
           if(signal.aborted || scope!==ownScope)throw new Error('同步已停止');
           await writeLibrary(scope,filtered,base);
           config.base=remote;config.baseSnapshotId=part.snapshotId;config.baseSequence=part.sequence;remember(part.snapshotId,remote);
-          config.activeBvid=archive.bvid;config.lastSync=now();await save();
+          config.activeBvid=archive.bvid;
+          recordSuccess(part.snapshotId===archive.meta.snapshotId ? config.intervalHours*HOUR : 60000);
+          await save();
           emit({type:'merge',message:`已合并 ${merged.likes.length} 首喜欢、${libraryCount(merged)} 首音乐库、${merged.playlists.length} 个歌单`});break;
         }
         if(!remote)throw new Error('云端两个快照都无法恢复，已保留本地数据');
         if(config.baseSnapshotId!==archive.meta.snapshotId) {
           emit({type:'waiting',message:'最新分 P 仍在转码审核，本次只读取上一快照，不覆盖待审核更新'});
-          config.nextRun=now()+60000;await save();return;
+          return;
         }
       }
     }
     if(readOnly) {
       if(!decoded) {
         const latest=archives.sort((a,b)=>b.meta.sequence-a.meta.sequence)[0];
-        if(latest)await decodeArchive(latest,signal);
+        if(latest){
+          await decodeArchive(latest,signal);
+          if(signal.aborted || scope!==ownScope)throw new Error('同步已停止');
+          recordSuccess();await save();
+        }
         else emit({type:'idle',message:'尚无云端视频，开启自动同步后会创建'});
       }
-      if (archive) { config.lastSync=now();await save(); }
       return;
     }
     await waitForForeground(signal);
@@ -240,7 +258,7 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
     const library=await normalizeData({...local,...(!syncDiscovery && config.base?.discoveryRecommendation
       ? {discoveryRecommendation:config.base.discoveryRecommendation} : {})}),hash=await digest(library);
     if(signal.aborted || scope!==ownScope)throw new Error('同步已停止');
-    if(!force && archive && (hash===config.lastPublishedHash && archive.meta.snapshotId===config.lastPublishedSnapshot || config.base && hash===await digest(config.base))){config.lastSync=now();config.nextRun=now()+config.intervalHours*3600000;await save();emit({type:'idle',message:'音乐库没有变化，无需上传'});return;}
+    if(!force && archive && (hash===config.lastPublishedHash && archive.meta.snapshotId===config.lastPublishedSnapshot || config.base && hash===await digest(config.base))){recordSuccess();await save();emit({type:'idle',message:'音乐库没有变化，无需上传'});return;}
     if(!archive && config.imported)throw new Error('等待原设备创建同步稿件；导入密钥的设备不会另建稿件');
     const slot=archive?.meta.slot==='A'?'B':'A';
     const folder=path.join(directory,scope,'snapshots',crypto.randomUUID());
@@ -253,18 +271,19 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
     await waitForForeground(signal);
     const submitted=await api.submit({file:path.join(folder,'video.mp4'),meta,key:secret,existing:archive,signal,emit});
     // Persist submission before polling; restart resumes verification, never resubmits it.
-    config.sequence=meta.sequence;config.pending={archive:submitted,hash,folder,createdAt:now()};config.nextRun=now()+45000;await save();
+    config.sequence=meta.sequence;config.pending={archive:submitted,hash,folder,createdAt:now()};config.nextRun=config.pending.createdAt+VERIFY_RETRY;await save();
     emit({type:'submitted',message:`稿件已提交 ${submitted.bvid}，等待转码与回读验证`});
     await checkPending(signal);
   }
   function run(readOnly=false,force=false) {
     if(running)return running;
     if(!scope || !config?.enabled && !readOnly)return Promise.reject(new Error('视频云同步未开启'));
+    clearTimeout(timer);
     paused=false;
     controller=new AbortController();const signal=controller.signal,ownScope=scope;
     error='';progress={};decoded='';
     running=Promise.resolve().then(async()=>{await waitForForeground(signal);if(signal.aborted || scope!==ownScope)throw new Error('同步已取消');return work(readOnly,signal,ownScope,force);}).catch(async e=>{
-      if(!signal.aborted){error=e.message;emit({type:'error',message:error});if(config){config.nextRun=now()+15*60000;await save();}}
+      if(!signal.aborted){error=e.message;if(config){config.nextRun=now()+15*60000;await save();}emit({type:'error',message:error});}
       throw e;
     }).finally(()=>{trimVideoCache();running=null;controller=null;publish();schedule();});
     publish();return running;

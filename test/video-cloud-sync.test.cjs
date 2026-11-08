@@ -68,6 +68,32 @@ test('pending verification survives restart and never resubmits',async t=>{
   await a.service.setAccount('');await a.service.setAccount('123');b.ready=true;await a.service.run();
   assert.equal(b.count,1);assert.equal(a.service.status().pending,false);assert.ok(a.service.status().lastSync);
 });
+test('pending verification publishes its retry deadline and resumes at that deadline after restart', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const b = backend(); b.ready = false;
+  let clock = Date.UTC(2026, 10, 9);
+  const a = device(t, b, lib([1]), true, () => {}, () => clock);
+  await a.service.setAccount('123'); await a.service.configure({ enabled: true }); await a.service.run();
+  const first = a.service.status().nextRun;
+  assert.equal(first, clock + 45000);
+  clock += 5000; t.mock.timers.tick(5000); await a.service.run();
+  const deadline = a.service.status().nextRun;
+  assert.equal(deadline, first + 5000, 'another unsuccessful verification schedules a new retry');
+  await a.service.configure({ intervalHours: 6 });
+  assert.equal(a.service.status().nextRun, deadline, 'regular interval changes must preserve a verification retry');
+  clock += 20000; t.mock.timers.tick(20000);
+  await a.service.setAccount(''); await a.service.setAccount('123');
+  assert.equal(a.service.status().nextRun, deadline);
+  b.ready = true;
+  clock += 24999; t.mock.timers.tick(24999);
+  assert.equal(a.service.status().busy, false);
+  clock++; t.mock.timers.tick(1);
+  assert.equal(a.service.status().busy, true, 'timer uses the same deadline the UI shows');
+  await a.service.run();
+  assert.equal(b.count, 1);
+  assert.equal(a.service.status().pending, false);
+  assert.equal(a.service.status().nextRun, clock + 6*3600000);
+});
 test('cloud snapshots carry discovery profiles across devices and detect discovery-only edits', async t => {
   const R = require('../renderer/recommendation-profile');
   const recommendation = R.normalize({ profiles: [{ id: 'p', name: '音乐', tags: ['钢琴'] }], activeId: 'p' });
@@ -286,21 +312,31 @@ test('successful read-only restores persist the local completion time, unchanged
   let clock = Date.UTC(2026, 10, 7);
   const receiver = device(t, b, lib([2]), true, () => {}, () => clock);
   await receiver.service.setAccount('123'); await receiver.service.importRecovery(source.service.exportRecovery());
+  await receiver.service.configure({ enabled: true, intervalHours: 6 });
   await receiver.service.run(true);
   const file = path.join(receiver.directory, '123/state.json');
   assert.equal(receiver.service.status().lastSync, clock);
   assert.equal(JSON.parse(fs.readFileSync(file)).lastSync, clock);
+  assert.equal(receiver.service.status().nextRun, clock + 6*3600000);
   clock += 3600000; await receiver.service.run(true);
   assert.equal(receiver.service.status().lastSync, clock);
   assert.equal(JSON.parse(fs.readFileSync(file)).lastSync, clock);
+  assert.equal(receiver.service.status().nextRun, clock + 6*3600000);
+  assert.equal(JSON.parse(fs.readFileSync(file)).nextRun, clock + 6*3600000);
   assert.equal(b.count, 1); assert.equal(b.edits, 0, 'read-only checks must not upload');
   const successful = clock; clock += 3600000;
   b.runtime.run = async () => { throw Error('decode failed'); };
   await assert.rejects(receiver.service.run(true), /decode failed/);
   assert.equal(receiver.service.status().lastSync, successful);
   assert.equal(JSON.parse(fs.readFileSync(file)).lastSync, successful);
+  assert.equal(receiver.service.status().nextRun, clock + 15*60000);
   await receiver.service.setAccount(''); await receiver.service.setAccount('123');
   assert.equal(receiver.service.status().lastSync, successful);
+  assert.equal(receiver.service.status().nextRun, clock + 15*60000, 'valid retry deadlines survive reload');
+  await receiver.service.setAccount('');
+  fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file)), nextRun: successful - 1000 }));
+  await receiver.service.setAccount('123');
+  assert.equal(receiver.service.status().nextRun, successful + 6*3600000, 'old stale deadlines are corrected on load');
 });
 
 test('a verified previous snapshot counts as a successful restore while the newest is unreadable', async t => {
@@ -317,5 +353,6 @@ test('a verified previous snapshot counts as a successful restore while the newe
   await receiver.service.run(true);
   assert.deepEqual(receiver.library.likes.map(x => x.bvid), ['BV1']);
   assert.equal(receiver.service.status().lastSync, now);
+  assert.equal(receiver.service.status().nextRun, now + 60000);
   assert.equal(JSON.parse(fs.readFileSync(path.join(receiver.directory, '123/state.json'))).lastSync, now);
 });
