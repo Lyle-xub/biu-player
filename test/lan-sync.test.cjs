@@ -124,6 +124,9 @@ test('automatic server advertises only signed-in enabled accounts, isolates requ
   assert.equal(saved.playlists[0].cover, cover);
   const old = { ...advertised, txt: { ...advertised.txt } };
   await service.configure('456', true);
+  assert.notEqual(advertised.name, old.name, 'new credentials must use a fresh discovery instance');
+  assert.notEqual(advertised.host, old.host);
+  assert.equal(advertised.txt.device, old.txt.device, 'baselines still belong to the same device');
   assert.equal((await request('status', null, { Authorization: 'Bearer ' + old.txt.token })).status, 401);
   await service.configure('456', false);
   assert.equal(service.status().active, false);
@@ -178,8 +181,11 @@ test('LAN selection ignores private TUN addresses and VPN toggles do not rotate 
   const { EventEmitter } = require('node:events');
   const iface = (address) => [{ address, netmask: '255.255.255.0', family: 'IPv4', internal: false }];
   const networks = { utun0: iface('10.0.0.1'), tun0: iface('198.18.0.1'), en0: iface('192.168.1.29'),
-    'Clash VPN': iface('172.20.0.1'), en1: iface('192.168.2.2'), lo0: [{ ...iface('127.0.0.1')[0], internal: true }] };
+    'Clash VPN': iface('172.20.0.1'), 'vEthernet (WSL (Hyper-V firewall))': iface('172.29.128.1'),
+    en1: iface('192.168.2.2'), lo0: [{ ...iface('127.0.0.1')[0], internal: true }] };
   assert.deepEqual(lanInterfaces(networks).map((n) => n.address), ['192.168.1.29', '192.168.2.2']);
+  assert.deepEqual(lanInterfaces({ Bluetooth: iface('169.254.1.2'), WLAN: iface('192.168.1.50') })
+    .map(n => n.address), ['192.168.1.50', '169.254.1.2']);
   let published, count = 0;
   const sync = createLanSync({ host: '127.0.0.1', interfaces: () => lanInterfaces(networks),
     readLibrary: () => library(), writeLibrary() {}, publish: (value) => { published = value; count++; return () => {}; } });
@@ -212,4 +218,26 @@ test('uploaded covers propagate through sync and a later reset removes the embed
   const reset = structuredClone(synced);
   reset.playlists[0].cover = null;
   assert.equal(reconcile(synced, synced, reset).playlists[0].cover, undefined);
+});
+
+test('Bonjour flushes unique endpoint records and retains only advertised LAN addresses', () => {
+  const { advertiseBonjour } = require('../lan-sync'), { EventEmitter } = require('node:events');
+  let service, destroyed = 0;
+  class Bonjour {
+    constructor(options) { assert.equal(options.interface, '192.168.1.50'); assert.equal(options.bind, '0.0.0.0'); }
+    publish(options) {
+      assert.equal(options.disableIPv6, true);
+      service = new EventEmitter();
+      service.records = () => [{ type: 'PTR', data: 'instance' }, { type: 'SRV', data: { port: 1234 } },
+        { type: 'TXT', data: 'credentials' }, { type: 'A', data: '192.168.1.50' }, { type: 'A', data: '172.29.128.1' }];
+      service.stop = done => done(); return service;
+    }
+    destroy() { destroyed++; }
+  }
+  const stop = advertiseBonjour({ name: 'test', port: 1234, txt: { addresses: '192.168.1.50' } }, () => {}, Bonjour);
+  const records = service.records();
+  assert.equal(records.length, 4);
+  assert.equal(records[0].flush, undefined, 'shared PTR records must not evict other devices');
+  assert.ok(records.slice(1).every(record => record.flush === true));
+  stop(); assert.equal(destroyed, 1);
 });

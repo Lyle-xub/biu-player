@@ -15,7 +15,8 @@ function lanInterfaces(networks = os.networkInterfaces()) {
       && (entry.family === 'IPv4' || entry.family === 4) && privateIPv4(entry.address)
       && !entry.address.startsWith('127.'))
       .map((entry) => ({ name, address: entry.address, netmask: entry.netmask }));
-  }).sort((a, b) => a.name.localeCompare(b.name) || a.address.localeCompare(b.address));
+  }).sort((a, b) => Number(a.address.startsWith('169.254.')) - Number(b.address.startsWith('169.254.'))
+    || a.name.localeCompare(b.name) || a.address.localeCompare(b.address));
 }
 
 function advertiseNative(options, onError, launch = spawn) {
@@ -34,13 +35,19 @@ function advertiseNative(options, onError, launch = spawn) {
 
 function advertise(options, onError) {
   if (process.platform === 'darwin') return advertiseNative(options, onError);
-  const { Bonjour } = require('bonjour-service');
+  return advertiseBonjour(options, onError);
+}
+
+function advertiseBonjour(options, onError, Bonjour = require('bonjour-service').Bonjour) {
   const addresses = options.txt.addresses.split(',').filter(Boolean);
   // Bind the receive socket to ANY, but explicitly select a LAN multicast interface.
   const bonjour = new Bonjour({ interface: addresses[0], bind: '0.0.0.0' }, onError);
   const service = bonjour.publish({ ...options, type: 'biu-sync', protocol: 'tcp', disableIPv6: true });
   const records = service.records.bind(service);
-  service.records = () => records().filter((record) => record.type !== 'A' || addresses.includes(record.data));
+  // SRV/TXT/A records belong to one instance. Flush replaced values instead of
+  // letting resolvers combine an old token with the new port until TTL expiry.
+  service.records = () => records().filter((record) => record.type !== 'A' || addresses.includes(record.data))
+    .map(record => ['SRV', 'TXT', 'A', 'AAAA'].includes(record.type) ? { ...record, flush: true } : record);
   service.on('error', onError);
   return () => service.stop(() => bonjour.destroy());
 }
@@ -161,7 +168,10 @@ function createLanSync({ readLibrary, writeLibrary, cloudKeyStatus, exchangeClou
       });
       if (run !== generation) { nextServer.close(); return status(); }
       session = current;
-      unpublish = publish({ name: `Biu-${deviceId}`, host: `biu-${deviceId}.local`, port: nextServer.address().port,
+      // Device identity remains in TXT. A new session needs a new DNS instance:
+      // Android NSD may otherwise keep the previous instance's port and token.
+      const instance = `${deviceId}-${crypto.randomBytes(4).toString('hex')}`;
+      unpublish = publish({ name: `Biu-${instance}`, host: `biu-${instance}.local`, port: nextServer.address().port,
         txt: { version: '2', account: digest(`biu-lan:${scope}`), device: deviceId, token: current.token,
           addresses: [...new Set(networks.map((entry) => entry.address))].slice(0, 8).join(',') } }, (e) => {
         if (run === generation) { error = e.message || '局域网发现不可用，将自动重试'; close(); announce(); }
@@ -174,4 +184,4 @@ function createLanSync({ readLibrary, writeLibrary, cloudKeyStatus, exchangeClou
   }
   return { configure, stop, status };
 }
-module.exports = { createLanSync, revision, lanInterfaces, advertiseNative };
+module.exports = { createLanSync, revision, lanInterfaces, advertiseNative, advertiseBonjour };

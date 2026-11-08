@@ -17,9 +17,9 @@ function backend(){
     runtime:{ensure:async()=>{},run:async(req,signal,event)=>{if(signal.aborted)throw Error('aborted');if(req.operation==='encode'){const id=crypto.randomBytes(16).toString('hex');data.set(id,req.library);return {snapshotId:id};}fs.mkdirSync(path.dirname(req.output),{recursive:true});fs.writeFileSync(req.output,JSON.stringify(data.get(req.snapshotId)));event({type:'symbol',symbols:7,needed:7});return {passed:true};}}
   };
 }
-function device(t,b,initial=lib([1]),syncDiscovery=true,waitForForeground=()=>{}) {
+function device(t,b,initial=lib([1]),syncDiscovery=true,waitForForeground=()=>{},now=Date.now) {
   const directory=fs.mkdtempSync(path.join(os.tmpdir(),'biu-cloud-'));let library=normalize(initial),account='123';
-  const service=createVideoCloudSync({syncDiscovery,waitForForeground,directory,api:b.api,runtime:b.runtime,auth:async()=>({isLogin:true,mid:account}),readLibrary:()=>library,writeLibrary:(_,value)=>{library=value;},protect:s=>'protected:'+s,unprotect:s=>s.slice(10)});
+  const service=createVideoCloudSync({now,syncDiscovery,waitForForeground,directory,api:b.api,runtime:b.runtime,auth:async()=>({isLogin:true,mid:account}),readLibrary:()=>library,writeLibrary:(_,value)=>{library=value;},protect:s=>'protected:'+s,unprotect:s=>s.slice(10)});
   t.after(()=>{service.stop();fs.rmSync(directory,{recursive:true,force:true});});
   return {service,directory,get library(){return library;},set library(v){library=normalize(v);},set account(v){account=v;}};
 }
@@ -241,4 +241,81 @@ test('cloud state and decoded snapshots use async I/O and high-rate progress doe
   await service.setAccount(''); await service.setAccount('123');
   assert.ok(reads.some(file => file.endsWith('state.json')));
   assert.equal(service.status().enabled, true, 'atomic async state survives reload');
+});
+
+test('cloud restore uses unsigned playurl when signed success has a voucher or unusable tracks', async () => {
+  for (const signedData of [{ v_voucher: 'challenge' }, { dash: { video: [] } },
+    { dash: { video: [{ id: 16, codecid: 7, baseUrl: 'https://example.com/unsupported' }] } }]) {
+    const calls = [];
+    const api = createBiliVideoApi({ request: async (url, options) => {
+      const u = new URL(url); calls.push({ u, options });
+      if (u.pathname.endsWith('/view')) return Response.json({ code: 0, data: { cid: 1,
+        pages: [{ cid: 1, part: 'old' }, { cid: 2, part: 'snapshot-new' }] } });
+      assert.equal(u.searchParams.get('cid'), '2', 'fallback must stay on the requested snapshot part');
+      if (options.wbi) return Response.json({ code: 0, data: signedData });
+      return Response.json({ code: 0, data: { dash: { video: [
+        { id: 16, codecid: 7, baseUrl: 'https://cdn.bilivideo.com/restore', height: 360 },
+      ] } } });
+    } });
+    assert.equal((await api.streams('BVtest', undefined, 'snapshot-new'))['360p'].cid, 2);
+    assert.deepEqual(calls.slice(1).map(x => x.u.pathname), ['/x/player/wbi/playurl', '/x/player/playurl']);
+    assert.deepEqual(calls.slice(1).map(x => x.options.wbi), [true, false]);
+  }
+});
+
+test('cloud streams reject absent manifests and never retry a cancelled request', async () => {
+  let calls = 0;
+  const controller = new AbortController();
+  const api = createBiliVideoApi({ request: async (url) => {
+    if (url.includes('/view?')) return Response.json({ code: 0, data: { cid: 1 } });
+    calls++;
+    return Response.json({ code: 0, data: { v_voucher: 'challenge' } });
+  } });
+  await assert.rejects(api.streams('BVtest'), /未返回可恢复/); assert.equal(calls, 2);
+  const cancelled = createBiliVideoApi({ request: async (url) => {
+    if (url.includes('/view?')) return Response.json({ code: 0, data: { cid: 1 } });
+    calls++; controller.abort(); throw Error('cancelled');
+  } });
+  calls = 0; await assert.rejects(cancelled.streams('BVtest', controller.signal), /cancelled/);
+  assert.equal(calls, 1);
+});
+
+test('successful read-only restores persist the local completion time, unchanged reads advance it, failures do not', async t => {
+  const b = backend(), source = device(t, b);
+  await source.service.setAccount('123'); await source.service.configure({ enabled: true }); await source.service.run();
+  let clock = Date.UTC(2026, 10, 7);
+  const receiver = device(t, b, lib([2]), true, () => {}, () => clock);
+  await receiver.service.setAccount('123'); await receiver.service.importRecovery(source.service.exportRecovery());
+  await receiver.service.run(true);
+  const file = path.join(receiver.directory, '123/state.json');
+  assert.equal(receiver.service.status().lastSync, clock);
+  assert.equal(JSON.parse(fs.readFileSync(file)).lastSync, clock);
+  clock += 3600000; await receiver.service.run(true);
+  assert.equal(receiver.service.status().lastSync, clock);
+  assert.equal(JSON.parse(fs.readFileSync(file)).lastSync, clock);
+  assert.equal(b.count, 1); assert.equal(b.edits, 0, 'read-only checks must not upload');
+  const successful = clock; clock += 3600000;
+  b.runtime.run = async () => { throw Error('decode failed'); };
+  await assert.rejects(receiver.service.run(true), /decode failed/);
+  assert.equal(receiver.service.status().lastSync, successful);
+  assert.equal(JSON.parse(fs.readFileSync(file)).lastSync, successful);
+  await receiver.service.setAccount(''); await receiver.service.setAccount('123');
+  assert.equal(receiver.service.status().lastSync, successful);
+});
+
+test('a verified previous snapshot counts as a successful restore while the newest is unreadable', async t => {
+  const b = backend(), source = device(t, b);
+  await source.service.setAccount('123'); await source.service.configure({ enabled: true }); await source.service.run();
+  source.library = lib([1, 3]); await source.service.run();
+  const latest = b.archive.meta.snapshotId, decode = b.runtime.run;
+  b.runtime.run = async (req, ...args) => {
+    if (req.snapshotId === latest) throw Error('not ready');
+    return decode(req, ...args);
+  };
+  const now = Date.UTC(2026, 10, 7), receiver = device(t, b, lib([]), true, () => {}, () => now);
+  await receiver.service.setAccount('123'); await receiver.service.importRecovery(source.service.exportRecovery());
+  await receiver.service.run(true);
+  assert.deepEqual(receiver.library.likes.map(x => x.bvid), ['BV1']);
+  assert.equal(receiver.service.status().lastSync, now);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(receiver.directory, '123/state.json'))).lastSync, now);
 });

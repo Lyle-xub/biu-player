@@ -3230,6 +3230,8 @@ test('mobile LAN provider publishes a native receiver only for the foreground ac
   assert.equal(servers[0].listening, false); assert.equal(unpublished.length, 1);
   await act(async () => onAppState('active'));
   await settle(() => announcements.length === 2);
+  assert.notEqual(announcements[0].name, announcements[1].name, 'new receivers must not reuse stale DNS instance records');
+  assert.equal(announcements[0].txt.device, announcements[1].txt.device);
   assert.notEqual(announcements[0].txt.token, announcements[1].txt.token);
   account = { isLogin: true, mid: 456 };
   await act(async () => tree.update(component()));
@@ -6698,4 +6700,32 @@ test('cover and lyric titles share the part menu and favorite the selected CID',
   assert.equal(saved.title, '第二首');
   assert.equal(saved.page, 2);
   await act(async () => tree.unmount());
+});
+
+test('idle LAN revision checks update the local success time without reapplying the library', async t => {
+  const { EventEmitter } = require('node:events');
+  const load = loader(), { startAutoSync, libraryRevision } = load('src/store/lanSync.js');
+  const library = require('../renderer/library-sync').normalize({ version: 1, likes: [{ bvid: 'BV1', title: 'song' }], playlists: [] });
+  const revision = await libraryRevision(library), times = [], storage = new Map();
+  let applied = 0, exchanges = 0;
+  const original = global.fetch; t.after(() => { global.fetch = original; });
+  global.fetch = async (url) => {
+    const data = { version: 2, account: '123', deviceId: 'desktop-test', revision };
+    if (url.endsWith('/sync')) { exchanges++; Object.assign(data, { library, receipt: 'receipt' }); }
+    return { ok: true, text: async () => JSON.stringify(data) };
+  };
+  class Discovery extends EventEmitter { scan() {} stop() {} removeDeviceListeners() {} }
+  const discovery = new Discovery();
+  const stop = startAutoSync({ scope: '123', clientId: 'phone-test', discovery, interval: 25,
+    storage: { getItem: async key => storage.get(key), setItem: async (key, value) => storage.set(key, value) },
+    getLibrary: async () => library, applyLibrary: async () => { applied++; },
+    onStatus: value => { if (value.connected) times.push(value.lastSync); } });
+  t.after(stop);
+  discovery.emit('resolved', { name: 'desktop', port: 1234, addresses: ['192.168.1.50'],
+    txt: { version: '2', account: fromMobile('js-md5')('biu-lan:123'), device: 'desktop-test', token: 'a'.repeat(64) } });
+  const deadline = Date.now() + 2000;
+  while (times.length < 2 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.ok(times.length >= 2);
+  assert.ok(times[0] > 0 && times[1] > times[0], 'successful unchanged checks must not retain an old or absent timestamp');
+  assert.equal(applied, 1); assert.equal(exchanges, 1);
 });

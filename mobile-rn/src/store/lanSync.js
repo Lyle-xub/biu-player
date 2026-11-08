@@ -129,7 +129,7 @@ export function startAutoSync({ scope, clientId, discovery, implementation = 'DN
             peer.synced = true;
             report({ message: '已同步 · ' + incoming.likes.length + ' 首喜欢 · ' + libraryCount(incoming) + ' 首音乐库 · ' + incoming.playlists.length + ' 个歌单 · ' + profileCount(incoming) + ' 份画像',
               connected: true, lastSync: Date.now() });
-          } else report({ connected: true, message: '已同步 · ' + base.likes.length + ' 首喜欢 · ' + libraryCount(base) + ' 首音乐库 · ' + base.playlists.length + ' 个歌单 · ' + profileCount(base) + ' 份画像' });
+          } else report({ connected: true, lastSync: Date.now(), message: '已同步 · ' + base.likes.length + ' 首喜欢 · ' + libraryCount(base) + ' 首音乐库 · ' + base.playlists.length + ' 个歌单 · ' + profileCount(base) + ' 份画像' });
           connected = true;
         } catch (e) {
           if (peers.get(peer.id) !== peer) continue;

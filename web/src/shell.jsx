@@ -500,8 +500,9 @@ export default function Shell() {
   return (
     <>
       <BackdropLayers />
-      <WinControls />
       <Topbar />
+      {/* Native drag exclusions must follow the header's drag region. */}
+      <WinControls />
       <ViewLibrary />
       <section className="view view-daily" id="dailyPage" aria-label="每日推荐" />
       <ViewFav />

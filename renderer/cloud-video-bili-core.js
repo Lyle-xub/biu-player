@@ -63,15 +63,26 @@ function createBiliVideoApi({ request, uploadFetch, csrf, coverFile }) {
     const page = snapshotId ? detail.pages?.find(p => String(p.part).includes(snapshotId)) : detail.pages?.[0];
     const cid = page?.cid || (!snapshotId ? detail.cid : null);
     if (!cid) throw new Error('视频正在转码或审核');
-    const data = await json(`https://api.bilibili.com/x/player/wbi/playurl?bvid=${bvid}&cid=${cid}&qn=80&fnval=4048&fourk=1`, { wbi: true, signal });
-    const video = data.dash?.video || [];
-    const result = {};
-    for (const [name, id] of [['360p',16],['480p',32],['720p',64],['1080p',80]]) {
-      const matches = video.filter(v => Number(v.id) === id && (v.codecid === 7 || /avc/.test(v.codecs || ''))).sort((a,b) => a.bandwidth-b.bandwidth);
-      const selected = matches[0];
-      if (selected) result[name] = { url: cdnUrl(selected.baseUrl || selected.base_url), width: selected.width, height: selected.height, bandwidth: selected.bandwidth, cid };
+    let failure;
+    for (const signed of [true, false]) {
+      try {
+        const data = await json(`https://api.bilibili.com/x/player/${signed ? 'wbi/' : ''}playurl?bvid=${bvid}&cid=${cid}&qn=80&fnval=4048&fourk=1`, { wbi: signed, signal });
+        const video = Array.isArray(data?.dash?.video) ? data.dash.video : [];
+        const result = {};
+        for (const [name, id] of [['360p',16],['480p',32],['720p',64],['1080p',80]]) {
+          const matches = video.filter(v => Number(v.id) === id && (Number(v.codecid) === 7 || /avc/.test(v.codecs || ''))).sort((a,b) => a.bandwidth-b.bandwidth);
+          for (const selected of matches) {
+            let url;
+            try { url = cdnUrl(selected.baseUrl || selected.base_url); } catch { continue; }
+            result[name] = { url, width: selected.width, height: selected.height, bandwidth: selected.bandwidth, cid };
+            break;
+          }
+        }
+        if (Object.keys(result).length) return result;
+        failure = new Error('播放接口未返回可恢复的视频流，请稍后重试');
+      } catch (error) { if (signal?.aborted) throw error; failure = error; }
     }
-    return result;
+    throw failure;
   }
   async function upload(file, signal, emit) {
     const total = fs.statSync(file).size;

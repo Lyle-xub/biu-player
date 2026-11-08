@@ -2114,8 +2114,8 @@ body.panel-settings .modal-mask { display: grid; padding:78px 24px 24px; }
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
-/* 仅最顶部细条用于拖拽；避免整块顶栏吞掉窗口控制按钮的点击。 */
-.topbar { -webkit-app-region: no-drag; }
+/* 顶栏位于拖拽条上方：空白处本身也须可拖拽，交互区域单独排除。 */
+.topbar { -webkit-app-region: drag; }
 .topbar .seg, .topbar .search, .top-right, .nav-back, .brand, .brand .gear { -webkit-app-region: no-drag; }
 .win-controls span { cursor: pointer; -webkit-app-region: no-drag; }
 

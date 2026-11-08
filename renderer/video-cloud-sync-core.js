@@ -215,7 +215,7 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
           if(signal.aborted || scope!==ownScope)throw new Error('同步已停止');
           await writeLibrary(scope,filtered,base);
           config.base=remote;config.baseSnapshotId=part.snapshotId;config.baseSequence=part.sequence;remember(part.snapshotId,remote);
-          config.activeBvid=archive.bvid;await save();
+          config.activeBvid=archive.bvid;config.lastSync=now();await save();
           emit({type:'merge',message:`已合并 ${merged.likes.length} 首喜欢、${libraryCount(merged)} 首音乐库、${merged.playlists.length} 个歌单`});break;
         }
         if(!remote)throw new Error('云端两个快照都无法恢复，已保留本地数据');
@@ -231,6 +231,7 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
         if(latest)await decodeArchive(latest,signal);
         else emit({type:'idle',message:'尚无云端视频，开启自动同步后会创建'});
       }
+      if (archive) { config.lastSync=now();await save(); }
       return;
     }
     await waitForForeground(signal);

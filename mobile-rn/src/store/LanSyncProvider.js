@@ -61,7 +61,9 @@ export function LanSyncProvider({ children }) {
     const serviceDiscovery = new Zeroconf();
     discovery.current = serviceDiscovery;
     const implementation = Platform.OS === 'android' ? 'NSD' : 'DNSSD';
-    const name = `Biu-${clientId}`;
+    // Keep TXT device identity stable, but let NSD discover each new receiver
+    // instead of retaining the preceding foreground session's port/token.
+    const name = `Biu-${clientId}-${Math.random().toString(36).slice(2, 8)}`;
     const getLibrary = (...args) => syncHandlers.current.getSyncLibrary(...args);
     const applyLibrary = (...args) => syncHandlers.current.applySyncLibrary(...args);
     let stopped = false, receiver;
