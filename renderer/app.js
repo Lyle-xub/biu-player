@@ -177,6 +177,8 @@ function setModeUI(on) {
   document.body.classList.toggle('video-on', on);
   document.body.classList.remove('video-pending');
   setModeSelection(on);
+  if (on) syncVideoControls();
+  schedulePlaybackFrame();
 }
 
 let modeMorphAnimation = null;
@@ -448,10 +450,12 @@ function savePlaybackSession(flush = false) {
     volume: audio.volume, muted: sound.muted, playMode,
     videoMode: pending ? pending.videoMode : videoModeOn(), view: document.body.dataset.view,
   });
-  store.set(PLAYBACK_SESSION_KEY, snapshot);
-  if (api.hasBridge) {
-    if (flush && window.bili.playbackSave) window.bili.playbackSave(snapshot);
-    else window.bili.storeSet?.(PLAYBACK_SESSION_KEY, snapshot);
+  if (api.hasBridge && flush && window.bili.playbackSave) {
+    if (window.bili.playbackSave(snapshot) === false) store.set(PLAYBACK_SESSION_KEY, snapshot);
+  } else if (api.hasBridge && window.bili.storeSet) {
+    window.bili.storeSet(PLAYBACK_SESSION_KEY, snapshot);
+  } else {
+    store.set(PLAYBACK_SESSION_KEY, snapshot);
   }
   playbackSavedAt = Date.now();
 }
@@ -956,8 +960,10 @@ async function getVideoStream(t, quality = settings.vq, force = false) {
 
 function primeVideoStream() {
   const t = state.current;
-  if (t && !t.isLive && t.bvid) {
-    prepareOriginalVideo(t, videoLoadToken).catch(() => {});
+  if (t && !t.isLive && t.bvid && !videoModeOn()) {
+    // videoQualities caches the same signed manifest used by videoUrl.
+    // Leave the media element untouched until the user opens video mode.
+    getVideoQualityOptions(t).catch(() => {});
   }
 }
 
@@ -1063,12 +1069,6 @@ async function prepareOriginalVideo(t, token, force = false) {
     video.dataset.bvid = `${t.bvid}:${t.cid}`;
     video.dataset.ready = 'true';
     syncVideoQualityUI(loadedQuality);
-    // 预热场景顺手把画面预定位到音频当前进度（分切段起点很深时尤其重要），
-    // 避免点开原视频瞬间做远距离 seek，卡在缓冲上被判超时。
-    if (token === videoLoadToken && state.current === t
-        && isFinite(audio.currentTime) && audio.currentTime > 2) {
-      positionPreparedVideo(audio.currentTime, token, 1200).catch(() => {});
-    }
     loadDanmaku(t, token);
     return loadedQuality;
   })();
@@ -1085,8 +1085,8 @@ async function prepareOriginalVideo(t, token, force = false) {
 function scheduleVideoWarmup(t) {
   const token = videoLoadToken;
   const warm = () => {
-    if (token !== videoLoadToken || state.current !== t || videoModeOn() || t.isLive) return;
-    prepareOriginalVideo(t, token).catch(() => {});
+    if (token !== videoLoadToken || state.current !== t || !lyricVisualsVisible()) return;
+    primeVideoStream();
   };
   if ('requestIdleCallback' in window) requestIdleCallback(warm, { timeout: 1200 });
   else setTimeout(warm, 480);
@@ -1154,9 +1154,11 @@ function resetDanmaku(time = 0) {
 }
 
 async function loadDanmaku(t, token) {
-  danmakuItems = settings.danmaku ? await api.danmaku(t.cid).catch(() => []) : [];
-  if (token !== videoLoadToken || state.current !== t) return;
+  const items = settings.danmaku ? await api.danmaku(t.cid).catch(() => []) : [];
+  if (token !== videoLoadToken || state.current !== t || !settings.danmaku) return;
+  danmakuItems = items;
   resetDanmaku(video.currentTime || 0);
+  schedulePlaybackFrame();
 }
 
 function syncDanmaku() {
@@ -2365,6 +2367,7 @@ async function playTrack(t, options = {}) {
   ++videoLoadToken;
   videoPreparePromise = null;
   videoPrepareKey = '';
+  danmakuItems = [];
   videoQualityOptions = [];
   videoQualityOptionsKey = '';
   video.pause();
@@ -2884,7 +2887,9 @@ function scheduleHotCommentRotation(t) {
   };
   hotCommentRotateTimer = setTimeout(rotate, 9000);
   hotCommentFetchTimer = setInterval(() => {
-    if (state.current === t) loadComments(t, { schedule: false, silent: true });
+    if (state.current === t && !document.hidden && document.body.dataset.view === 'playing') {
+      loadComments(t, { schedule: false, silent: true });
+    }
   }, 60000);
 }
 
@@ -2914,6 +2919,7 @@ async function loadComments(t, { schedule = true, silent = false } = {}) {
 let lyrics = [];   // [{ from, to, text, interlude?, tokens?: [{text, t0, t1, timed}] }]
 let lastLi = -1;
 let lyricVisualsDirty = true;
+let lyricRailRendered = false;
 
 function lyricVisualsVisible() {
   return !document.hidden
@@ -3213,33 +3219,33 @@ function layoutLyricRail(anchorIndex, immediate = false) {
   if (immediate || matchMedia('(prefers-reduced-motion: reduce)').matches) box.classList.add('no-motion');
   box.scrollTop = 0;
 
-  const tones = elements.map((el, index) => {
-    const tone = lyricLineTone(index, anchor);
-    el.style.setProperty('--line-scale', tone.scale.toFixed(4));
-    el.style.setProperty('--line-opacity', tone.opacity.toFixed(3));
-    el.style.setProperty('--line-blur', `${tone.blur.toFixed(2)}px`);
-    el.style.setProperty('--line-z', String(tone.z));
-    const distance = index - anchor;
-    const visible = distance >= -LYRIC_VISIBLE_BEFORE && distance <= LYRIC_VISIBLE_AFTER;
-    el.classList.toggle('rail-visible', visible);
-    if (!visible) el.style.setProperty('--line-opacity', '0');
-    // 非活跃行最多两行，超出时底部渐隐（folia getClippedTextMask）
-    const clipped = !el.classList.contains('on') && el.scrollHeight > el.offsetHeight + 1;
-    el.classList.toggle('clipped', clipped);
-    return { ...tone, height: el.offsetHeight };
-  });
-
-  const y = new Array(elements.length).fill(0);
+  // Measure first, then write styles as a batch. Mixing the two forces
+  // Chromium to recalculate layout for each line on every lyric transition.
   const focusCenter = box.clientHeight * .46;
-  y[anchor] = focusCenter - tones[anchor].height * tones[anchor].scale / 2;
+  const heights = elements.map(el => el.offsetHeight);
+  const clipped = elements.map((el, index) => index !== lastLi && el.scrollHeight > heights[index] + 1);
+  const tones = elements.map((_, index) => lyricLineTone(index, anchor));
+  const y = new Array(elements.length);
+  y[anchor] = focusCenter - heights[anchor] * tones[anchor].scale / 2;
   const gapFor = (a, b) => (a === lastLi || b === lastLi ? 18 : 14);
   for (let index = anchor + 1; index < elements.length; index += 1) {
-    y[index] = y[index - 1] + tones[index - 1].height * tones[index - 1].scale + gapFor(index - 1, index);
+    y[index] = y[index - 1] + heights[index - 1] * tones[index - 1].scale + gapFor(index - 1, index);
   }
   for (let index = anchor - 1; index >= 0; index -= 1) {
-    y[index] = y[index + 1] - tones[index].height * tones[index].scale - gapFor(index, index + 1);
+    y[index] = y[index + 1] - heights[index] * tones[index].scale - gapFor(index, index + 1);
   }
-  elements.forEach((el, index) => el.style.setProperty('--line-y', `${y[index].toFixed(2)}px`));
+  elements.forEach((el, index) => {
+    const tone = tones[index];
+    const distance = index - anchor;
+    const visible = distance >= -LYRIC_VISIBLE_BEFORE && distance <= LYRIC_VISIBLE_AFTER;
+    setLyricStyle(el, '--line-scale', tone.scale.toFixed(4));
+    setLyricStyle(el, '--line-opacity', visible ? tone.opacity.toFixed(3) : '0');
+    setLyricStyle(el, '--line-blur', `${tone.blur.toFixed(2)}px`);
+    setLyricStyle(el, '--line-z', String(tone.z));
+    setLyricStyle(el, '--line-y', `${y[index].toFixed(2)}px`);
+    el.classList.toggle('rail-visible', visible);
+    el.classList.toggle('clipped', clipped[index]);
+  });
   if (box.classList.contains('no-motion')) requestAnimationFrame(() => box.classList.remove('no-motion'));
 }
 
@@ -3280,13 +3286,18 @@ function bindLyricScrolling() {
   }, { passive: false });
   if (typeof ResizeObserver !== 'undefined') {
     new ResizeObserver(() => {
-      if (lyrics.length) layoutLyricRail(lyricManualAnchor ?? Math.max(0, lastLi), true);
+      if (lyrics.length && lyricRailRendered && lyricVisualsVisible()) {
+        layoutLyricRail(lyricManualAnchor ?? Math.max(0, lastLi), true);
+      }
     }).observe(box);
   }
 }
 
 function setLyricHint(text) {
   lyrics = [];
+  lastLi = -1;
+  lyricRailRendered = false;
+  lyricVisualsDirty = true;
   lyricManualAnchor = null;
   monetLineStates.clear();
   clearTimeout(lyricManualResetTimer);
@@ -3347,62 +3358,71 @@ async function loadLyrics(t) {
     }
     lyrics = attachLyricInterludes(lines
       .map((line) => ({ ...line, text: cleanLyricText(line.text) }))
-      .filter((line) => line.text)
-      .map((line) => ({ ...line, tokens: buildLineTokens(line.text, line.from, line.to) })));
+      .filter((line) => line.text));
     if (!lyrics.length) {
       setLyricHint('纯音乐 / 该视频暂无有效歌词');
       return;
     }
-    lastLi = -1;
-    monetLineStates.clear();
-    $('lyrics').innerHTML = lyrics.map((l, i) => {
-      const tokensHtml = l.tokens.map((token) => token.timed
-        ? `<span class="lw${l.interlude ? ' lw-dot' : ''}" style="--w-solid:0px;--w-feather:0px;--w-sweep:0px"><span class="lw-base">${esc(token.text)}</span><span class="lw-sweep" aria-hidden="true"><span class="lw-fill">${esc(token.text)}</span></span></span>`
-        : `<span class="lws">${esc(token.text)}</span>`).join('');
-      return `<div class="line${l.interlude ? ' interlude' : ''}" data-li="${i}"><span class="lyric-body">${tokensHtml}</span></div>`;
-    }).join('');
-    // 逐词渲染状态：词元素引用 + 字素宽度测量（字号依赖 .on 放大后的 computed style，延迟到激活时测量）
-    const accentRgb = resolveMonetAccentRgb();
-    $('lyrics').querySelectorAll('.line').forEach((el) => {
-      const index = +el.dataset.li;
-      const line = lyrics[index];
-      const wordEls = [...el.querySelectorAll('.lw')];
-      monetLineStates.set(index, {
-        el,
-        fontPx: 0,
-        edge: 0,
-        accentRgb,
-        tokens: line.tokens.filter((token) => token.timed).map((token, wi) => ({
-          ...token,
-          el: wordEls[wi],
-          base: wordEls[wi].querySelector('.lw-base'),
-          fill: wordEls[wi].querySelector('.lw-fill'),
-          offsets: null,
-          fontSpec: '',
-        })),
-      });
-    });
-    // 点击歌词跳转：分切曲目钳制在段内；视频模式 DASH 双轨必须音视频一起 seek，
-    // 否则只动 video 会被 syncVideoControls 的音视频对齐拉回，画面卡死
-    $('lyrics').querySelectorAll('.line').forEach((el) =>
-      el.addEventListener('click', () => {
-        const l = lyrics[+el.dataset.li];
-        const media = activeMedia();
-        if (!l || !isFinite(media.duration)) return;
-        lyricManualAnchor = null;
-        // 有手动偏移时反推媒体时间，让点击落点与显示的歌词进度一致
-        let target = l.from - lyricOffsetOf(state.current) + 0.01;
-        const seg = state.current;
-        if (seg && seg.isSegment && Number.isFinite(seg.to)) {
-          target = Math.max(seg.from || 0, Math.min(seg.to - 0.05, target));
-        }
-        if (media === video && videoUsesSeparateAudio()) seekVideoTimeline(target);
-        else { try { media.currentTime = target; } catch (err) {} }
-      }));
     syncLyric(true);
   } catch (e) {
     if (state.current === t) setLyricHint('歌词加载失败');
   }
+}
+
+// Hidden playback only needs the line timeline; tokenize an individual line
+// for desktop lyrics, or the full rail on the first visible frame.
+function lyricTokens(line) {
+  return line.tokens ||= buildLineTokens(line.text, line.from, line.to);
+}
+
+function renderLyricRail() {
+  monetLineStates.clear();
+  $('lyrics').innerHTML = lyrics.map((l, i) => {
+    const tokensHtml = lyricTokens(l).map((token) => token.timed
+      ? `<span class="lw${l.interlude ? ' lw-dot' : ''}" style="--w-solid:0px;--w-feather:0px;--w-sweep:0px"><span class="lw-base">${esc(token.text)}</span><span class="lw-sweep" aria-hidden="true"><span class="lw-fill">${esc(token.text)}</span></span></span>`
+      : `<span class="lws">${esc(token.text)}</span>`).join('');
+    return `<div class="line${l.interlude ? ' interlude' : ''}" data-li="${i}"><span class="lyric-body">${tokensHtml}</span></div>`;
+  }).join('');
+  // 逐词渲染状态：词元素引用 + 字素宽度测量（字号依赖 .on 放大后的 computed style，延迟到激活时测量）
+  const accentRgb = resolveMonetAccentRgb();
+  const lineEls = $('lyrics').querySelectorAll('.line');
+  lineEls.forEach((el) => {
+    const index = +el.dataset.li;
+    const line = lyrics[index];
+    const wordEls = [...el.querySelectorAll('.lw')];
+    monetLineStates.set(index, {
+      el,
+      fontPx: 0,
+      edge: 0,
+      accentRgb,
+      tokens: line.tokens.filter((token) => token.timed).map((token, wi) => ({
+        ...token,
+        el: wordEls[wi],
+        base: wordEls[wi].querySelector('.lw-base'),
+        fill: wordEls[wi].querySelector('.lw-fill'),
+        offsets: null,
+        fontSpec: '',
+      })),
+    });
+  });
+  // 点击歌词跳转：分切曲目钳制在段内；视频模式 DASH 双轨必须音视频一起 seek，
+  // 否则只动 video 会被 syncVideoControls 的音视频对齐拉回，画面卡死
+  lineEls.forEach((el) =>
+    el.addEventListener('click', () => {
+      const l = lyrics[+el.dataset.li];
+      const media = activeMedia();
+      if (!l || !isFinite(media.duration)) return;
+      lyricManualAnchor = null;
+      // 有手动偏移时反推媒体时间，让点击落点与显示的歌词进度一致
+      let target = l.from - lyricOffsetOf(state.current) + 0.01;
+      const seg = state.current;
+      if (seg && seg.isSegment && Number.isFinite(seg.to)) {
+        target = Math.max(seg.from || 0, Math.min(seg.to - 0.05, target));
+      }
+      if (media === video && videoUsesSeparateAudio()) seekVideoTimeline(target);
+      else { try { media.currentTime = target; } catch (err) {} }
+    }));
+  lyricRailRendered = true;
 }
 
 function syncLyric(force) {
@@ -3412,15 +3432,22 @@ function syncLyric(force) {
   if (!visible && !deskLyricOn) { lyricVisualsDirty = true; return; }
   // 同步时钟 = 播放时间 + 该曲目的手动歌词偏移
   const cur = activeMedia().currentTime + lyricOffsetOf(state.current);
-  let idx = -1;
-  for (let i = 0; i < lyrics.length; i++) {
-    if (lyrics[i].from <= cur + 0.05) idx = i;
-    else break;
+  let idx = lastLi;
+  const threshold = cur + 0.05;
+  if ((idx >= 0 && !(lyrics[idx]?.from <= threshold)) || lyrics[idx + 1]?.from <= threshold) {
+    let lo = 0, hi = lyrics.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (lyrics[mid].from <= threshold) lo = mid + 1;
+      else hi = mid;
+    }
+    idx = lo - 1;
   }
   const changed = idx !== lastLi;
   lastLi = idx;
   if (changed || force) pushDeskLyric(idx >= 0 ? lyrics[idx] : null);
   if (!visible) { lyricVisualsDirty = true; return; }
+  if (!lyricRailRendered) renderLyricRail();
   if (idx >= 0) {
     // 活跃行逐词扫光；上一行保留发光尾部衰减
     updateMonetLineWords(idx, cur, true);
@@ -3454,7 +3481,7 @@ function pushDeskLyric(line) {
     interlude: !!line.interlude,
     from: line.from,
     to: line.to,
-    tokens: (line.tokens || []).map((tk) => ({ text: tk.text, t0: tk.t0, t1: tk.t1, timed: !!tk.timed })),
+    tokens: lyricTokens(line).map((tk) => ({ text: tk.text, t0: tk.t0, t1: tk.t1, timed: !!tk.timed })),
     time: isFinite(media.currentTime) ? media.currentTime + lyricOffsetOf(state.current) : 0,
     playing: !media.paused,
     accent: resolveMonetAccentRgb(),
@@ -3558,14 +3585,24 @@ function segmentRange(t) {
 // 拖动进度条期间：timeupdate 不刷新进度 UI，避免与指针位置打架
 let progressDragging = false;
 
+function setPlaybackText(id, value) {
+  const el = $(id);
+  if (el.textContent !== value) el.textContent = value;
+}
+
+function setPlaybackAttribute(id, name, value) {
+  const el = $(id);
+  if (el.getAttribute(name) !== value) el.setAttribute(name, value);
+}
+
 function syncProgress(media = activeMedia()) {
   if (media !== activeMedia()) return;
   let dur = media.duration || 0;
   let cur = media.currentTime || 0;
   if (!isFinite(dur)) {
     // 直播：进度条常亮，时长显示 LIVE
-    $('ppCur').textContent = fmt(cur);
-    $('ppDur').textContent = 'LIVE';
+    setPlaybackText('ppCur', fmt(cur));
+    setPlaybackText('ppDur', 'LIVE');
     $('ppFill').style.width = '100%';
     return;
   }
@@ -3580,9 +3617,9 @@ function syncProgress(media = activeMedia()) {
     cur = Math.max(0, cur - seg.from);
   }
   if (!progressDragging) {
-    $('ppCur').textContent = fmt(cur);
+    setPlaybackText('ppCur', fmt(cur));
     if (dur) {
-      $('ppDur').textContent = fmt(dur);
+      setPlaybackText('ppDur', fmt(dur));
       $('ppFill').style.width = (cur / dur * 100).toFixed(2) + '%';
       const ring = $('ringPg');
       if (ring) ring.style.strokeDasharray = `${(cur / dur * 132).toFixed(1)} 132`;
@@ -3614,7 +3651,7 @@ function bindMediaEvents(media) {
     if (media !== activeMedia()) return;
     const seg = segmentRange(state.current);
     const d = seg ? seg.to - seg.from : media.duration;
-    $('ppDur').textContent = isFinite(d) ? fmt(d) : 'LIVE';
+    setPlaybackText('ppDur', isFinite(d) ? fmt(d) : 'LIVE');
   });
   media.addEventListener('play', syncToggleIcon);
   media.addEventListener('pause', syncToggleIcon);
@@ -3662,15 +3699,16 @@ function syncVideoControls() {
   const duration = videoTimelineDuration();
   const current = videoTimelineCurrent();
   $('vFill').style.width = duration ? `${Math.min(100, current / duration * 100)}%` : '0%';
-  $('vTime').textContent = `${fmt(current)} / ${duration ? fmt(duration) : 'LIVE'}`;
-  $('vTrack').setAttribute('aria-valuemax', String(Math.round(duration)));
-  $('vTrack').setAttribute('aria-valuenow', String(Math.round(current)));
-  $('vTrack').setAttribute('aria-valuetext', `${fmt(current)} / ${duration ? fmt(duration) : '00:00'}`);
-  $('vVideoIcPlay').style.display = video.paused ? '' : 'none';
-  $('vVideoIcPause').style.display = video.paused ? 'none' : '';
+  const currentLabel = fmt(current), durationLabel = duration ? fmt(duration) : '';
+  setPlaybackText('vTime', `${currentLabel} / ${durationLabel || 'LIVE'}`);
+  setPlaybackAttribute('vTrack', 'aria-valuemax', String(Math.round(duration)));
+  setPlaybackAttribute('vTrack', 'aria-valuenow', String(Math.round(current)));
+  setPlaybackAttribute('vTrack', 'aria-valuetext', `${currentLabel} / ${durationLabel || '00:00'}`);
+  setLyricStyle($('vVideoIcPlay'), 'display', video.paused ? '' : 'none');
+  setLyricStyle($('vVideoIcPause'), 'display', video.paused ? 'none' : '');
   $('vPlay').classList.toggle('on', !video.paused);
-  $('vPlay').setAttribute('aria-pressed', String(!video.paused));
-  $('vPlay').title = video.paused ? '播放' : '暂停';
+  setPlaybackAttribute('vPlay', 'aria-pressed', String(!video.paused));
+  setPlaybackAttribute('vPlay', 'title', video.paused ? '播放' : '暂停');
   // DASH 双轨播放时音频是稳定时间轴，视频画面追随音频，避免拖动后被旧视频时间反向覆盖。
   if (videoUsesSeparateAudio() && !video.paused && !audio.paused
       && Math.abs(video.currentTime - current) > .28) {
@@ -3810,7 +3848,9 @@ function bindVideoControls() {
     }
     syncVideoOptionButtons();
   });
-  ['timeupdate', 'loadedmetadata', 'play', 'pause', 'durationchange'].forEach((event) => video.addEventListener(event, syncVideoControls));
+  ['timeupdate', 'loadedmetadata', 'play', 'pause', 'durationchange'].forEach((event) => {
+    video.addEventListener(event, () => { if (videoModeOn()) syncVideoControls(); });
+  });
   ['timeupdate', 'loadedmetadata', 'durationchange'].forEach((event) => audio.addEventListener(event, () => {
     if (videoModeOn() && videoUsesSeparateAudio()) syncVideoControls();
   }));
@@ -3848,33 +3888,70 @@ function handleSegmentEnd(media, seg) {
   next(true);
 }
 
-// timeupdate 频率较低，歌词扫光用 rAF 补齐到屏幕刷新率。
-let deskTickAt = 0;
-function lyricFrame() {
+// Keep animation work tied to visible playback or a precise segment boundary.
+let playbackFrame = 0;
+let deskClockTime = NaN;
+let deskClockPlaying = false;
+function syncDeskClock() {
+  if (!deskLyricOn || !api.hasBridge || !window.bili.lyricLine) return;
   const media = activeMedia();
-  // 段尾提前检测（见 handleSegmentEnd 注释）
-  const segNow = state.current && segmentRange(state.current);
-  if (segNow && segHandledToken !== videoLoadToken && !media.paused && !media.ended
-      && isFinite(media.currentTime) && media.currentTime >= segNow.to - 0.06) {
-    handleSegmentEnd(media, segNow);
-  }
-  const visualsVisible = lyricVisualsVisible();
-  if (!visualsVisible) lyricVisualsDirty = true;
-  if (lyrics.length && (!media.paused || (visualsVisible && lyricVisualsDirty))) syncLyric();
-  syncDanmaku();
-  // 桌面歌词时钟：150ms 一次对齐播放位置，扫光由歌词窗本地插值渲染
-  const now = performance.now();
-  if (deskLyricOn && api.hasBridge && now - deskTickAt > 150) {
-    deskTickAt = now;
-    window.bili.lyricLine({
-      tick: true,
-      time: isFinite(media.currentTime) ? media.currentTime : 0,
-      playing: !media.paused,
-    });
-  }
-  requestAnimationFrame(lyricFrame);
+  const time = Number.isFinite(media.currentTime) ? media.currentTime + lyricOffsetOf(state.current) : 0;
+  const playing = !media.paused && !media.ended;
+  if (time === deskClockTime && playing === deskClockPlaying) return;
+  deskClockTime = time;
+  deskClockPlaying = playing;
+  window.bili.lyricLine({ tick: true, time, playing });
 }
-requestAnimationFrame(lyricFrame);
+
+function danmakuFramesNeeded() {
+  return !document.hidden && document.body.dataset.view === 'playing'
+    && videoModeOn() && settings.danmaku && !video.paused && !video.ended
+    && danmakuCursor < danmakuItems.length;
+}
+
+function schedulePlaybackFrame() {
+  const visible = lyricVisualsVisible();
+  if (!visible) lyricVisualsDirty = true;
+  if (playbackFrame) return;
+  const media = activeMedia();
+  const playing = !media.paused && !media.ended;
+  const segment = playing && segHandledToken !== videoLoadToken && segmentRange(state.current);
+  if (segment || danmakuFramesNeeded() || (visible && (playing || !spectrumSettled || (lyrics.length && lyricVisualsDirty)))) {
+    playbackFrame = requestAnimationFrame(lyricFrame);
+  }
+}
+
+function lyricFrame(now) {
+  playbackFrame = 0;
+  const media = activeMedia();
+  const seg = !media.paused && !media.ended && segHandledToken !== videoLoadToken && segmentRange(state.current);
+  if (seg && Number.isFinite(media.currentTime) && media.currentTime >= seg.to - .06) handleSegmentEnd(media, seg);
+  if (lyricVisualsVisible()) {
+    if (lyrics.length && (!media.paused || lyricVisualsDirty)) syncLyric();
+    renderSpectrum(now);
+  }
+  if (danmakuFramesNeeded()) syncDanmaku();
+  schedulePlaybackFrame();
+}
+
+function bindPlaybackVisuals() {
+  const refresh = (event) => {
+    if (event.target !== activeMedia()) return;
+    if (event.type !== 'timeupdate') schedulePlaybackFrame();
+    if (event.type === 'seeked') syncLyric();
+    syncDeskClock();
+  };
+  for (const media of [audio, video, liveVideo]) {
+    for (const type of ['play', 'pause', 'seeked', 'ended', 'playing', 'timeupdate']) {
+      media.addEventListener(type, refresh);
+    }
+  }
+  document.addEventListener('visibilitychange', schedulePlaybackFrame);
+  new MutationObserver(schedulePlaybackFrame).observe(document.body, {
+    attributes: true, attributeFilter: ['data-view', 'data-player-sheet'],
+  });
+  schedulePlaybackFrame();
+}
 
 /* ---------- 底部频谱：Web Audio 实时频域数据，受限时自动回退到时间轴呼吸 ---------- */
 const SPECTRUM_BARS = 112;
@@ -3897,7 +3974,7 @@ function initSpectrum() {
   }
   box.replaceChildren(frag);
   spectrumEls = [...box.children];
-  requestAnimationFrame(renderSpectrum);
+  bindPlaybackVisuals();
 }
 
 function activateSpectrum() {
@@ -3928,11 +4005,11 @@ function activateSpectrum() {
 
 function renderSpectrum(now) {
   // 112 根柱子每帧两次样式写入只在歌词页可见时执行，音频链路不受影响。
-  if (!lyricVisualsVisible()) { requestAnimationFrame(renderSpectrum); return; }
+  if (!lyricVisualsVisible()) return;
   const media = activeMedia();
   const playing = !!media && !media.paused && !media.ended;
   if (playing) spectrumSettled = false;
-  if (spectrumSettled) { requestAnimationFrame(renderSpectrum); return; }
+  if (spectrumSettled) return;
   if (spectrumReady && spectrumAnalyser && spectrumData) spectrumAnalyser.getByteFrequencyData(spectrumData);
   let measuredEnergy = 0;
   if (spectrumData) {
@@ -3947,9 +4024,10 @@ function renderSpectrum(now) {
     const band = spectrumData
       ? spectrumData[Math.min(spectrumData.length - 1, Math.floor(2 + Math.pow(x, 1.72) * spectrumData.length * .72))] / 255
       : 0;
-    const breathing = (.34 + .34 * Math.sin(t * 2.15 + i * .31) + .18 * Math.sin(t * 4.6 - i * .17));
     const envelope = .34 + .66 * Math.pow(Math.sin(Math.PI * x), .55);
-    const signal = !playing ? 0 : (useFallback ? Math.max(.05, breathing) * .48 : Math.pow(band, .72));
+    const signal = !playing ? 0 : useFallback
+      ? Math.max(.05, .34 + .34 * Math.sin(t * 2.15 + i * .31) + .18 * Math.sin(t * 4.6 - i * .17)) * .48
+      : Math.pow(band, .72);
     const target = .025 + signal * envelope * .96;
     spectrumLevels[i] += (target - spectrumLevels[i]) * (target > spectrumLevels[i] ? .38 : .12);
     if (spectrumLevels[i] > maxLevel) maxLevel = spectrumLevels[i];
@@ -3958,7 +4036,6 @@ function renderSpectrum(now) {
   });
   // 未播放且所有柱都回落到基线附近后进入空闲态，停止每帧 DOM 写入
   if (!playing && maxLevel < 0.028) spectrumSettled = true;
-  requestAnimationFrame(renderSpectrum);
 }
 
 // 进度定位：按比例跳转（分切曲目映射到段内；DASH 双轨模式音视频一起定位）
@@ -6205,10 +6282,11 @@ function init() {
 
 // 启动时先恢复 likes / 自建歌单 / 历史：主进程 JSON 仓优先，文件没有时回退 localStorage 并迁移过去
 (async () => {
-  let playbackSession = store.get(PLAYBACK_SESSION_KEY, null);
+  let playbackSession;
   if (api.hasBridge && window.bili.storeGet) {
-    try { playbackSession = await window.bili.storeGet(PLAYBACK_SESSION_KEY) ?? playbackSession; } catch (e) {}
+    try { playbackSession = await window.bili.storeGet(PLAYBACK_SESSION_KEY); } catch (e) {}
   }
+  playbackSession ??= store.get(PLAYBACK_SESSION_KEY, null);
   await loadBuckets(); // 游客命名空间（登录后 renderAuth 会切到账号桶）
   init();
   initPlaybackSession();

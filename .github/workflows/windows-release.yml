@@ -22,7 +22,7 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci
-      - run: node --test test/cloud-runtime.test.cjs test/app-updates.test.cjs
+      - run: node --test test/cloud-runtime.test.cjs test/app-updates.test.cjs test/desktop-store.test.cjs
       - run: npm run dist:win -- --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
@@ -31,7 +31,7 @@ jobs:
       - name: Verify Windows bundle and launch
         shell: pwsh
         run: |
-          node -e "const a=require('@electron/asar'),assert=require('assert/strict'); const files=a.listPackage('dist/win-unpacked/resources/app.asar').map(p=>p.replaceAll(String.fromCharCode(92),'/')); assert(files.includes('/web-dist/index.html')); assert(files.includes('/renderer/recommendation-profile.js'));"
+          node -e "const a=require('@electron/asar'),assert=require('assert/strict'); const files=a.listPackage('dist/win-unpacked/resources/app.asar').map(p=>p.replaceAll(String.fromCharCode(92),'/')); for(const file of ['/web-dist/index.html','/desktop-store.js','/renderer/desktop-sync-worker.js']) assert(files.includes(file),file); assert(require('fs').existsSync('dist/win-unpacked/resources/app-update.yml'));"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $app = Start-Process -FilePath '.\dist\win-unpacked\Biu Player.exe' -PassThru
           try {

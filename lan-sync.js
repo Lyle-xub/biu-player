@@ -2,10 +2,32 @@ const http = require('node:http');
 const os = require('node:os');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
-const { normalize, reconcile, libraryCount, profileCount, privateIPv4 } = require('./renderer/library-sync');
+const { normalize, privateIPv4 } = require('./renderer/library-sync');
+const { normalize: normalizeProfile } = require('./renderer/recommendation-profile');
+const { computeDesktopSync } = require('./renderer/desktop-sync-worker');
 
 const digest = (value) => crypto.createHash('md5').update(value).digest('hex');
 const revision = (library) => digest(JSON.stringify(normalize(library)));
+function createSyncLibraryReader(readStore) {
+  // Main-process storage replaces bucket values; unrelated writes (including
+  // playback position) must not invalidate the network's library snapshot.
+  const snapshots = new Map();
+  return scope => {
+    const suffix = scope ? `@${scope}` : '';
+    const store = readStore();
+    const likes = store[`biu-likes${suffix}`], library = store[`biu-library${suffix}`];
+    const playlists = store[`biu-playlists${suffix}`], profile = store[`biu-recommendation-profiles${suffix}`];
+    const previous = snapshots.get(scope);
+    if (previous && previous.likes === likes && previous.library === library
+      && previous.playlists === playlists && previous.profile === profile) return previous.value;
+    const recommendation = previous && previous.profile === profile ? previous.value.recommendation : normalizeProfile(profile);
+    const value = { version: 1, likes: likes || [], library: library || [], playlists: playlists || [], recommendation };
+    snapshots.delete(scope);
+    snapshots.set(scope, { likes, library, playlists, profile, value });
+    if (snapshots.size > 4) snapshots.delete(snapshots.keys().next().value);
+    return value;
+  };
+}
 function lanInterfaces(networks = os.networkInterfaces()) {
   return Object.entries(networks).flatMap(([name, entries]) => {
     // TUN/TAP may have RFC1918 addresses too; they must not become LAN endpoints.
@@ -55,8 +77,19 @@ function advertiseBonjour(options, onError, Bonjour = require('bonjour-service')
 // The account tag matches local app accounts; it is not proof of Bilibili
 // identity. No Bilibili credentials leave a device. Use on a trusted LAN.
 function createLanSync({ readLibrary, writeLibrary, cloudKeyStatus, exchangeCloudKey, onStatus = () => {},
-  deviceId = crypto.randomUUID(), host = '0.0.0.0', publish = advertise, interfaces = lanInterfaces, syncDiscovery = false }) {
-  const supportedLibrary = (value) => normalize(value, { discovery: syncDiscovery });
+  deviceId = crypto.randomUUID(), host = '0.0.0.0', publish = advertise, interfaces = lanInterfaces,
+  syncDiscovery = false, compute = computeDesktopSync, stableLibrary = false }) {
+  const options = { discovery: syncDiscovery };
+  const revisions = new WeakMap();
+  function libraryRevision(value) {
+    if (stableLibrary && revisions.has(value)) return revisions.get(value);
+    const job = Promise.resolve(compute('lanRevision', value, options));
+    if (stableLibrary) {
+      revisions.set(value, job);
+      job.catch(() => revisions.delete(value));
+    }
+    return job;
+  }
   let session = null, server = null, unpublish = null, generation = 0;
   let enabled = true, scope = '', error = '';
   const status = () => ({ enabled, active: !!session, error, signedIn: !!scope,
@@ -86,9 +119,10 @@ function createLanSync({ readLibrary, writeLibrary, cloudKeyStatus, exchangeClou
     const current = { scope, network, token: crypto.randomBytes(32).toString('hex'), receipts: new Map(), lastSeen: 0 };
     const keyPair = exchangeCloudKey && crypto.generateKeyPairSync('x25519');
     const publicKey = keyPair && Buffer.from(keyPair.publicKey.export({format:'jwk'}).x,'base64url').toString('hex');
+    const envelope = { version: 2, account: current.scope, deviceId };
     const send = (res, code, data) => {
       res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-      res.end(JSON.stringify({ version: 2, account: current.scope, deviceId, ...data }));
+      res.end(typeof data === 'string' ? data : JSON.stringify({ ...envelope, ...data }));
     };
     const nextServer = http.createServer(async (req, res) => {
       try {
@@ -102,7 +136,9 @@ function createLanSync({ readLibrary, writeLibrary, cloudKeyStatus, exchangeClou
         current.lastSeen = Date.now();
         if (req.method === 'GET' && req.url === '/v2/status') {
           const cloud = cloudKeyStatus?.(current.scope);
-          return send(res, 200, { revision: revision(supportedLibrary(readLibrary(current.scope))), discoveryProfiles: syncDiscovery,
+          const latest = await libraryRevision(readLibrary(current.scope));
+          if (session !== current || res.destroyed) return;
+          return send(res, 200, { revision: latest, discoveryProfiles: syncDiscovery,
             ...(cloud && keyPair ? {cloudKey:{version:1,publicKey,channel:cloud.channel}} : {}) });
         }
         if (req.method !== 'POST' || !['/v2/sync', '/v2/ack', '/v2/cloud-key'].includes(req.url)) return send(res, 404, { error: '同步接口不存在' });
@@ -113,9 +149,10 @@ function createLanSync({ readLibrary, writeLibrary, cloudKeyStatus, exchangeClou
           if (req.url !== '/v2/sync' && length > 16384) { req.resume(); return send(res, 413, { error: '同步控制请求过大' }); }
           chunks.push(chunk);
         }
-        const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-        if (session !== current) return send(res, 410, { error: '同步连接已关闭' });
-        if (!/^[\w-]{8,80}$/.test(body.clientId || '')) return send(res, 400, { error: '设备标识无效' });
+        const bytes = Buffer.concat(chunks, length);
+        const body = req.url === '/v2/sync' ? null : JSON.parse(bytes.toString('utf8'));
+        if (session !== current || res.destroyed) return;
+        if (req.url !== '/v2/sync' && !/^[\w-]{8,80}$/.test(body?.clientId || '')) return send(res, 400, { error: '设备标识无效' });
         if (req.url === '/v2/cloud-key') {
           if(!keyPair || !cloudKeyStatus?.(current.scope))return send(res,409,{error:'云同步尚未就绪'});
           if(!/^[a-f0-9]{64}$/.test(body.publicKey || '') || !/^[a-f0-9]{24}$/.test(body.nonce || '')
@@ -143,15 +180,20 @@ function createLanSync({ readLibrary, writeLibrary, cloudKeyStatus, exchangeClou
           current.lastSync = Date.now(); current.counts = receipt.counts;
           announce(); return send(res, 200, { revision: receipt.revision });
         }
-        const before = supportedLibrary(readLibrary(current.scope));
-        const result = reconcile(body.base ? supportedLibrary(body.base) : null, before, supportedLibrary(body.library));
-        if (JSON.stringify(before) !== JSON.stringify(result)) writeLibrary(current.scope, result, before);
-        const receipt = { id: crypto.randomUUID(), revision: revision(result),
-          counts: { likes: result.likes.length, library: libraryCount(result),
-            playlists: result.playlists.length, profiles: profileCount(result) } };
-        if (current.receipts.size >= 64) current.receipts.delete(current.receipts.keys().next().value);
-        current.receipts.set(body.clientId, receipt);
-        send(res, 200, { revision: receipt.revision, receipt: receipt.id, library: result });
+        const id = crypto.randomUUID();
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const local = readLibrary(current.scope);
+          const result = await compute('lanMerge', bytes, local, options, { ...envelope, receipt: id });
+          if (session !== current || res.destroyed) return;
+          // IPC or another peer may have changed the library while the worker
+          // was merging. Rebase before persisting so those edits are not lost.
+          if (stableLibrary && readLibrary(current.scope) !== local) continue;
+          if (result.changed) writeLibrary(current.scope, result.library, result.before);
+          if (current.receipts.size >= 64) current.receipts.delete(current.receipts.keys().next().value);
+          current.receipts.set(result.clientId, { id, revision: result.revision, counts: result.counts });
+          return send(res, 200, result.reply);
+        }
+        send(res, 409, { error: '本地音乐库正在更新，请重试同步' });
       } catch (e) {
         if (!res.headersSent && !res.destroyed) send(res, 400, { error: e.message || '同步失败' });
       }
@@ -184,4 +226,4 @@ function createLanSync({ readLibrary, writeLibrary, cloudKeyStatus, exchangeClou
   }
   return { configure, stop, status };
 }
-module.exports = { createLanSync, revision, lanInterfaces, advertiseNative, advertiseBonjour };
+module.exports = { createLanSync, createSyncLibraryReader, revision, lanInterfaces, advertiseNative, advertiseBonjour };

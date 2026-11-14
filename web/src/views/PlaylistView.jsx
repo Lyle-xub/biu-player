@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useDeferredValue, useLayoutEffect, useEffect, useMemo, useRef, useState } from 'react';
 import { useSlice } from '../store.js';
 import { TrackList } from './TrackList.jsx';
 
@@ -21,6 +21,8 @@ const collectionSorts = [
   { key: 'artist-asc', label: 'UP 主', direction: '正序' },
   { key: 'artist-desc', label: 'UP 主', direction: '逆序' },
 ];
+const collator = new Intl.Collator('zh-CN');
+const emptyTracks = [];
 
 /* 歌单详情视图：DOM 与事件由组件拥有，controller 只 publish('playlist', ...) 数据。
  * plTitleEdit/plDescEdit 的 value 回填 / focus / keydown 仍由 controller 经 $() 管理，
@@ -32,6 +34,7 @@ export default function PlaylistView() {
   const collection = !!(pl && (pl.isLikes || pl.isMusicLibrary));
   const collectionKey = pl && (pl.isLikes ? 'likes' : pl.isMusicLibrary ? 'library' : 'other');
   const [query, setQuery] = useState('');
+  const deferredQuery = useDeferredValue(query);
   const [sort, setSort] = useState('added-desc');
   const [sortOpen, setSortOpen] = useState(false);
   const sortMenu = useRef(null);
@@ -45,25 +48,29 @@ export default function PlaylistView() {
   }, [sortOpen]);
   const selectedSort = collectionSorts.find((item) => item.key === sort) || collectionSorts[0];
   const visibleTracks = useMemo(() => {
-    const source = pl?.tracks || [];
+    const source = pl?.tracks || emptyTracks;
     if (!collection) return source;
-    const keyword = query.trim().toLocaleLowerCase();
-    let next = source.map((track, index) => ({ track, index })).filter(({ track }) => !keyword
-      || `${track.title || ''} ${track.up || ''}`.toLocaleLowerCase().includes(keyword));
+    const keyword = deferredQuery.trim().toLocaleLowerCase();
     const [field, direction] = sort.split('-');
     const sign = direction === 'desc' ? -1 : 1;
-    if (field === 'added') next.sort((a, b) => {
-      const at = Number(a.track.addedAt) || 0, bt = Number(b.track.addedAt) || 0;
-      if (at && bt) return sign * (at - bt);
-      if (at || bt) return sign * (at ? 1 : -1);
-      return sign * (b.index - a.index);
-    });
-    next = next.map(({ track }) => track);
-    if (field === 'title') next = [...next].sort((a, b) => sign * String(a.title || '').localeCompare(String(b.title || ''), 'zh-CN'));
-    else if (field === 'artist') next = [...next].sort((a, b) => sign * String(a.up || '').localeCompare(String(b.up || ''), 'zh-CN'));
+    const matches = (track) => !keyword || `${track.title || ''} ${track.up || ''}`.toLocaleLowerCase().includes(keyword);
+    if (field === 'added') {
+      const next = [];
+      for (let i = 0; i < source.length; i++) {
+        if (matches(source[i])) next.push({ track: source[i], index: i, addedAt: Number(source[i].addedAt) || 0 });
+      }
+      return next.sort((a, b) => {
+        if (a.addedAt && b.addedAt) return sign * (a.addedAt - b.addedAt);
+        if (a.addedAt || b.addedAt) return sign * (a.addedAt ? 1 : -1);
+        return sign * (b.index - a.index);
+      }).map(({ track }) => track);
+    }
+    const next = source.filter(matches);
+    const sortKey = field === 'artist' ? 'up' : 'title';
+    next.sort((a, b) => sign * collator.compare(a[sortKey] || '', b[sortKey] || ''));
     return next;
-  }, [collection, pl?.tracks, query, sort]);
-  useEffect(() => {
+  }, [collection, pl?.tracks, deferredQuery, sort]);
+  useLayoutEffect(() => {
     if (collection) window.biuActions?.setPlaylistViewTracks(visibleTracks);
   }, [collection, visibleTracks]);
   return (
@@ -143,7 +150,8 @@ export default function PlaylistView() {
           tracks={visibleTracks}
           current={pl ? pl.current : null}
           editable={!!(pl && pl.editable)}
-          listHint={query && !visibleTracks.length ? '没有找到匹配的歌曲' : (pl ? pl.listHint : null)}
+          editing={editing && !!pl?.customId}
+          listHint={deferredQuery && !visibleTracks.length ? '没有找到匹配的歌曲' : (pl ? pl.listHint : null)}
           onPlay={(i) => A.setQueue(visibleTracks, pl.title || '', i)}
           onDelete={(i) => A.plDeleteTrack(i)} />
       </div>

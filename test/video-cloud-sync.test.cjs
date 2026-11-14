@@ -17,12 +17,30 @@ function backend(){
     runtime:{ensure:async()=>{},run:async(req,signal,event)=>{if(signal.aborted)throw Error('aborted');if(req.operation==='encode'){const id=crypto.randomBytes(16).toString('hex');data.set(id,req.library);return {snapshotId:id};}fs.mkdirSync(path.dirname(req.output),{recursive:true});fs.writeFileSync(req.output,JSON.stringify(data.get(req.snapshotId)));event({type:'symbol',symbols:7,needed:7});return {passed:true};}}
   };
 }
-function device(t,b,initial=lib([1]),syncDiscovery=true,waitForForeground=()=>{},now=Date.now) {
+function device(t,b,initial=lib([1]),syncDiscovery=true,waitForForeground=()=>{},now=Date.now,options={}) {
   const directory=fs.mkdtempSync(path.join(os.tmpdir(),'biu-cloud-'));let library=normalize(initial),account='123';
-  const service=createVideoCloudSync({now,syncDiscovery,waitForForeground,directory,api:b.api,runtime:b.runtime,auth:async()=>({isLogin:true,mid:account}),readLibrary:()=>library,writeLibrary:(_,value)=>{library=value;},protect:s=>'protected:'+s,unprotect:s=>s.slice(10)});
+  const service=createVideoCloudSync({now,syncDiscovery,waitForForeground,directory,api:b.api,runtime:b.runtime,auth:async()=>({isLogin:true,mid:account}),readLibrary:()=>library,writeLibrary:(_,value)=>{library=value;},protect:s=>'protected:'+s,unprotect:s=>s.slice(10),...options});
   t.after(()=>{service.stop();fs.rmSync(directory,{recursive:true,force:true});});
   return {service,directory,get library(){return library;},set library(v){library=normalize(v);},set account(v){account=v;}};
 }
+test('desktop cloud restore runs normalization in a worker and does not overwrite intervening library edits', async t => {
+  const b = backend(), source = device(t, b);
+  await source.service.setAccount('123'); await source.service.configure({ enabled: true }); await source.service.run();
+  const worker = require('../renderer/desktop-sync-worker').createDesktopSyncCompute();
+  let merges = 0;
+  const receiver = device(t, b, lib([2]), false, undefined, Date.now, { stableLibrary: true,
+    compute: async (operation, ...args) => {
+      const result = await worker(operation, ...args);
+      if (operation === 'libraryReconcile' && ++merges === 1) receiver.library = lib([2, 3]);
+      return result;
+    },
+  });
+  await receiver.service.setAccount('123'); await receiver.service.importRecovery(source.service.exportRecovery());
+  await receiver.service.run(true);
+  assert.equal(merges, 2);
+  assert.deepEqual(receiver.library.likes.map(track => track.bvid), ['BV2', 'BV3', 'BV1']);
+  assert.ok(receiver.service.status().lastSync > 0);
+});
 test('worker read failures preserve cloud configuration and allow retry without claiming corruption', async t => {
   const b = backend(), a = device(t, b);
   await a.service.setAccount('123');

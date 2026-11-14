@@ -11,7 +11,7 @@ async function atomic(file, raw) {
   else fs.writeFileSync(file+'.tmp',raw,{mode:0o600});
   fs.renameSync(file+'.tmp',file);
 }
-function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writeLibrary, protect, unprotect, onStatus=()=>{}, now=Date.now, syncDiscovery=true, waitForForeground=()=>{} }) {
+function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writeLibrary, protect, unprotect, onStatus=()=>{}, now=Date.now, syncDiscovery=true, waitForForeground=()=>{}, stableLibrary=false }) {
   const normalizeData = (...args) => compute ? compute('libraryNormalize', ...args) : Promise.resolve(normalize(...args));
   const mergeData = (...args) => compute ? compute('libraryReconcile', ...args) : Promise.resolve(reconcile(...args));
   const digest = value => compute ? compute('libraryFingerprint', value) : Promise.resolve(fingerprint(value));
@@ -221,12 +221,22 @@ function createVideoCloudSync({ directory, api, runtime, auth, readLibrary, writ
           catch(e){if(signal.aborted)throw e;emit({type:'fallback',message:'当前快照尚不可读，尝试上一分 P'});continue;}
           if(signal.aborted || scope!==ownScope)throw new Error('同步已停止');
           await waitForForeground(signal);
-          const local=await normalizeData(await readLibrary(scope));
           const common=archive.meta.parentSnapshotId && config.history?.[archive.meta.parentSnapshotId] || config.base || null;
-          const merged=await mergeData(common,local,remote);
-          const filtered=await normalizeData(merged,{discovery:syncDiscovery}),base=await normalizeData(local,{discovery:syncDiscovery});
-          if(signal.aborted || scope!==ownScope)throw new Error('同步已停止');
-          await writeLibrary(scope,filtered,base);
+          let merged;
+          for(let attempt=0;;attempt++) {
+            const input=await readLibrary(scope);
+            const local=await normalizeData(input);
+            merged=await mergeData(common,local,remote);
+            const filtered=await normalizeData(merged,{discovery:syncDiscovery}),base=await normalizeData(local,{discovery:syncDiscovery});
+            if(signal.aborted || scope!==ownScope)throw new Error('同步已停止');
+            // Desktop IPC/LAN may replace the snapshot while the worker is busy.
+            if(stableLibrary && readLibrary(scope)!==input) {
+              if(attempt>=2)throw new Error('本地音乐库正在更新，请重试同步');
+              continue;
+            }
+            await writeLibrary(scope,filtered,base);
+            break;
+          }
           config.base=remote;config.baseSnapshotId=part.snapshotId;config.baseSequence=part.sequence;remember(part.snapshotId,remote);
           config.activeBvid=archive.bvid;
           recordSuccess(part.snapshotId===archive.meta.snapshotId ? config.intervalHours*HOUR : 60000);

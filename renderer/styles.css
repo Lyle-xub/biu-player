@@ -115,8 +115,9 @@ body {
   position: fixed; inset: -13%; z-index: 0; pointer-events: none;
   opacity: 0; transform: scale(1.12) translate3d(0,0,0);
   transition: opacity .6s var(--ease);
-  /* 隐藏时也保留动画时间轴，进出播放页不从第零帧重新定位。 */
+  /* 隐藏时暂停合成，返回播放页从原位置继续。 */
   animation: backdrop-drift 12.5s cubic-bezier(.42,.04,.48,.96) infinite;
+  animation-play-state: paused;
 }
 .art-backdrop {
   position: absolute; inset: 0;
@@ -127,6 +128,7 @@ body {
   background-position: center; background-size: cover; background-repeat: no-repeat; }
 body[data-view="playing"] .art-backdrop-drift {
   opacity: .88;
+  animation-play-state: running;
 }
 body[data-view="playing"] .backdrop { opacity: .22; }
 @keyframes backdrop-drift {

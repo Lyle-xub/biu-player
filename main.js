@@ -6,7 +6,8 @@ const crypto = require('crypto');
 const QRCode = require('qrcode');
 const { create: createAuthSession, decode: decodeAuth, NAV: AUTH_NAV } = require('./renderer/auth-session');
 const { saveVideo } = require('./video-download');
-const { createLanSync } = require('./lan-sync');
+const { createLanSync, createSyncLibraryReader } = require('./lan-sync');
+const { createDesktopSyncCompute } = require('./renderer/desktop-sync-worker');
 const { createVideoCloudSync } = require('./video-cloud-sync');
 const { createVideoRuntime } = require('./cloud-video-runtime');
 const { createBiliVideoApi } = require('./cloud-video-bili');
@@ -454,47 +455,45 @@ app.whenReady().then(() => {
      之前存在 Chromium localStorage，渲染进程被强杀导致 leveldb 损坏时
      Chromium 会整库删除重建，数据全丢。改为 userData 下独立 JSON：
      写临时文件再原子替换 + .bak 冗余，崩溃也不会留半个文件。 */
-  let biuStoreCache = null;
-  const biuStoreFile = () => path.join(app.getPath('userData'), 'biu-store.json');
-  const readBiuStore = () => {
-    if (biuStoreCache) return biuStoreCache;
-    try { biuStoreCache = JSON.parse(fs.readFileSync(biuStoreFile(), 'utf8')); } catch (e) {
-      // 主文件损坏时回退 .bak
-      try { biuStoreCache = JSON.parse(fs.readFileSync(biuStoreFile() + '.bak', 'utf8')); } catch (e2) { biuStoreCache = {}; }
+  const { createStoreWriter, readJsonStore } = require('./desktop-store');
+  const storeFile = path.join(app.getPath('userData'), 'biu-store.json');
+  const playbackFile = path.join(app.getPath('userData'), 'biu-playback.json');
+  const playbackKey = 'biu-playback-session';
+  let biuStoreCache, playbackCache;
+  const readBiuStore = () => biuStoreCache ??= readJsonStore(storeFile, {});
+  const readPlayback = () => {
+    // Leave the legacy value available until the first dedicated file is saved.
+    if (playbackCache === undefined) {
+      playbackCache = readJsonStore(playbackFile, null) ?? readBiuStore()[playbackKey] ?? null;
     }
-    if (!biuStoreCache || typeof biuStoreCache !== 'object') biuStoreCache = {};
-    return biuStoreCache;
+    return playbackCache;
   };
-  let biuStoreTimer = null;
-  const flushBiuStore = () => {
-    clearTimeout(biuStoreTimer);
-    biuStoreTimer = null;
-    if (!biuStoreCache) return true;
-    try {
-      const f = biuStoreFile();
-      const body = JSON.stringify(biuStoreCache);
-      fs.writeFileSync(f + '.tmp', body);
-      fs.renameSync(f + '.tmp', f);
-      fs.writeFileSync(f + '.bak', body);
-      return true;
-    } catch (e) { return false; }
+  const reportStoreError = error => console.warn('本地数据保存失败:', error.code || error.message);
+  const storeWriter = createStoreWriter(storeFile, readBiuStore, { onError: reportStoreError });
+  const playbackWriter = createStoreWriter(playbackFile, readPlayback, { onError: reportStoreError });
+  const flushBiuStore = () => storeWriter.flush();
+  const scheduleBiuStoreWrite = () => storeWriter.changed();
+  const flushPendingStores = () => {
+    storeWriter.flushPending();
+    playbackWriter.flushPending();
   };
-  const scheduleBiuStoreWrite = () => {
-    clearTimeout(biuStoreTimer);
-    biuStoreTimer = setTimeout(flushBiuStore, 300);
-  };
-  app.on('will-quit', flushBiuStore);
+  app.on('will-quit', flushPendingStores);
   ipcMain.on('playback:save', (event, snapshot) => {
-    readBiuStore()['biu-playback-session'] = snapshot;
-    event.returnValue = flushBiuStore();
+    playbackCache = snapshot;
+    event.returnValue = playbackWriter.flush();
   });
   ipcMain.handle('store:get', (_e, key) => {
-    const v = readBiuStore()[String(key)];
+    const v = key === playbackKey ? readPlayback() : readBiuStore()[String(key)];
     return v === undefined ? null : v;
   });
   ipcMain.on('store:set', (_e, key, val) => {
-    readBiuStore()[String(key)] = val;
-    scheduleBiuStoreWrite();
+    if (key === playbackKey) {
+      playbackCache = val;
+      playbackWriter.changed();
+    } else {
+      readBiuStore()[String(key)] = val;
+      scheduleBiuStoreWrite();
+    }
   });
 
   const updates = require('./app-updates').createAppUpdates({
@@ -506,7 +505,7 @@ app.whenReady().then(() => {
       if (!flushBiuStore()) throw new Error('更新设置保存失败');
     },
     notify: value => { if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('app-update:status', value); },
-    beforeInstall: () => { quitting = true; flushBiuStore(); },
+    beforeInstall: () => { quitting = true; flushPendingStores(); },
   });
   for (const action of ['status', 'check', 'download', 'configure', 'install', 'activity']) {
     ipcMain.handle(`app-update:${action}`, (event, value) => {
@@ -516,16 +515,14 @@ app.whenReady().then(() => {
   }
 
   const savedSync = readBiuStore();
-  if (!savedSync['biu-lan-device']) savedSync['biu-lan-device'] = require('node:crypto').randomUUID();
+  if (!savedSync['biu-lan-device']) {
+    savedSync['biu-lan-device'] = crypto.randomUUID();
+    scheduleBiuStoreWrite();
+  }
   let lanScope = '';
   let lanEnabled = savedSync['biu-lan-auto'] !== false;
-  scheduleBiuStoreWrite();
-  const readSyncLibrary = (scope) => {
-      const suffix = scope ? `@${scope}` : '';
-      const saved = readBiuStore();
-      return { version: 1, likes: saved[`biu-likes${suffix}`] || [], library: saved[`biu-library${suffix}`] || [], playlists: saved[`biu-playlists${suffix}`] || [],
-        recommendation: require('./renderer/recommendation-profile').normalize(saved[`biu-recommendation-profiles${suffix}`]) };
-    };
+  const computeSync = createDesktopSyncCompute();
+  const readSyncLibrary = createSyncLibraryReader(readBiuStore);
   const writeSyncLibrary = (scope, library, base) => {
       library = require('./renderer/library-sync').normalize(library, { discovery: false });
       const suffix = scope ? `@${scope}` : '';
@@ -538,6 +535,7 @@ app.whenReady().then(() => {
     };
   const lanSync = createLanSync({
     deviceId: savedSync['biu-lan-device'],
+    compute: computeSync, stableLibrary: true,
     readLibrary: readSyncLibrary,
     writeLibrary: writeSyncLibrary,
     cloudKeyStatus: scope => videoCloud.lanKeyStatus(scope),
@@ -547,7 +545,10 @@ app.whenReady().then(() => {
     },
   });
   const cloudSource = app.isPackaged ? path.join(process.resourcesPath, 'cloud-video') : path.join(__dirname, 'cloud-video');
-  const cloudRuntime = createVideoRuntime({ source: cloudSource, runtime: app.isPackaged ? path.join(cloudSource, 'runtime') : path.join(__dirname, 'dist/cloud-runtime') });
+  const cloudRuntime = createVideoRuntime({
+    source: cloudSource, runtime: app.isPackaged ? path.join(cloudSource, 'runtime') : path.join(__dirname, 'dist/cloud-runtime'),
+    stringify: request => computeSync('stringify', request),
+  });
   const cloudApi = createBiliVideoApi({
     request: (url, options) => biliFetch(url, { ...options, noFallback: options?.method && options.method !== 'GET' }),
     uploadFetch: (url, options) => net.fetch(url, { ...options, headers: { ...options.headers, 'User-Agent': UA, Referer: REFERER } }),
@@ -555,7 +556,7 @@ app.whenReady().then(() => {
     coverFile: path.join(cloudSource, 'cover.png'),
   });
   const videoCloud = createVideoCloudSync({
-    syncDiscovery: false,
+    syncDiscovery: false, compute: computeSync, stableLibrary: true,
     directory: path.join(app.getPath('userData'), 'video-cloud'), api: cloudApi, runtime: cloudRuntime,
     auth: getAuthStatus, readLibrary: readSyncLibrary, writeLibrary: writeSyncLibrary,
     protect: text => { if (!safeStorage.isEncryptionAvailable()) throw new Error('系统密钥保护不可用'); return safeStorage.encryptString(text).toString('base64'); },

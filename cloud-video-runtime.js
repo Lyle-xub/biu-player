@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 
-function createVideoRuntime({ source, runtime = path.join(source, 'runtime') }) {
+function createVideoRuntime({ source, runtime = path.join(source, 'runtime'), stringify = JSON.stringify }) {
   const windows = process.platform === 'win32';
   const python = path.join(runtime, windows ? 'python/python.exe' : 'python/bin/python3');
   const ffmpeg = path.join(runtime, windows ? 'ffmpeg.exe' : 'ffmpeg');
@@ -54,7 +54,7 @@ function createVideoRuntime({ source, runtime = path.join(source, 'runtime') }) 
   async function run(request, signal, onEvent) {
     await ensure(signal, onEvent);
     let result, failure;
-    try { await command(python, [...pythonArgs, path.join(source, 'worker.py')], signal, JSON.stringify(request), line => {
+    try { await command(python, [...pythonArgs, path.join(source, 'worker.py')], signal, await stringify(request), line => {
       let event; try { event = JSON.parse(line); } catch { return; }
       if (event.type === 'result') result = event;
       else if (event.type === 'error') failure = event.message;

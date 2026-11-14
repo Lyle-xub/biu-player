@@ -39,7 +39,7 @@ function harness(file) {
     }
     return nodes.get(id);
   };
-  const metrics = { my: 0, rec: 0, ranking: 0, feed: 0, transitions: 0, skipped: 0 };
+  const metrics = { my: 0, rec: 0, ranking: 0, feed: 0, transitions: 0, skipped: 0, playingResets: 0 };
   const api = {
     hasBridge: true,
     ranking: async () => { metrics.ranking++; return [track('rank')]; },
@@ -60,10 +60,11 @@ function harness(file) {
     },
     Date: class extends Date { static now() { return clock.now; } },
     matchMedia: () => ({ matches: false }), setTimeout() {},
-    setVideoTheater() {}, setLiveTheater() {}, setVideoMode() {}, closePanel() {},
+    setVideoTheater() {}, setLiveTheater() {}, setVideoMode() { metrics.playingResets++; }, closePanel() {},
     refreshLikeUI() {}, refreshMusicLibraryUI() {}, renderMyPlaylists: () => { metrics.my++; },
     setShelfCover() {}, toast() {}, esc: (value) => String(value),
-    publish() {}, renderRec: () => { metrics.rec++; },
+    publish: (name, value) => { if (name === 'lib.rec') node('grid-rec').textContent = value.hint; },
+    renderRec: () => { metrics.rec++; },
   });
   function $(id) { return node(id); }
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../renderer/player-sheet-motion.js'), 'utf8'), context);
@@ -130,7 +131,7 @@ for (const file of ['renderer/app.js', 'web/src/legacy/controller.js']) {
     assert.equal(h.metrics.feed, 0); assert.equal(h.metrics.ranking, 0);
     h.context.recommendationProfiles.recommend = async () => { throw new Error('推荐请求暂时被 B 站限制'); };
     await h.context.loadLibrary({ force: true });
-    assert.match(h.node('grid-rec').innerHTML, /B 站限制/);
+    assert.match(file.startsWith('web') ? h.node('grid-rec').textContent : h.node('grid-rec').innerHTML, /B 站限制/);
     h.context.recommendationProfiles.recommend = async () => [];
     h.context.recommendationProfiles.isStrict = async () => false;
     await h.context.loadLibrary({ force: true });
@@ -165,7 +166,7 @@ for (const file of ['renderer/app.js', 'web/src/legacy/controller.js']) {
     assert.equal(h.metrics.feed, 1);
     wait.resolve([track('first')]);
     await Promise.all([first, again]);
-    assert.equal(h.metrics.rec, 2);
+    assert.equal(h.metrics.rec, file.startsWith('web') ? 1 : 2);
   });
 
   test(`${file}: network retries do not rebuild the local playlist grid`, async () => {
@@ -210,7 +211,7 @@ for (const file of ['renderer/app.js', 'web/src/legacy/controller.js']) {
     old.resolve([track('old-account')]);
     await first;
     assert.equal(h.context.state.recommendations[0].bvid, 'new-account');
-    assert.equal(h.metrics.rec, 2);
+    assert.equal(h.metrics.rec, file.startsWith('web') ? 1 : 2);
   });
 
   test(`${file}: returning preserves homepage scroll and skips loading-style transitions`, () => {
@@ -265,3 +266,38 @@ for (const file of ['renderer/app.js', 'web/src/legacy/controller.js']) {
     assert.equal(h.metrics.feed, 1);
   });
 }
+
+test('desktop renders the feed before ranking and appends late profile matches in place', async () => {
+  const h = harness('web/src/legacy/controller.js');
+  const ranking = deferred(), profile = deferred();
+  h.api.ranking = () => ranking.promise;
+  h.api.recommendMusic = async () => ['first', 'second', 'third', 'fourth'].map(track);
+  h.context.recommendationProfiles.recommend = () => profile.promise;
+  const pending = h.context.loadLibrary();
+  await new Promise(setImmediate);
+  const feed = h.context.state.recommendations;
+  assert.deepEqual(Array.from(feed, t => t.bvid), ['first', 'second', 'third', 'fourth']);
+  assert.equal(h.metrics.rec, 1);
+  h.node('.view-library').scrollTop = 350;
+  profile.resolve([track('first'), track('profile')]);
+  await pending;
+  assert.equal(h.context.state.recommendations, feed);
+  assert.deepEqual(Array.from(feed, t => t.bvid), ['first', 'second', 'third', 'fourth', 'profile']);
+  assert.equal(h.node('.view-library').scrollTop, 350);
+  ranking.resolve([track('rank')]);
+  await new Promise(setImmediate);
+  assert.deepEqual(Array.from(h.context.state.ranking, t => t.bvid), ['rank']);
+  assert.equal(h.metrics.rec, 2);
+});
+
+test('switching between desktop browsing pages leaves the media mode alone', () => {
+  const h = harness('web/src/legacy/controller.js');
+  h.context.go('fav');
+  h.context.go('playlist');
+  h.context.go('search');
+  assert.equal(h.metrics.playingResets, 0);
+  h.context.go('playing');
+  h.context.go('library');
+  h.context.window.BiuPlayerSheetMotion.cancel();
+  assert.equal(h.metrics.playingResets, 1);
+});

@@ -5,7 +5,7 @@ import { GridRadio, LiveFollows } from './views/RadioView.jsx';
 import PlaylistView from './views/PlaylistView.jsx';
 import { SearchResults } from './views/SearchView.jsx';
 import UpView from './views/UpView.jsx';
-import { QueueList } from './views/QueueList.jsx';
+import { QueueList, locateQueueRow } from './views/QueueList.jsx';
 import { FavPopList } from './views/FavPopList.jsx';
 import { PlPopList } from './views/PlPopList.jsx';
 import { NpInfo, NpCover, HotComment, CmtList, VQualMenu, VDetail, PpLike } from './views/PlayingView.jsx';
@@ -436,7 +436,7 @@ function QueueDrawer() {
           <span className="close" onClick={() => window.biuUi?.closePanel()}><svg width="14" height="14" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" fill="none"><path d="M6 6l12 12M18 6L6 18"/></svg></span>
         </header>
         <QueueList />
-        <footer><span id="qMode">列表循环</span><span id="qClear">清空队列</span><span id="qLocate">定位当前</span></footer>
+        <footer><span id="qMode">列表循环</span><span id="qClear">清空队列</span><span id="qLocate" onClick={() => locateQueueRow(document.getElementById('qlist'))}>定位当前</span></footer>
       </aside>
     </>
   );

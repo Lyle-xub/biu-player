@@ -1,6 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { createLanSync } = require('../lan-sync');
+const { createLanSync, createSyncLibraryReader, revision } = require('../lan-sync');
+const { createDesktopSyncCompute } = require('../renderer/desktop-sync-worker');
 const { merge, reconcile, normalize, endpoint } = require('../renderer/library-sync');
 const song = (id, extra = {}) => ({ bvid: `BV${id}`, title: `Song ${id}`, cid: id, ...extra });
 const library = (likes = [], playlists = []) => ({ version: 1, likes, playlists });
@@ -21,6 +22,7 @@ test('desktop sync applies shared main profiles while excluding mobile discovery
   const source = fs.readFileSync(require.resolve('../main'), 'utf8');
   let failure = false, notification;
   const context = vm.createContext({
+    createSyncLibraryReader,
     require: (name) => name === './renderer/recommendation-profile' ? R : { normalize },
     biuStoreCache: {}, readBiuStore() { return context.biuStoreCache; }, flushBiuStore: () => !failure,
     mainWin: { isDestroyed: () => false, webContents: { send: (_, data) => { notification = data; } } },
@@ -42,6 +44,45 @@ test('desktop sync applies shared main profiles while excluding mobile discovery
   assert.deepEqual(context.read('456').recommendation.profiles, []);
   assert.deepEqual(context.read('').recommendation.profiles, []);
   assert.deepEqual(reconcile(incoming, incoming, library()), incoming, 'a snapshot without discovery does not erase it on mobile');
+});
+
+test('desktop LAN status reuses one revision until the library changes, and a worker merge keeps intervening edits', async t => {
+  const store = { 'biu-likes@123': [song(1)] };
+  const readLibrary = createSyncLibraryReader(() => store);
+  const worker = createDesktopSyncCompute();
+  let advertised, hashes = 0, merges = 0;
+  const service = createLanSync({ host: '127.0.0.1', deviceId: 'desktop-test', stableLibrary: true,
+    publish: options => { advertised = options; return () => {}; },
+    readLibrary,
+    writeLibrary: (_, next) => { store['biu-likes@123'] = next.likes; },
+    compute: async (operation, ...args) => {
+      if (operation === 'lanRevision') hashes++;
+      const result = await worker(operation, ...args);
+      if (operation === 'lanMerge' && ++merges === 1) store['biu-likes@123'] = [song(1), song(3)];
+      return result;
+    },
+  });
+  t.after(() => service.stop());
+  await service.configure('123');
+  const request = async (endpoint, body) => {
+    const response = await fetch(`http://127.0.0.1:${advertised.port}/v2/${endpoint}`, {
+      method: body ? 'POST' : 'GET', headers: { Authorization: 'Bearer ' + advertised.txt.token, 'X-Biu-Account': '123' },
+      ...(body ? { body: JSON.stringify({ clientId: 'phone-test', ...body }) } : {}),
+    });
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+  const statuses = await Promise.all(Array.from({ length: 8 }, () => request('status')));
+  assert.ok(statuses.every(s => s.revision === revision(readLibrary('123'))));
+  store['biu-playback-session'] = { position: 30 };
+  await request('status'); assert.equal(hashes, 1);
+  const merged = await request('sync', { base: readLibrary('123'), library: library([song(2)]) });
+  assert.ok(merges > 1);
+  assert.deepEqual(merged.library.likes.map(x => x.bvid), ['BV2', 'BV3']);
+  assert.equal(merged.revision, revision(merged.library));
+  assert.equal((await request('status')).revision, merged.revision);
+  assert.equal(hashes, 2);
+  assert.equal((await request('ack', { receipt: merged.receipt })).revision, merged.revision);
 });
 
 test('library merge is idempotent, keeps segment identity and empty playlists, and only transfers library fields', () => {
